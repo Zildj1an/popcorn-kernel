@@ -1,0 +1,3664 @@
+# The actual patch starts here.
+diff --git a/arch/arm64/configs/defconfig b/arch/arm64/configs/defconfig
+index c9a57d1..7aff83b 100644
+--- a/arch/arm64/configs/defconfig
++++ b/arch/arm64/configs/defconfig
+@@ -541,6 +541,7 @@ CONFIG_MMC_DW_EXYNOS=y
+ CONFIG_MMC_DW_HI3798CV200=y
+ CONFIG_MMC_DW_K3=y
+ CONFIG_MMC_DW_ROCKCHIP=y
++CONFIG_MMC_DW_BLUEFIELD=y
+ CONFIG_MMC_SUNXI=y
+ CONFIG_MMC_BCM2835=y
+ CONFIG_MMC_SDHCI_XENON=y
+diff --git a/drivers/mmc/core/mmc.c b/drivers/mmc/core/mmc.c
+index 55997cf..046e92e 100644
+--- a/drivers/mmc/core/mmc.c
++++ b/drivers/mmc/core/mmc.c
+@@ -381,10 +381,17 @@ static int mmc_decode_ext_csd(struct mmc_card *card, u8 *ext_csd)
+ 		}
+ 	}
+ 
+-	np = mmc_of_find_child_device(card->host, 0);
+-	if (np && of_device_is_compatible(np, "mmc-card"))
+-		broken_hpi = of_property_read_bool(np, "broken-hpi");
+-	of_node_put(np);
++	/* Check broken-hpi configuration. */
++	if (card->host->parent) {
++		broken_hpi = device_property_read_bool(card->host->parent,
++						       "broken-hpi");
++	}
++	if (!broken_hpi) {
++		np = mmc_of_find_child_device(card->host, 0);
++		if (np && of_device_is_compatible(np, "mmc-card"))
++			broken_hpi = of_property_read_bool(np, "broken-hpi");
++		of_node_put(np);
++	}
+ 
+ 	/*
+ 	 * The EXT_CSD format is meant to be forward compatible. As long
+diff --git a/drivers/mmc/host/dw_mmc.c b/drivers/mmc/host/dw_mmc.c
+index 80dc2fd..e8b3e57 100644
+--- a/drivers/mmc/host/dw_mmc.c
++++ b/drivers/mmc/host/dw_mmc.c
+@@ -231,11 +231,36 @@ static bool dw_mci_ctrl_reset(struct dw_mci *host, u32 reset)
+ 	return true;
+ }
+ 
+-static void dw_mci_wait_while_busy(struct dw_mci *host, u32 cmd_flags)
++static void dw_mci_wait_while_busy(struct dw_mci *host, u32 cmd_flags,
++				   struct dw_mci_slot *slot)
+ {
+ 	u32 status;
+ 
+ 	/*
++	 * Only one memory card should be selected at a time for command or data
++	 * transfer. For example, when a data transfer from a card occurs, a new
++	 * command should not be sent to another card; within the same card, a
++	 * new command is allowed to read the status, or to stop or abort the
++	 * current data transfer.
++	 */
++	status = mci_readl(host, CMD);
++	if (SDMMC_GET_CARD_NUM(status) != slot->id) {
++		/* Check the last command of the other card. */
++		if (readl_poll_timeout_atomic(host->regs + SDMMC_CMD,
++					      status,
++					      !(status & SDMMC_CMD_START),
++					      10, 500 * USEC_PER_MSEC))
++			dev_err(host->dev, "Busy; trying anyway\n");
++
++		/* Check the busy state of the other card. */
++		if (readl_poll_timeout_atomic(host->regs + SDMMC_STATUS,
++					      status,
++					      !(status & SDMMC_STATUS_BUSY),
++					      10, 500 * USEC_PER_MSEC))
++			dev_err(host->dev, "STATUS busy; trying anyway\n");
++	}
++
++	/*
+ 	 * Databook says that before issuing a new data transfer command
+ 	 * we need to check to see if the card is busy.  Data transfer commands
+ 	 * all have SDMMC_CMD_PRV_DAT_WAIT set, so we'll key off that.
+@@ -260,12 +285,13 @@ static void mci_send_cmd(struct dw_mci_slot *slot, u32 cmd, u32 arg)
+ 
+ 	mci_writel(host, CMDARG, arg);
+ 	wmb(); /* drain writebuffer */
+-	dw_mci_wait_while_busy(host, cmd);
+-	mci_writel(host, CMD, SDMMC_CMD_START | cmd);
++	dw_mci_wait_while_busy(host, cmd, slot);
++	mci_writel(host, CMD, SDMMC_CMD_START | cmd |
++		   SDMMC_CMD_CARD_NUM(slot->id));
+ 
+ 	if (readl_poll_timeout_atomic(host->regs + SDMMC_CMD, cmd_status,
+ 				      !(cmd_status & SDMMC_CMD_START),
+-				      1, 500 * USEC_PER_MSEC))
++				      1, 1000 * USEC_PER_MSEC))
+ 		dev_err(&slot->mmc->class_dev,
+ 			"Timeout sending command (cmd %#x arg %#x status %#x)\n",
+ 			cmd, arg, cmd_status);
+@@ -426,9 +452,10 @@ static void dw_mci_start_command(struct dw_mci *host,
+ 
+ 	mci_writel(host, CMDARG, cmd->arg);
+ 	wmb(); /* drain writebuffer */
+-	dw_mci_wait_while_busy(host, cmd_flags);
++	dw_mci_wait_while_busy(host, cmd_flags, host->slot);
+ 
+-	mci_writel(host, CMD, cmd_flags | SDMMC_CMD_START);
++	mci_writel(host, CMD, cmd_flags | SDMMC_CMD_START |
++		   SDMMC_CMD_CARD_NUM(host->slot->id));
+ 
+ 	/* response expected command only */
+ 	if (cmd_flags & SDMMC_CMD_RESP_EXP)
+@@ -1222,11 +1249,23 @@ static void dw_mci_submit_data(struct dw_mci *host, struct mmc_data *data)
+ static void dw_mci_setup_bus(struct dw_mci_slot *slot, bool force_clkinit)
+ {
+ 	struct dw_mci *host = slot->host;
+-	unsigned int clock = slot->clock;
++	unsigned int clock = slot->clock, old_clock;
+ 	u32 div;
+-	u32 clk_en_a;
++	u32 clk_en_a, ctype;
+ 	u32 sdmmc_cmd_bits = SDMMC_CMD_UPD_CLK | SDMMC_CMD_PRV_DAT_WAIT;
+ 
++	/* Wait for any pending commands. */
++	dw_mci_wait_while_busy(host, 0, slot);
++
++	/* Save the information for other slots. */
++	clk_en_a = mci_readl(host, CLKENA) &
++		~((SDMMC_CLKEN_ENABLE | SDMMC_CLKEN_LOW_PWR) << slot->id);
++	ctype = mci_readl(host, CTYPE) & ~(0x10001 << slot->id);
++
++	/* Only one clock is used in MMC-Ver3.3-only mode. */
++	old_clock = (host->card_type == DW_CARD_TYPE_MMC_ONLY) ?
++			host->current_speed : slot->__clk_old;
++
+ 	/* We must continue to set bit 28 in CMD until the change is complete */
+ 	if (host->state == STATE_WAITING_CMD11_DONE)
+ 		sdmmc_cmd_bits |= SDMMC_CMD_VOLT_SWITCH;
+@@ -1234,9 +1273,9 @@ static void dw_mci_setup_bus(struct dw_mci_slot *slot, bool force_clkinit)
+ 	slot->mmc->actual_clock = 0;
+ 
+ 	if (!clock) {
+-		mci_writel(host, CLKENA, 0);
++		mci_writel(host, CLKENA, clk_en_a);
+ 		mci_send_cmd(slot, sdmmc_cmd_bits, 0);
+-	} else if (clock != host->current_speed || force_clkinit) {
++	} else if (clock != old_clock || force_clkinit) {
+ 		div = host->bus_hz / clock;
+ 		if (host->bus_hz % clock && host->bus_hz > clock)
+ 			/*
+@@ -1269,11 +1308,13 @@ static void dw_mci_setup_bus(struct dw_mci_slot *slot, bool force_clkinit)
+ 
+ 		/* disable clock */
+ 		mci_writel(host, CLKENA, 0);
+-		mci_writel(host, CLKSRC, 0);
+ 
+ 		/* inform CIU */
+ 		mci_send_cmd(slot, sdmmc_cmd_bits, 0);
+ 
++		/* set clock source */
++		mci_writel(host, CLKSRC, 0);
++
+ 		/* set clock to desired speed */
+ 		mci_writel(host, CLKDIV, div);
+ 
+@@ -1281,7 +1322,7 @@ static void dw_mci_setup_bus(struct dw_mci_slot *slot, bool force_clkinit)
+ 		mci_send_cmd(slot, sdmmc_cmd_bits, 0);
+ 
+ 		/* enable clock; only low power if no SDIO */
+-		clk_en_a = SDMMC_CLKEN_ENABLE << slot->id;
++		clk_en_a |= SDMMC_CLKEN_ENABLE << slot->id;
+ 		if (!test_bit(DW_MMC_CARD_NO_LOW_PWR, &slot->flags))
+ 			clk_en_a |= SDMMC_CLKEN_LOW_PWR << slot->id;
+ 		mci_writel(host, CLKENA, clk_en_a);
+@@ -1298,7 +1339,11 @@ static void dw_mci_setup_bus(struct dw_mci_slot *slot, bool force_clkinit)
+ 	host->current_speed = clock;
+ 
+ 	/* Set the current slot bus width */
+-	mci_writel(host, CTYPE, (slot->ctype << slot->id));
++	if (slot->ctype == SDMMC_CTYPE_8BIT)
++		ctype |= 0x10000 << slot->id;
++	else
++		ctype |= slot->ctype << slot->id;
++	mci_writel(host, CTYPE, ctype);
+ }
+ 
+ static void __dw_mci_start_request(struct dw_mci *host,
+@@ -1312,6 +1357,7 @@ static void __dw_mci_start_request(struct dw_mci *host,
+ 	mrq = slot->mrq;
+ 
+ 	host->mrq = mrq;
++	host->slot = slot;
+ 
+ 	host->pending_events = 0;
+ 	host->completed_events = 0;
+@@ -2630,20 +2676,30 @@ static void dw_mci_cmd_interrupt(struct dw_mci *host, u32 status)
+ 
+ static void dw_mci_handle_cd(struct dw_mci *host)
+ {
+-	struct dw_mci_slot *slot = host->slot;
++	int i;
++	struct dw_mci_slot *slot;
++	unsigned long delay = 0;
+ 
+-	if (slot->mmc->ops->card_event)
+-		slot->mmc->ops->card_event(slot->mmc);
+-	mmc_detect_change(slot->mmc,
+-		msecs_to_jiffies(host->pdata->detect_delay_ms));
++	for (i = 0; i < host->num_slots; i++) {
++		slot = host->slots[i];
++		if (slot == NULL)
++			continue;
++		if (slot->mmc->ops->card_event)
++			slot->mmc->ops->card_event(slot->mmc);
++		mmc_detect_change(slot->mmc,
++			msecs_to_jiffies(host->pdata->detect_delay_ms) +
++			delay);
++		delay += 2 * HZ;
++	}
+ }
+ 
+ static irqreturn_t dw_mci_interrupt(int irq, void *dev_id)
+ {
+ 	struct dw_mci *host = dev_id;
+ 	u32 pending;
+-	struct dw_mci_slot *slot = host->slot;
++	struct dw_mci_slot *slot;
+ 	unsigned long irqflags;
++	int i;
+ 
+ 	pending = mci_readl(host, MINTSTS); /* read-only mask reg */
+ 
+@@ -2731,11 +2787,16 @@ static irqreturn_t dw_mci_interrupt(int irq, void *dev_id)
+ 			dw_mci_handle_cd(host);
+ 		}
+ 
+-		if (pending & SDMMC_INT_SDIO(slot->sdio_id)) {
+-			mci_writel(host, RINTSTS,
+-				   SDMMC_INT_SDIO(slot->sdio_id));
+-			__dw_mci_enable_sdio_irq(slot, 0);
+-			sdio_signal_irq(slot->mmc);
++		for (i = 0; i < host->num_slots; i++) {
++			slot = host->slots[i];
++			if (slot == NULL)
++				continue;
++			if (pending & SDMMC_INT_SDIO(slot->sdio_id)) {
++				mci_writel(host, RINTSTS,
++					   SDMMC_INT_SDIO(slot->sdio_id));
++				__dw_mci_enable_sdio_irq(slot, 0);
++				sdio_signal_irq(slot->mmc);
++			}
+ 		}
+ 
+ 	}
+@@ -2817,7 +2878,43 @@ static int dw_mci_init_slot_caps(struct dw_mci_slot *slot)
+ 	return 0;
+ }
+ 
+-static int dw_mci_init_slot(struct dw_mci *host)
++static void mmc_parse_slot_cfg(struct mmc_host *mmc)
++{
++	struct dw_mci_slot *slot = mmc_priv(mmc);
++	struct fwnode_handle *child;
++	u32 bus_width, id;
++
++	/* Find the node for this card. */
++	device_for_each_child_node(mmc->parent, child) {
++		if (!fwnode_property_read_u32(child, "reg", &id) &&
++		    id == slot->id)
++			break;
++	}
++
++	if (!child)
++		return;
++
++	if (!fwnode_property_read_u32(child, "bus-width", &bus_width)) {
++		switch (bus_width) {
++		case 8:
++			/* Hosts capable of 8-bit can also do 4 bits. */
++			mmc->caps |= MMC_CAP_8_BIT_DATA | MMC_CAP_4_BIT_DATA;
++			break;
++		case 4:
++			/* 4 bits only. */
++			mmc->caps &= ~MMC_CAP_8_BIT_DATA;
++			mmc->caps |= MMC_CAP_4_BIT_DATA;
++			break;
++		default:
++			break;
++		}
++	}
++
++	if (fwnode_property_read_bool(child, "disable-wp"))
++		mmc->caps2 |= MMC_CAP2_NO_WRITE_PROTECT;
++}
++
++static int dw_mci_init_slot(struct dw_mci *host, unsigned int id)
+ {
+ 	struct mmc_host *mmc;
+ 	struct dw_mci_slot *slot;
+@@ -2828,11 +2925,11 @@ static int dw_mci_init_slot(struct dw_mci *host)
+ 		return -ENOMEM;
+ 
+ 	slot = mmc_priv(mmc);
+-	slot->id = 0;
++	slot->id = id;
+ 	slot->sdio_id = host->sdio_id0 + slot->id;
+ 	slot->mmc = mmc;
+ 	slot->host = host;
+-	host->slot = slot;
++	host->slots[id] = slot;
+ 
+ 	mmc->ops = &dw_mci_ops;
+ 
+@@ -2844,10 +2941,14 @@ static int dw_mci_init_slot(struct dw_mci *host)
+ 	if (!mmc->ocr_avail)
+ 		mmc->ocr_avail = MMC_VDD_32_33 | MMC_VDD_33_34;
+ 
++	/* Parse common configuration. */
+ 	ret = mmc_of_parse(mmc);
+ 	if (ret)
+ 		goto err_host_allocated;
+ 
++	/* Check per-slot configuration. */
++	mmc_parse_slot_cfg(mmc);
++
+ 	ret = dw_mci_init_slot_caps(slot);
+ 	if (ret)
+ 		goto err_host_allocated;
+@@ -2897,7 +2998,7 @@ static void dw_mci_cleanup_slot(struct dw_mci_slot *slot)
+ {
+ 	/* Debugfs stuff is cleaned up by mmc core */
+ 	mmc_remove_host(slot->mmc);
+-	slot->host->slot = NULL;
++	slot->host->slots[slot->id] = NULL;
+ 	mmc_free_host(slot->mmc);
+ }
+ 
+@@ -3133,6 +3234,12 @@ static struct dw_mci_board *dw_mci_parse_dt(struct dw_mci *host)
+ 			return ERR_PTR(-EPROBE_DEFER);
+ 	}
+ 
++ 	/* find out number of slots supported */
++	if (device_property_read_u32(dev, "num-slots", &pdata->num_slots) ||
++	    pdata->num_slots > DW_MMC_SLOT_NUM)
++		pdata->num_slots = DW_MMC_SLOT_NUM;
++	host->num_slots = pdata->num_slots;
++
+ 	if (device_property_read_u32(dev, "fifo-depth", &pdata->fifo_depth))
+ 		dev_info(dev,
+ 			 "fifo-depth property not found, using value of FIFOTH register as default\n");
+@@ -3166,29 +3273,37 @@ static struct dw_mci_board *dw_mci_parse_dt(struct dw_mci *host)
+ 
+ static void dw_mci_enable_cd(struct dw_mci *host)
+ {
++	struct dw_mci_slot *slot;
+ 	unsigned long irqflags;
+ 	u32 temp;
++	int i;
+ 
+-	/*
+-	 * No need for CD if all slots have a non-error GPIO
+-	 * as well as broken card detection is found.
+-	 */
+-	if (host->slot->mmc->caps & MMC_CAP_NEEDS_POLL)
+-		return;
++	for (i = 0; i < host->num_slots; i++) {
++		slot = host->slots[i];
++		if (slot == NULL)
++			continue;
++		/*
++		 * No need for CD if all slots have a non-error GPIO
++		 * as well as broken card detection is found.
++		 */
++		if (slot->mmc->caps & MMC_CAP_NEEDS_POLL)
++			continue;
+ 
+-	if (mmc_gpio_get_cd(host->slot->mmc) < 0) {
+-		spin_lock_irqsave(&host->irq_lock, irqflags);
+-		temp = mci_readl(host, INTMASK);
+-		temp  |= SDMMC_INT_CD;
+-		mci_writel(host, INTMASK, temp);
+-		spin_unlock_irqrestore(&host->irq_lock, irqflags);
++		if (mmc_gpio_get_cd(slot->mmc) < 0) {
++			spin_lock_irqsave(&host->irq_lock, irqflags);
++			temp = mci_readl(host, INTMASK);
++			temp |= SDMMC_INT_CD;
++			mci_writel(host, INTMASK, temp);
++			spin_unlock_irqrestore(&host->irq_lock, irqflags);
++			break;
++		}
+ 	}
+ }
+ 
+ int dw_mci_probe(struct dw_mci *host)
+ {
+ 	const struct dw_mci_drv_data *drv_data = host->drv_data;
+-	int width, i, ret = 0;
++	int width, i, ret = 0, num_slots;
+ 	u32 fifo_size;
+ 
+ 	if (!host->pdata) {
+@@ -3263,6 +3378,8 @@ int dw_mci_probe(struct dw_mci *host)
+ 	spin_lock_init(&host->irq_lock);
+ 	INIT_LIST_HEAD(&host->queue);
+ 
++	host->card_type = SDMMC_GET_CARD_TYPE(mci_readl(host, HCON));
++
+ 	/*
+ 	 * Get the host data width - this assumes that HCON has been set with
+ 	 * the correct values.
+@@ -3365,11 +3482,20 @@ int dw_mci_probe(struct dw_mci *host)
+ 		 host->irq, width, fifo_size);
+ 
+ 	/* We need at least one slot to succeed */
+-	ret = dw_mci_init_slot(host);
+-	if (ret) {
+-		dev_dbg(host->dev, "slot %d init failed\n", i);
+-		goto err_dmaunmap;
++	num_slots = SDMMC_GET_SLOT_NUM(mci_readl(host, HCON));
++	if (num_slots < host->num_slots)
++		host->num_slots = num_slots;
++	for (i = 0; i < host->num_slots; i++) {
++		ret = dw_mci_init_slot(host, i);
++		if (ret) {
++			dev_dbg(host->dev, "slot %d init failed\n", i);
++			goto err_dmaunmap;
++		}
++		/* Add a delay for each additional slot. */
++		if (host->num_slots > 1)
++			msleep(2000);
+ 	}
++	host->slot = host->slots[0];
+ 
+ 	/* Now that slots are all setup, we can enable card detect */
+ 	dw_mci_enable_cd(host);
+@@ -3395,9 +3521,13 @@ int dw_mci_probe(struct dw_mci *host)
+ 
+ void dw_mci_remove(struct dw_mci *host)
+ {
++	int i;
++
+ 	dev_dbg(host->dev, "remove slot\n");
+-	if (host->slot)
+-		dw_mci_cleanup_slot(host->slot);
++	for (i = 0; i < host->num_slots; i++) {
++		if (host->slots[i] != NULL)
++			dw_mci_cleanup_slot(host->slots[i]);
++	}
+ 
+ 	mci_writel(host, RINTSTS, 0xFFFFFFFF);
+ 	mci_writel(host, INTMASK, 0); /* disable all mmc interrupt first */
+@@ -3440,7 +3570,8 @@ int dw_mci_runtime_suspend(struct device *dev)
+ 
+ int dw_mci_runtime_resume(struct device *dev)
+ {
+-	int ret = 0;
++	int i, ret = 0;
++	struct dw_mci_slot *slot;
+ 	struct dw_mci *host = dev_get_drvdata(dev);
+ 
+ 	if (host->slot &&
+@@ -3480,12 +3611,16 @@ int dw_mci_runtime_resume(struct device *dev)
+ 		   DW_MCI_ERROR_FLAGS);
+ 	mci_writel(host, CTRL, SDMMC_CTRL_INT_ENABLE);
+ 
++	for (i = 0; i < host->num_slots; i++) {
++		slot = host->slots[i];
++		if (slot == NULL)
++			continue;
++		if (slot->mmc->pm_flags & MMC_PM_KEEP_POWER)
++			dw_mci_set_ios(slot->mmc, &slot->mmc->ios);
+ 
+-	if (host->slot->mmc->pm_flags & MMC_PM_KEEP_POWER)
+-		dw_mci_set_ios(host->slot->mmc, &host->slot->mmc->ios);
+-
+-	/* Force setup bus to guarantee available clock output */
+-	dw_mci_setup_bus(host->slot, true);
++		/* Force setup bus to guarantee available clock output */
++		dw_mci_setup_bus(slot, true);
++	}
+ 
+ 	/* Now that slots are all setup, we can enable card detect */
+ 	dw_mci_enable_cd(host);
+diff --git a/drivers/mmc/host/dw_mmc.h b/drivers/mmc/host/dw_mmc.h
+index 46e9f8e..3d874ea 100644
+--- a/drivers/mmc/host/dw_mmc.h
++++ b/drivers/mmc/host/dw_mmc.h
+@@ -202,14 +202,18 @@ struct dw_mci {
+ 
+ 	u32			bus_hz;
+ 	u32			current_speed;
++	u32			num_slots;
+ 	u32			fifoth_val;
+ 	u16			verid;
++	u8			card_type;
+ 	struct device		*dev;
+ 	struct dw_mci_board	*pdata;
+ 	const struct dw_mci_drv_data	*drv_data;
+ 	void			*priv;
+ 	struct clk		*biu_clk;
+ 	struct clk		*ciu_clk;
++#define DW_MMC_SLOT_NUM	2
++	struct dw_mci_slot	*slots[DW_MMC_SLOT_NUM];
+ 	struct dw_mci_slot	*slot;
+ 
+ 	/* FIFO push and pull */
+@@ -251,6 +255,8 @@ struct dw_mci_dma_ops {
+ 
+ /* Board platform data */
+ struct dw_mci_board {
++	u32 num_slots;
++
+ 	unsigned int bus_hz; /* Clock speed at the cclk_in pad */
+ 
+ 	u32 caps;	/* Capabilities */
+@@ -402,6 +408,8 @@ struct dw_mci_board {
+ #define SDMMC_CMD_RESP_LONG		BIT(7)
+ #define SDMMC_CMD_RESP_EXP		BIT(6)
+ #define SDMMC_CMD_INDX(n)		((n) & 0x1F)
++#define SDMMC_CMD_CARD_NUM(n)		((n & 0x1F) << 16)
++#define SDMMC_GET_CARD_NUM(x)		(((x)>>16) & 0x1F)
+ /* Status register defines */
+ #define SDMMC_GET_FCNT(x)		(((x)>>17) & 0x1FFF)
+ #define SDMMC_STATUS_DMA_REQ		BIT(31)
+@@ -415,6 +423,7 @@ struct dw_mci_board {
+ #define DMA_INTERFACE_DWDMA		(0x1)
+ #define DMA_INTERFACE_GDMA		(0x2)
+ #define DMA_INTERFACE_NODMA		(0x3)
++#define SDMMC_GET_CARD_TYPE(x)		((x) & 0x1)
+ #define SDMMC_GET_TRANS_MODE(x)		(((x)>>16) & 0x3)
+ #define SDMMC_GET_SLOT_NUM(x)		((((x)>>1) & 0x1F) + 1)
+ #define SDMMC_GET_HDATA_WIDTH(x)	(((x)>>7) & 0x7)
+@@ -450,6 +459,10 @@ struct dw_mci_board {
+ #define SDMMC_CTRL_ALL_RESET_FLAGS \
+ 	(SDMMC_CTRL_RESET | SDMMC_CTRL_FIFO_RESET | SDMMC_CTRL_DMA_RESET)
+ 
++/* Card types */
++#define DW_CARD_TYPE_MMC_ONLY		0
++#define DW_CARD_TYPE_SD_MMC		1
++
+ /* FIFO register access macros. These should not change the data endian-ness
+  * as they are written to memory to be dealt with by the upper layers
+  */
+diff --git a/drivers/net/ethernet/mellanox/mlxsw/spectrum_span.c b/drivers/net/ethernet/mellanox/mlxsw/spectrum_span.c
+index d965fd2..ad5a9b9 100644
+--- a/drivers/net/ethernet/mellanox/mlxsw/spectrum_span.c
++++ b/drivers/net/ethernet/mellanox/mlxsw/spectrum_span.c
+@@ -383,7 +383,7 @@ static int mlxsw_sp_span_dmac(struct neigh_table *tbl,
+ }
+ 
+ static const struct mlxsw_sp_span_entry_ops mlxsw_sp_span_entry_ops_gretap4 = {
+-	.can_handle = is_gretap_dev,
++	.can_handle = netif_is_gretap,
+ 	.parms = mlxsw_sp_span_entry_gretap4_parms,
+ 	.configure = mlxsw_sp_span_entry_gretap4_configure,
+ 	.deconfigure = mlxsw_sp_span_entry_gretap4_deconfigure,
+@@ -484,7 +484,7 @@ static int mlxsw_sp_span_dmac(struct neigh_table *tbl,
+ 
+ static const
+ struct mlxsw_sp_span_entry_ops mlxsw_sp_span_entry_ops_gretap6 = {
+-	.can_handle = is_ip6gretap_dev,
++	.can_handle = netif_is_ip6gretap,
+ 	.parms = mlxsw_sp_span_entry_gretap6_parms,
+ 	.configure = mlxsw_sp_span_entry_gretap6_configure,
+ 	.deconfigure = mlxsw_sp_span_entry_gretap6_deconfigure,
+diff --git a/drivers/net/ethernet/netronome/nfp/flower/action.c b/drivers/net/ethernet/netronome/nfp/flower/action.c
+index 244dc26..36166f8 100644
+--- a/drivers/net/ethernet/netronome/nfp/flower/action.c
++++ b/drivers/net/ethernet/netronome/nfp/flower/action.c
+@@ -2,7 +2,6 @@
+ /* Copyright (C) 2017-2018 Netronome Systems, Inc. */
+ 
+ #include <linux/bitfield.h>
+-#include <net/geneve.h>
+ #include <net/pkt_cls.h>
+ #include <net/switchdev.h>
+ #include <net/tc_act/tc_csum.h>
+@@ -91,21 +90,6 @@ static void nfp_fl_pop_vlan(struct nfp_fl_pop_vlan *pop_vlan)
+ 	return act_size;
+ }
+ 
+-static bool nfp_fl_netdev_is_tunnel_type(struct net_device *out_dev,
+-					 enum nfp_flower_tun_type tun_type)
+-{
+-	if (!out_dev->rtnl_link_ops)
+-		return false;
+-
+-	if (!strcmp(out_dev->rtnl_link_ops->kind, "vxlan"))
+-		return tun_type == NFP_FL_TUNNEL_VXLAN;
+-
+-	if (!strcmp(out_dev->rtnl_link_ops->kind, "geneve"))
+-		return tun_type == NFP_FL_TUNNEL_GENEVE;
+-
+-	return false;
+-}
+-
+ static int
+ nfp_fl_output(struct nfp_app *app, struct nfp_fl_output *output,
+ 	      const struct tc_action *action, struct nfp_fl_payload *nfp_flow,
+@@ -151,11 +135,12 @@ static bool nfp_fl_netdev_is_tunnel_type(struct net_device *out_dev,
+ 		/* Set action output parameters. */
+ 		output->flags = cpu_to_be16(tmp_flags);
+ 
+-		/* Only offload if egress ports are on the same device as the
+-		 * ingress port.
+-		 */
+-		if (!switchdev_port_same_parent_id(in_dev, out_dev))
+-			return -EOPNOTSUPP;
++		if (nfp_netdev_is_nfp_repr(in_dev)) {
++			/* Confirm ingress and egress are on same device. */
++			if (!switchdev_port_same_parent_id(in_dev, out_dev))
++				return -EOPNOTSUPP;
++		}
++
+ 		if (!nfp_netdev_is_nfp_repr(out_dev))
+ 			return -EOPNOTSUPP;
+ 
+@@ -728,9 +713,8 @@ static u32 nfp_fl_csum_l4_to_flag(u8 ip_proto)
+ 		*a_len += sizeof(struct nfp_fl_push_vlan);
+ 	} else if (is_tcf_tunnel_set(a)) {
+ 		struct ip_tunnel_info *ip_tun = tcf_tunnel_info(a);
+-		struct nfp_repr *repr = netdev_priv(netdev);
+ 
+-		*tun_type = nfp_fl_get_tun_from_act_l4_port(repr->app, a);
++		*tun_type = nfp_fl_get_tun_from_act_l4_port(app, a);
+ 		if (*tun_type == NFP_FL_TUNNEL_NONE)
+ 			return -EOPNOTSUPP;
+ 
+diff --git a/drivers/net/ethernet/netronome/nfp/flower/cmsg.h b/drivers/net/ethernet/netronome/nfp/flower/cmsg.h
+index 29d673a..e887e24 100644
+--- a/drivers/net/ethernet/netronome/nfp/flower/cmsg.h
++++ b/drivers/net/ethernet/netronome/nfp/flower/cmsg.h
+@@ -8,6 +8,7 @@
+ #include <linux/skbuff.h>
+ #include <linux/types.h>
+ #include <net/geneve.h>
++#include <net/vxlan.h>
+ 
+ #include "../nfp_app.h"
+ #include "../nfpcore/nfp_cpp.h"
+@@ -475,6 +476,32 @@ static inline int nfp_flower_cmsg_get_data_len(struct sk_buff *skb)
+ 	return skb->len - NFP_FLOWER_CMSG_HLEN;
+ }
+ 
++static inline bool
++nfp_fl_netdev_is_tunnel_type(struct net_device *netdev,
++			     enum nfp_flower_tun_type tun_type)
++{
++	if (netif_is_vxlan(netdev))
++		return tun_type == NFP_FL_TUNNEL_VXLAN;
++	if (netif_is_geneve(netdev))
++		return tun_type == NFP_FL_TUNNEL_GENEVE;
++
++	return false;
++}
++
++static inline bool nfp_fl_is_netdev_to_offload(struct net_device *netdev)
++{
++	if (!netdev->rtnl_link_ops)
++		return false;
++	if (!strcmp(netdev->rtnl_link_ops->kind, "openvswitch"))
++		return true;
++	if (netif_is_vxlan(netdev))
++		return true;
++	if (netif_is_geneve(netdev))
++		return true;
++
++	return false;
++}
++
+ struct sk_buff *
+ nfp_flower_cmsg_mac_repr_start(struct nfp_app *app, unsigned int num_ports);
+ void
+diff --git a/drivers/net/ethernet/netronome/nfp/flower/main.c b/drivers/net/ethernet/netronome/nfp/flower/main.c
+index 3a54728..08d9fdb 100644
+--- a/drivers/net/ethernet/netronome/nfp/flower/main.c
++++ b/drivers/net/ethernet/netronome/nfp/flower/main.c
+@@ -146,23 +146,12 @@ static enum devlink_eswitch_mode eswitch_mode_get(struct nfp_app *app)
+ 	return nfp_flower_cmsg_portmod(repr, false, repr->netdev->mtu, false);
+ }
+ 
+-static int
+-nfp_flower_repr_netdev_init(struct nfp_app *app, struct net_device *netdev)
+-{
+-	return tc_setup_cb_egdev_register(netdev,
+-					  nfp_flower_setup_tc_egress_cb,
+-					  netdev_priv(netdev));
+-}
+-
+ static void
+ nfp_flower_repr_netdev_clean(struct nfp_app *app, struct net_device *netdev)
+ {
+ 	struct nfp_repr *repr = netdev_priv(netdev);
+ 
+ 	kfree(repr->app_priv);
+-
+-	tc_setup_cb_egdev_unregister(netdev, nfp_flower_setup_tc_egress_cb,
+-				     netdev_priv(netdev));
+ }
+ 
+ static void
+@@ -568,6 +557,8 @@ static int nfp_flower_init(struct nfp_app *app)
+ 		goto err_cleanup_metadata;
+ 	}
+ 
++	INIT_LIST_HEAD(&app_priv->indr_block_cb_priv);
++
+ 	return 0;
+ 
+ err_cleanup_metadata:
+@@ -677,6 +668,10 @@ static void nfp_flower_stop(struct nfp_app *app)
+ 	if (app_priv->flower_ext_feats & NFP_FL_FEATS_LAG)
+ 		unregister_netdevice_notifier(&app_priv->nfp_lag.lag_nb);
+ 
++	ret = nfp_flower_reg_indir_block_handler(app, netdev, event);
++	if (ret & NOTIFY_STOP_MASK)
++		return ret;
++
+ 	nfp_tunnel_config_stop(app);
+ }
+ 
+@@ -698,7 +693,6 @@ static void nfp_flower_stop(struct nfp_app *app)
+ 	.vnic_init	= nfp_flower_vnic_init,
+ 	.vnic_clean	= nfp_flower_vnic_clean,
+ 
+-	.repr_init	= nfp_flower_repr_netdev_init,
+ 	.repr_preclean	= nfp_flower_repr_netdev_preclean,
+ 	.repr_clean	= nfp_flower_repr_netdev_clean,
+ 
+diff --git a/drivers/net/ethernet/netronome/nfp/flower/main.h b/drivers/net/ethernet/netronome/nfp/flower/main.h
+index 90045ba..0f53b40 100644
+--- a/drivers/net/ethernet/netronome/nfp/flower/main.h
++++ b/drivers/net/ethernet/netronome/nfp/flower/main.h
+@@ -20,7 +20,6 @@
+ struct net_device;
+ struct nfp_app;
+ 
+-#define NFP_FL_STATS_CTX_DONT_CARE	cpu_to_be32(0xffffffff)
+ #define NFP_FL_STATS_ELEM_RS		FIELD_SIZEOF(struct nfp_fl_stats_id, \
+ 						     init_unalloc)
+ #define NFP_FLOWER_MASK_ENTRY_RS	256
+@@ -133,6 +132,7 @@ struct nfp_fl_lag {
+  * @reify_wait_queue:	wait queue for repr reify response counting
+  * @mtu_conf:		Configuration of repr MTU value
+  * @nfp_lag:		Link aggregation data block
++ * @indr_block_cb_priv:	List of priv data passed to indirect block cbs
+  */
+ struct nfp_flower_priv {
+ 	struct nfp_app *app;
+@@ -166,6 +166,7 @@ struct nfp_flower_priv {
+ 	wait_queue_head_t reify_wait_queue;
+ 	struct nfp_mtu_conf mtu_conf;
+ 	struct nfp_fl_lag nfp_lag;
++	struct list_head indr_block_cb_priv;
+ };
+ 
+ /**
+@@ -209,7 +210,6 @@ struct nfp_fl_payload {
+ 	char *unmasked_data;
+ 	char *mask_data;
+ 	char *action_data;
+-	bool ingress_offload;
+ };
+ 
+ extern const struct rhashtable_params nfp_flower_table_params;
+@@ -226,7 +226,8 @@ struct nfp_fl_stats_frame {
+ 
+ int nfp_flower_setup_tc(struct nfp_app *app, struct net_device *netdev,
+ 			enum tc_setup_type type, void *type_data);
+-int nfp_flower_compile_flow_match(struct tc_cls_flower_offload *flow,
++int nfp_flower_compile_flow_match(struct nfp_app *app,
++				  struct tc_cls_flower_offload *flow,
+ 				  struct nfp_fl_key_ls *key_ls,
+ 				  struct net_device *netdev,
+ 				  struct nfp_fl_payload *nfp_flow,
+@@ -244,7 +245,7 @@ int nfp_modify_flow_metadata(struct nfp_app *app,
+ 
+ struct nfp_fl_payload *
+ nfp_flower_search_fl_table(struct nfp_app *app, unsigned long tc_flower_cookie,
+-			   struct net_device *netdev, __be32 host_ctx);
++			   struct net_device *netdev);
+ struct nfp_fl_payload *
+ nfp_flower_remove_fl_table(struct nfp_app *app, unsigned long tc_flower_cookie);
+ 
+@@ -257,8 +258,6 @@ struct nfp_fl_payload *
+ void nfp_tunnel_add_ipv4_off(struct nfp_app *app, __be32 ipv4);
+ void nfp_tunnel_request_route(struct nfp_app *app, struct sk_buff *skb);
+ void nfp_tunnel_keep_alive(struct nfp_app *app, struct sk_buff *skb);
+-int nfp_flower_setup_tc_egress_cb(enum tc_setup_type type, void *type_data,
+-				  void *cb_priv);
+ void nfp_flower_lag_init(struct nfp_fl_lag *lag);
+ void nfp_flower_lag_cleanup(struct nfp_fl_lag *lag);
+ int nfp_flower_lag_reset(struct nfp_fl_lag *lag);
+@@ -268,5 +267,8 @@ int nfp_flower_lag_populate_pre_action(struct nfp_app *app,
+ 				       struct nfp_fl_pre_lag *pre_act);
+ int nfp_flower_lag_get_output_id(struct nfp_app *app,
+ 				 struct net_device *master);
++int nfp_flower_reg_indir_block_handler(struct nfp_app *app,
++				       struct net_device *netdev,
++				       unsigned long event);
+ 
+ #endif
+diff --git a/drivers/net/ethernet/netronome/nfp/flower/match.c b/drivers/net/ethernet/netronome/nfp/flower/match.c
+index e54fb60..cdf7559 100644
+--- a/drivers/net/ethernet/netronome/nfp/flower/match.c
++++ b/drivers/net/ethernet/netronome/nfp/flower/match.c
+@@ -52,10 +52,13 @@
+ 		return 0;
+ 	}
+ 
+-	if (tun_type)
++	if (tun_type) {
+ 		frame->in_port = cpu_to_be32(NFP_FL_PORT_TYPE_TUN | tun_type);
+-	else
++	} else {
++		if (!cmsg_port)
++			return -EOPNOTSUPP;
+ 		frame->in_port = cpu_to_be32(cmsg_port);
++	}
+ 
+ 	return 0;
+ }
+@@ -289,17 +292,21 @@
+ 	}
+ }
+ 
+-int nfp_flower_compile_flow_match(struct tc_cls_flower_offload *flow,
++int nfp_flower_compile_flow_match(struct nfp_app *app,
++				  struct tc_cls_flower_offload *flow,
+ 				  struct nfp_fl_key_ls *key_ls,
+ 				  struct net_device *netdev,
+ 				  struct nfp_fl_payload *nfp_flow,
+ 				  enum nfp_flower_tun_type tun_type)
+ {
+-	struct nfp_repr *netdev_repr;
++	u32 cmsg_port = 0;
+ 	int err;
+ 	u8 *ext;
+ 	u8 *msk;
+ 
++	if (nfp_netdev_is_nfp_repr(netdev))
++		cmsg_port = nfp_repr_get_port_id(netdev);
++
+ 	memset(nfp_flow->unmasked_data, 0, key_ls->key_size);
+ 	memset(nfp_flow->mask_data, 0, key_ls->key_size);
+ 
+@@ -327,15 +334,13 @@ int nfp_flower_compile_flow_match(struct tc_cls_flower_offload *flow,
+ 
+ 	/* Populate Exact Port data. */
+ 	err = nfp_flower_compile_port((struct nfp_flower_in_port *)ext,
+-				      nfp_repr_get_port_id(netdev),
+-				      false, tun_type);
++				      cmsg_port, false, tun_type);
+ 	if (err)
+ 		return err;
+ 
+ 	/* Populate Mask Port Data. */
+ 	err = nfp_flower_compile_port((struct nfp_flower_in_port *)msk,
+-				      nfp_repr_get_port_id(netdev),
+-				      true, tun_type);
++				      cmsg_port, true, tun_type);
+ 	if (err)
+ 		return err;
+ 
+@@ -399,16 +404,13 @@ int nfp_flower_compile_flow_match(struct tc_cls_flower_offload *flow,
+ 		msk += sizeof(struct nfp_flower_ipv4_udp_tun);
+ 
+ 		/* Configure tunnel end point MAC. */
+-		if (nfp_netdev_is_nfp_repr(netdev)) {
+-			netdev_repr = netdev_priv(netdev);
+-			nfp_tunnel_write_macs(netdev_repr->app);
+-
+-			/* Store the tunnel destination in the rule data.
+-			 * This must be present and be an exact match.
+-			 */
+-			nfp_flow->nfp_tun_ipv4_addr = tun_dst;
+-			nfp_tunnel_add_ipv4_off(netdev_repr->app, tun_dst);
+-		}
++		nfp_tunnel_write_macs(app);
++
++		/* Store the tunnel destination in the rule data.
++		 * This must be present and be an exact match.
++		 */
++		nfp_flow->nfp_tun_ipv4_addr = tun_dst;
++		nfp_tunnel_add_ipv4_off(app, tun_dst);
+ 
+ 		if (key_ls->key_layer_two & NFP_FLOWER_LAYER2_GENEVE_OP) {
+ 			err = nfp_flower_compile_geneve_opt(ext, flow, false);
+diff --git a/drivers/net/ethernet/netronome/nfp/flower/metadata.c b/drivers/net/ethernet/netronome/nfp/flower/metadata.c
+index 48729bf..573a440 100644
+--- a/drivers/net/ethernet/netronome/nfp/flower/metadata.c
++++ b/drivers/net/ethernet/netronome/nfp/flower/metadata.c
+@@ -21,7 +21,6 @@ struct nfp_mask_id_table {
+ struct nfp_fl_flow_table_cmp_arg {
+ 	struct net_device *netdev;
+ 	unsigned long cookie;
+-	__be32 host_ctx;
+ };
+ 
+ static int nfp_release_stats_entry(struct nfp_app *app, u32 stats_context_id)
+@@ -76,14 +75,13 @@ static int nfp_get_stats_entry(struct nfp_app *app, u32 *stats_context_id)
+ /* Must be called with either RTNL or rcu_read_lock */
+ struct nfp_fl_payload *
+ nfp_flower_search_fl_table(struct nfp_app *app, unsigned long tc_flower_cookie,
+-			   struct net_device *netdev, __be32 host_ctx)
++			   struct net_device *netdev)
+ {
+ 	struct nfp_fl_flow_table_cmp_arg flower_cmp_arg;
+ 	struct nfp_flower_priv *priv = app->priv;
+ 
+ 	flower_cmp_arg.netdev = netdev;
+ 	flower_cmp_arg.cookie = tc_flower_cookie;
+-	flower_cmp_arg.host_ctx = host_ctx;
+ 
+ 	return rhashtable_lookup_fast(&priv->flow_table, &flower_cmp_arg,
+ 				      nfp_flower_table_params);
+@@ -287,6 +285,7 @@ int nfp_compile_flow_metadata(struct nfp_app *app,
+ 
+ 	nfp_flow->meta.host_ctx_id = cpu_to_be32(stats_cxt);
+ 	nfp_flow->meta.host_cookie = cpu_to_be64(flow->cookie);
++	nfp_flow->ingress_dev = netdev;
+ 
+ 	new_mask_id = 0;
+ 	if (!nfp_check_mask_add(app, nfp_flow->mask_data,
+@@ -306,8 +305,7 @@ int nfp_compile_flow_metadata(struct nfp_app *app,
+ 	priv->stats[stats_cxt].bytes = 0;
+ 	priv->stats[stats_cxt].used = jiffies;
+ 
+-	check_entry = nfp_flower_search_fl_table(app, flow->cookie, netdev,
+-						 NFP_FL_STATS_CTX_DONT_CARE);
++	check_entry = nfp_flower_search_fl_table(app, flow->cookie, netdev);
+ 	if (check_entry) {
+ 		if (nfp_release_stats_entry(app, stats_cxt))
+ 			return -EINVAL;
+@@ -352,9 +350,7 @@ static int nfp_fl_obj_cmpfn(struct rhashtable_compare_arg *arg,
+ 	const struct nfp_fl_flow_table_cmp_arg *cmp_arg = arg->key;
+ 	const struct nfp_fl_payload *flow_entry = obj;
+ 
+-	if ((!cmp_arg->netdev || flow_entry->ingress_dev == cmp_arg->netdev) &&
+-	    (cmp_arg->host_ctx == NFP_FL_STATS_CTX_DONT_CARE ||
+-	     flow_entry->meta.host_ctx_id == cmp_arg->host_ctx))
++	if (flow_entry->ingress_dev == cmp_arg->netdev)
+ 		return flow_entry->tc_flower_cookie != cmp_arg->cookie;
+ 
+ 	return 1;
+diff --git a/drivers/net/ethernet/netronome/nfp/flower/offload.c b/drivers/net/ethernet/netronome/nfp/flower/offload.c
+index 67e576f..6eb88a5 100644
+--- a/drivers/net/ethernet/netronome/nfp/flower/offload.c
++++ b/drivers/net/ethernet/netronome/nfp/flower/offload.c
+@@ -56,11 +56,10 @@
+ 	 BIT(FLOW_DISSECTOR_KEY_ENC_PORTS))
+ 
+ static int
+-nfp_flower_xmit_flow(struct net_device *netdev,
+-		     struct nfp_fl_payload *nfp_flow, u8 mtype)
++nfp_flower_xmit_flow(struct nfp_app *app, struct nfp_fl_payload *nfp_flow,
++		     u8 mtype)
+ {
+ 	u32 meta_len, key_len, mask_len, act_len, tot_len;
+-	struct nfp_repr *priv = netdev_priv(netdev);
+ 	struct sk_buff *skb;
+ 	unsigned char *msg;
+ 
+@@ -78,7 +77,7 @@
+ 	nfp_flow->meta.mask_len >>= NFP_FL_LW_SIZ;
+ 	nfp_flow->meta.act_len >>= NFP_FL_LW_SIZ;
+ 
+-	skb = nfp_flower_cmsg_alloc(priv->app, tot_len, mtype, GFP_KERNEL);
++	skb = nfp_flower_cmsg_alloc(app, tot_len, mtype, GFP_KERNEL);
+ 	if (!skb)
+ 		return -ENOMEM;
+ 
+@@ -96,7 +95,7 @@
+ 	nfp_flow->meta.mask_len <<= NFP_FL_LW_SIZ;
+ 	nfp_flow->meta.act_len <<= NFP_FL_LW_SIZ;
+ 
+-	nfp_ctrl_tx(priv->app->ctrl, skb);
++	nfp_ctrl_tx(app->ctrl, skb);
+ 
+ 	return 0;
+ }
+@@ -129,9 +128,9 @@ static bool nfp_flower_check_higher_than_mac(struct tc_cls_flower_offload *f)
+ 
+ static int
+ nfp_flower_calculate_key_layers(struct nfp_app *app,
++				struct net_device *netdev,
+ 				struct nfp_fl_key_ls *ret_key_ls,
+ 				struct tc_cls_flower_offload *flow,
+-				bool egress,
+ 				enum nfp_flower_tun_type *tun_type)
+ {
+ 	struct flow_dissector_key_basic *mask_basic = NULL;
+@@ -187,8 +186,6 @@ static bool nfp_flower_check_higher_than_mac(struct tc_cls_flower_offload *f)
+ 			skb_flow_dissector_target(flow->dissector,
+ 						  FLOW_DISSECTOR_KEY_ENC_CONTROL,
+ 						  flow->key);
+-		if (!egress)
+-			return -EOPNOTSUPP;
+ 
+ 		if (mask_enc_ctl->addr_type != 0xffff ||
+ 		    enc_ctl->addr_type != FLOW_DISSECTOR_KEY_IPV4_ADDRS)
+@@ -251,9 +248,10 @@ static bool nfp_flower_check_higher_than_mac(struct tc_cls_flower_offload *f)
+ 		default:
+ 			return -EOPNOTSUPP;
+ 		}
+-	} else if (egress) {
+-		/* Reject non tunnel matches offloaded to egress repr. */
+-		return -EOPNOTSUPP;
++
++		/* Ensure the ingress netdev matches the expected tun type. */
++		if (!nfp_fl_netdev_is_tunnel_type(netdev, *tun_type))
++			return -EOPNOTSUPP;
+ 	}
+ 
+ 	if (dissector_uses_key(flow->dissector, FLOW_DISSECTOR_KEY_BASIC)) {
+@@ -390,7 +388,7 @@ static bool nfp_flower_check_higher_than_mac(struct tc_cls_flower_offload *f)
+ }
+ 
+ static struct nfp_fl_payload *
+-nfp_flower_allocate_new(struct nfp_fl_key_ls *key_layer, bool egress)
++nfp_flower_allocate_new(struct nfp_fl_key_ls *key_layer)
+ {
+ 	struct nfp_fl_payload *flow_pay;
+ 
+@@ -414,7 +412,6 @@ static bool nfp_flower_check_higher_than_mac(struct tc_cls_flower_offload *f)
+ 
+ 	flow_pay->nfp_tun_ipv4_addr = 0;
+ 	flow_pay->meta.flags = 0;
+-	flow_pay->ingress_offload = !egress;
+ 
+ 	return flow_pay;
+ 
+@@ -432,7 +429,6 @@ static bool nfp_flower_check_higher_than_mac(struct tc_cls_flower_offload *f)
+  * @app:	Pointer to the APP handle
+  * @netdev:	netdev structure.
+  * @flow:	TC flower classifier offload structure.
+- * @egress:	NFP netdev is the egress.
+  *
+  * Adds a new flow to the repeated hash structure and action payload.
+  *
+@@ -440,46 +436,35 @@ static bool nfp_flower_check_higher_than_mac(struct tc_cls_flower_offload *f)
+  */
+ static int
+ nfp_flower_add_offload(struct nfp_app *app, struct net_device *netdev,
+-		       struct tc_cls_flower_offload *flow, bool egress)
++		       struct tc_cls_flower_offload *flow)
+ {
+ 	enum nfp_flower_tun_type tun_type = NFP_FL_TUNNEL_NONE;
+-	struct nfp_port *port = nfp_port_from_netdev(netdev);
+ 	struct nfp_flower_priv *priv = app->priv;
+ 	struct nfp_fl_payload *flow_pay;
+ 	struct nfp_fl_key_ls *key_layer;
+-	struct net_device *ingr_dev;
++	struct nfp_port *port = NULL;
+ 	int err;
+ 
+-	ingr_dev = egress ? NULL : netdev;
+-	flow_pay = nfp_flower_search_fl_table(app, flow->cookie, ingr_dev,
+-					      NFP_FL_STATS_CTX_DONT_CARE);
+-	if (flow_pay) {
+-		/* Ignore as duplicate if it has been added by different cb. */
+-		if (flow_pay->ingress_offload && egress)
+-			return 0;
+-		else
+-			return -EOPNOTSUPP;
+-	}
++	if (nfp_netdev_is_nfp_repr(netdev))
++		port = nfp_port_from_netdev(netdev);
+ 
+ 	key_layer = kmalloc(sizeof(*key_layer), GFP_KERNEL);
+ 	if (!key_layer)
+ 		return -ENOMEM;
+ 
+-	err = nfp_flower_calculate_key_layers(app, key_layer, flow, egress,
++	err = nfp_flower_calculate_key_layers(app, netdev, key_layer, flow,
+ 					      &tun_type);
+ 	if (err)
+ 		goto err_free_key_ls;
+ 
+-	flow_pay = nfp_flower_allocate_new(key_layer, egress);
++	flow_pay = nfp_flower_allocate_new(key_layer);
+ 	if (!flow_pay) {
+ 		err = -ENOMEM;
+ 		goto err_free_key_ls;
+ 	}
+ 
+-	flow_pay->ingress_dev = egress ? NULL : netdev;
+-
+-	err = nfp_flower_compile_flow_match(flow, key_layer, netdev, flow_pay,
+-					    tun_type);
++	err = nfp_flower_compile_flow_match(app, flow, key_layer, netdev,
++					    flow_pay, tun_type);
+ 	if (err)
+ 		goto err_destroy_flow;
+ 
+@@ -487,8 +472,7 @@ static bool nfp_flower_check_higher_than_mac(struct tc_cls_flower_offload *f)
+ 	if (err)
+ 		goto err_destroy_flow;
+ 
+-	err = nfp_compile_flow_metadata(app, flow, flow_pay,
+-					flow_pay->ingress_dev);
++	err = nfp_compile_flow_metadata(app, flow, flow_pay, netdev);
+ 	if (err)
+ 		goto err_destroy_flow;
+ 
+@@ -498,12 +482,13 @@ static bool nfp_flower_check_higher_than_mac(struct tc_cls_flower_offload *f)
+ 	if (err)
+ 		goto err_release_metadata;
+ 
+-	err = nfp_flower_xmit_flow(netdev, flow_pay,
++	err = nfp_flower_xmit_flow(app, flow_pay,
+ 				   NFP_FLOWER_CMSG_TYPE_FLOW_ADD);
+ 	if (err)
+ 		goto err_remove_rhash;
+ 
+-	port->tc_offload_cnt++;
++	if (port)
++		port->tc_offload_cnt++;
+ 
+ 	/* Deallocate flow payload when flower rule has been destroyed. */
+ 	kfree(key_layer);
+@@ -531,7 +516,6 @@ static bool nfp_flower_check_higher_than_mac(struct tc_cls_flower_offload *f)
+  * @app:	Pointer to the APP handle
+  * @netdev:	netdev structure.
+  * @flow:	TC flower classifier offload structure
+- * @egress:	Netdev is the egress dev.
+  *
+  * Removes a flow from the repeated hash structure and clears the
+  * action payload.
+@@ -540,19 +524,19 @@ static bool nfp_flower_check_higher_than_mac(struct tc_cls_flower_offload *f)
+  */
+ static int
+ nfp_flower_del_offload(struct nfp_app *app, struct net_device *netdev,
+-		       struct tc_cls_flower_offload *flow, bool egress)
++		       struct tc_cls_flower_offload *flow)
+ {
+-	struct nfp_port *port = nfp_port_from_netdev(netdev);
+ 	struct nfp_flower_priv *priv = app->priv;
+ 	struct nfp_fl_payload *nfp_flow;
+-	struct net_device *ingr_dev;
++	struct nfp_port *port = NULL;
+ 	int err;
+ 
+-	ingr_dev = egress ? NULL : netdev;
+-	nfp_flow = nfp_flower_search_fl_table(app, flow->cookie, ingr_dev,
+-					      NFP_FL_STATS_CTX_DONT_CARE);
++	if (nfp_netdev_is_nfp_repr(netdev))
++		port = nfp_port_from_netdev(netdev);
++
++	nfp_flow = nfp_flower_search_fl_table(app, flow->cookie, netdev);
+ 	if (!nfp_flow)
+-		return egress ? 0 : -ENOENT;
++		return -ENOENT;
+ 
+ 	err = nfp_modify_flow_metadata(app, nfp_flow);
+ 	if (err)
+@@ -561,13 +545,14 @@ static bool nfp_flower_check_higher_than_mac(struct tc_cls_flower_offload *f)
+ 	if (nfp_flow->nfp_tun_ipv4_addr)
+ 		nfp_tunnel_del_ipv4_off(app, nfp_flow->nfp_tun_ipv4_addr);
+ 
+-	err = nfp_flower_xmit_flow(netdev, nfp_flow,
++	err = nfp_flower_xmit_flow(app, nfp_flow,
+ 				   NFP_FLOWER_CMSG_TYPE_FLOW_DEL);
+ 	if (err)
+ 		goto err_free_flow;
+ 
+ err_free_flow:
+-	port->tc_offload_cnt--;
++	if (port)
++		port->tc_offload_cnt--;
+ 	kfree(nfp_flow->action_data);
+ 	kfree(nfp_flow->mask_data);
+ 	kfree(nfp_flow->unmasked_data);
+@@ -583,7 +568,6 @@ static bool nfp_flower_check_higher_than_mac(struct tc_cls_flower_offload *f)
+  * @app:	Pointer to the APP handle
+  * @netdev:	Netdev structure.
+  * @flow:	TC flower classifier offload structure
+- * @egress:	Netdev is the egress dev.
+  *
+  * Populates a flow statistics structure which which corresponds to a
+  * specific flow.
+@@ -592,22 +576,16 @@ static bool nfp_flower_check_higher_than_mac(struct tc_cls_flower_offload *f)
+  */
+ static int
+ nfp_flower_get_stats(struct nfp_app *app, struct net_device *netdev,
+-		     struct tc_cls_flower_offload *flow, bool egress)
++		     struct tc_cls_flower_offload *flow)
+ {
+ 	struct nfp_flower_priv *priv = app->priv;
+ 	struct nfp_fl_payload *nfp_flow;
+-	struct net_device *ingr_dev;
+ 	u32 ctx_id;
+ 
+-	ingr_dev = egress ? NULL : netdev;
+-	nfp_flow = nfp_flower_search_fl_table(app, flow->cookie, ingr_dev,
+-					      NFP_FL_STATS_CTX_DONT_CARE);
++	nfp_flow = nfp_flower_search_fl_table(app, flow->cookie, netdev);
+ 	if (!nfp_flow)
+ 		return -EINVAL;
+ 
+-	if (nfp_flow->ingress_offload && egress)
+-		return 0;
+-
+ 	ctx_id = be32_to_cpu(nfp_flow->meta.host_ctx_id);
+ 
+ 	spin_lock_bh(&priv->stats_lock);
+@@ -624,35 +602,18 @@ static bool nfp_flower_check_higher_than_mac(struct tc_cls_flower_offload *f)
+ 
+ static int
+ nfp_flower_repr_offload(struct nfp_app *app, struct net_device *netdev,
+-			struct tc_cls_flower_offload *flower, bool egress)
++			struct tc_cls_flower_offload *flower)
+ {
+ 	if (!eth_proto_is_802_3(flower->common.protocol))
+ 		return -EOPNOTSUPP;
+ 
+ 	switch (flower->command) {
+ 	case TC_CLSFLOWER_REPLACE:
+-		return nfp_flower_add_offload(app, netdev, flower, egress);
++		return nfp_flower_add_offload(app, netdev, flower);
+ 	case TC_CLSFLOWER_DESTROY:
+-		return nfp_flower_del_offload(app, netdev, flower, egress);
++		return nfp_flower_del_offload(app, netdev, flower);
+ 	case TC_CLSFLOWER_STATS:
+-		return nfp_flower_get_stats(app, netdev, flower, egress);
+-	default:
+-		return -EOPNOTSUPP;
+-	}
+-}
+-
+-int nfp_flower_setup_tc_egress_cb(enum tc_setup_type type, void *type_data,
+-				  void *cb_priv)
+-{
+-	struct nfp_repr *repr = cb_priv;
+-
+-	if (!tc_cls_can_offload_and_chain0(repr->netdev, type_data))
+-		return -EOPNOTSUPP;
+-
+-	switch (type) {
+-	case TC_SETUP_CLSFLOWER:
+-		return nfp_flower_repr_offload(repr->app, repr->netdev,
+-					       type_data, true);
++		return nfp_flower_get_stats(app, netdev, flower);
+ 	default:
+ 		return -EOPNOTSUPP;
+ 	}
+@@ -669,7 +630,7 @@ static int nfp_flower_setup_tc_block_cb(enum tc_setup_type type,
+ 	switch (type) {
+ 	case TC_SETUP_CLSFLOWER:
+ 		return nfp_flower_repr_offload(repr->app, repr->netdev,
+-					       type_data, false);
++					       type_data);
+ 	default:
+ 		return -EOPNOTSUPP;
+ 	}
+@@ -708,3 +669,129 @@ int nfp_flower_setup_tc(struct nfp_app *app, struct net_device *netdev,
+ 		return -EOPNOTSUPP;
+ 	}
+ }
++
++struct nfp_flower_indr_block_cb_priv {
++	struct net_device *netdev;
++	struct nfp_app *app;
++	struct list_head list;
++};
++
++static struct nfp_flower_indr_block_cb_priv *
++nfp_flower_indr_block_cb_priv_lookup(struct nfp_app *app,
++				     struct net_device *netdev)
++{
++	struct nfp_flower_indr_block_cb_priv *cb_priv;
++	struct nfp_flower_priv *priv = app->priv;
++
++	/* All callback list access should be protected by RTNL. */
++	ASSERT_RTNL();
++
++	list_for_each_entry(cb_priv, &priv->indr_block_cb_priv, list)
++		if (cb_priv->netdev == netdev)
++			return cb_priv;
++
++	return NULL;
++}
++
++static int nfp_flower_setup_indr_block_cb(enum tc_setup_type type,
++					  void *type_data, void *cb_priv)
++{
++	struct nfp_flower_indr_block_cb_priv *priv = cb_priv;
++	struct tc_cls_flower_offload *flower = type_data;
++
++	if (flower->common.chain_index)
++		return -EOPNOTSUPP;
++
++	switch (type) {
++	case TC_SETUP_CLSFLOWER:
++		return nfp_flower_repr_offload(priv->app, priv->netdev,
++					       type_data);
++	default:
++		return -EOPNOTSUPP;
++	}
++}
++
++static int
++nfp_flower_setup_indr_tc_block(struct net_device *netdev, struct nfp_app *app,
++			       struct tc_block_offload *f)
++{
++	struct nfp_flower_indr_block_cb_priv *cb_priv;
++	struct nfp_flower_priv *priv = app->priv;
++	int err;
++
++	if (f->binder_type != TCF_BLOCK_BINDER_TYPE_CLSACT_INGRESS)
++		return -EOPNOTSUPP;
++
++	switch (f->command) {
++	case TC_BLOCK_BIND:
++		cb_priv = kmalloc(sizeof(*cb_priv), GFP_KERNEL);
++		if (!cb_priv)
++			return -ENOMEM;
++
++		cb_priv->netdev = netdev;
++		cb_priv->app = app;
++		list_add(&cb_priv->list, &priv->indr_block_cb_priv);
++
++		err = tcf_block_cb_register(f->block,
++					    nfp_flower_setup_indr_block_cb,
++					    netdev, cb_priv, f->extack);
++		if (err) {
++			list_del(&cb_priv->list);
++			kfree(cb_priv);
++		}
++
++		return err;
++	case TC_BLOCK_UNBIND:
++		tcf_block_cb_unregister(f->block,
++					nfp_flower_setup_indr_block_cb, netdev);
++		cb_priv = nfp_flower_indr_block_cb_priv_lookup(app, netdev);
++		if (cb_priv) {
++			list_del(&cb_priv->list);
++			kfree(cb_priv);
++		}
++
++		return 0;
++	default:
++		return -EOPNOTSUPP;
++	}
++	return 0;
++}
++
++static int
++nfp_flower_indr_setup_tc_cb(struct net_device *netdev, void *cb_priv,
++			    enum tc_setup_type type, void *type_data)
++{
++	switch (type) {
++	case TC_SETUP_BLOCK:
++		return nfp_flower_setup_indr_tc_block(netdev, cb_priv,
++						      type_data);
++	default:
++		return -EOPNOTSUPP;
++	}
++}
++
++int nfp_flower_reg_indir_block_handler(struct nfp_app *app,
++				       struct net_device *netdev,
++				       unsigned long event)
++{
++	int err;
++
++	if (!nfp_fl_is_netdev_to_offload(netdev))
++		return NOTIFY_OK;
++
++	if (event == NETDEV_REGISTER) {
++		err = __tc_indr_block_cb_register(netdev, app,
++						  nfp_flower_indr_setup_tc_cb,
++						  netdev);
++		if (err)
++			nfp_flower_cmsg_warn(app,
++					     "Indirect block reg failed - %s\n",
++					     netdev->name);
++	} else if (event == NETDEV_UNREGISTER) {
++		__tc_indr_block_cb_unregister(netdev,
++					      nfp_flower_indr_setup_tc_cb,
++					      netdev);
++	}
++
++	return NOTIFY_OK;
++}
+diff --git a/drivers/net/ethernet/netronome/nfp/flower/tunnel_conf.c b/drivers/net/ethernet/netronome/nfp/flower/tunnel_conf.c
+index 8e5bec0..e2a79a1 100644
+--- a/drivers/net/ethernet/netronome/nfp/flower/tunnel_conf.c
++++ b/drivers/net/ethernet/netronome/nfp/flower/tunnel_conf.c
+@@ -4,7 +4,6 @@
+ #include <linux/etherdevice.h>
+ #include <linux/inetdevice.h>
+ #include <net/netevent.h>
+-#include <net/vxlan.h>
+ #include <linux/idr.h>
+ #include <net/dst_metadata.h>
+ #include <net/arp.h>
+@@ -182,18 +181,6 @@ void nfp_tunnel_keep_alive(struct nfp_app *app, struct sk_buff *skb)
+ 	}
+ }
+ 
+-static bool nfp_tun_is_netdev_to_offload(struct net_device *netdev)
+-{
+-	if (!netdev->rtnl_link_ops)
+-		return false;
+-	if (!strcmp(netdev->rtnl_link_ops->kind, "openvswitch"))
+-		return true;
+-	if (netif_is_vxlan(netdev))
+-		return true;
+-
+-	return false;
+-}
+-
+ static int
+ nfp_flower_xmit_tun_conf(struct nfp_app *app, u8 mtype, u16 plen, void *pdata,
+ 			 gfp_t flag)
+@@ -615,7 +602,7 @@ static void nfp_tun_add_to_mac_offload_list(struct net_device *netdev,
+ 
+ 	if (nfp_netdev_is_nfp_repr(netdev))
+ 		port = nfp_repr_get_port_id(netdev);
+-	else if (!nfp_tun_is_netdev_to_offload(netdev))
++	else if (!nfp_fl_is_netdev_to_offload(netdev))
+ 		return;
+ 
+ 	entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+@@ -666,7 +653,7 @@ static int nfp_tun_mac_event_handler(struct notifier_block *nb,
+ 		netdev = netdev_notifier_info_to_dev(ptr);
+ 
+ 		/* If non-nfp netdev then free its offload index. */
+-		if (nfp_tun_is_netdev_to_offload(netdev))
++		if (nfp_fl_is_netdev_to_offload(netdev))
+ 			nfp_tun_del_mac_idx(app, netdev->ifindex);
+ 	} else if (event == NETDEV_UP || event == NETDEV_CHANGEADDR ||
+ 		   event == NETDEV_REGISTER) {
+diff --git a/drivers/pci/hotplug/pciehp_ctrl.c b/drivers/pci/hotplug/pciehp_ctrl.c
+index 3f3df4c..905282a 100644
+--- a/drivers/pci/hotplug/pciehp_ctrl.c
++++ b/drivers/pci/hotplug/pciehp_ctrl.c
+@@ -115,6 +115,10 @@ static void remove_board(struct controller *ctrl, bool safe_removal)
+ 		 * removed from the slot/adapter.
+ 		 */
+ 		msleep(1000);
++
++		/* Ignore link or presence changes caused by power off */
++		atomic_and(~(PCI_EXP_SLTSTA_DLLSC | PCI_EXP_SLTSTA_PDC),
++			   &ctrl->pending_events);
+ 	}
+ 
+ 	/* turn off Green LED */
+diff --git a/drivers/pci/hotplug/pciehp_hpc.c b/drivers/pci/hotplug/pciehp_hpc.c
+index 7dd443a..1841f3f 100644
+--- a/drivers/pci/hotplug/pciehp_hpc.c
++++ b/drivers/pci/hotplug/pciehp_hpc.c
+@@ -77,6 +77,7 @@ static int pcie_poll_cmd(struct controller *ctrl, int timeout)
+ 		if (slot_status & PCI_EXP_SLTSTA_CC) {
+ 			pcie_capability_write_word(pdev, PCI_EXP_SLTSTA,
+ 						   PCI_EXP_SLTSTA_CC);
++			ctrl->cmd_busy = 0;
+ 			return 1;
+ 		}
+ 		if (timeout < 0)
+diff --git a/include/linux/netdevice.h b/include/linux/netdevice.h
+index d5e38ed..c7cfa9e 100644
+--- a/include/linux/netdevice.h
++++ b/include/linux/netdevice.h
+@@ -845,6 +845,27 @@ enum tc_setup_type {
+ 	TC_SETUP_QDISC_PRIO,
+ 	TC_SETUP_QDISC_MQ,
+ 	TC_SETUP_QDISC_ETF,
++	TC_SETUP_CT,
++	TC_SETUP_MINIFLOW,
++};
++
++struct tc_miniflow_offload {
++	struct sk_buff *skb;
++	unsigned long cookie;
++	bool last_flow;
++	bool is_drop;
++	uint32_t chain_index;
++};
++
++struct tc_ct_offload {
++	struct sk_buff *skb;
++	struct net *net;
++	struct nf_conntrack_tuple *tuple;
++	struct nf_conntrack_zone *zone;
++	unsigned long nat;
++	__be32 ipv4;
++	__be16 port;
++	__u8 proto;
+ };
+ 
+ /* These structures hold the attributes of bpf state that are being passed
+diff --git a/include/linux/skbuff.h b/include/linux/skbuff.h
+index 8e63c16..367d960 100644
+--- a/include/linux/skbuff.h
++++ b/include/linux/skbuff.h
+@@ -619,6 +619,7 @@ enum {
+  *	@tc_at_ingress: used within tc_classify to distinguish in/egress
+  *	@tc_redirected: packet was redirected by a tc action
+  *	@tc_from_ingress: if tc_redirected, tc_at_ingress at time of redirect
++ *	@recirc_id: classifier chain id
+  *	@peeked: this packet has been seen already, so stats have been
+  *		done for it, don't do them again
+  *	@nf_trace: netfilter packet trace flag
+@@ -797,6 +798,7 @@ struct sk_buff {
+ 	__u8			tc_at_ingress:1;
+ 	__u8			tc_redirected:1;
+ 	__u8			tc_from_ingress:1;
++	__u32			recirc_id;	/* classifier chain id */
+ #endif
+ #ifdef CONFIG_TLS_DEVICE
+ 	__u8			decrypted:1;
+diff --git a/include/net/act_api.h b/include/net/act_api.h
+index 05c7df4..e7307a5 100644
+--- a/include/net/act_api.h
++++ b/include/net/act_api.h
+@@ -202,6 +202,11 @@ void tc_setup_cb_egdev_unregister(const struct net_device *dev,
+ int tc_setup_cb_egdev_call(const struct net_device *dev,
+ 			   enum tc_setup_type type, void *type_data,
+ 			   bool err_stop);
++int tc_setup_cb_egdev_all_register(const struct net_device *dev,
++				   tc_setup_cb_t *cb, void *cb_priv);
++void tc_setup_cb_egdev_all_unregister(const struct net_device *dev,
++				      tc_setup_cb_t *cb, void *cb_priv);
++int tc_setup_cb_egdev_all_call_fast(enum tc_setup_type type, void *type_data);
+ #else
+ static inline
+ int tc_setup_cb_egdev_register(const struct net_device *dev,
+@@ -223,6 +228,23 @@ int tc_setup_cb_egdev_call(const struct net_device *dev,
+ {
+ 	return 0;
+ }
++
++static inline int tc_setup_cb_egdev_all_register(const struct net_device *dev,
++						 tc_setup_cb_t *cb, void *cb_priv)
++{
++	return 0;
++}
++
++static inline void tc_setup_cb_egdev_all_unregister(const struct net_device *dev,
++						    tc_setup_cb_t *cb, void *cb_priv)
++{
++}
++
++static inline int tc_setup_cb_egdev_all_call_fast(enum tc_setup_type type,
++                                                  void *type_data)
++{
++	return 0;
++}
+ #endif
+ 
+ #endif
+diff --git a/include/net/gre.h b/include/net/gre.h
+index 797142e..b60f212 100644
+--- a/include/net/gre.h
++++ b/include/net/gre.h
+@@ -37,8 +37,17 @@ struct net_device *gretap_fb_dev_create(struct net *net, const char *name,
+ int gre_parse_header(struct sk_buff *skb, struct tnl_ptk_info *tpi,
+ 		     bool *csum_err, __be16 proto, int nhs);
+ 
+-bool is_gretap_dev(const struct net_device *dev);
+-bool is_ip6gretap_dev(const struct net_device *dev);
++static inline bool netif_is_gretap(const struct net_device *dev)
++{
++	return dev->rtnl_link_ops &&
++	       !strcmp(dev->rtnl_link_ops->kind, "gretap");
++}
++
++static inline bool netif_is_ip6gretap(const struct net_device *dev)
++{
++	return dev->rtnl_link_ops &&
++	       !strcmp(dev->rtnl_link_ops->kind, "ip6gretap");
++}
+ 
+ static inline int gre_calc_hlen(__be16 o_flags)
+ {
+diff --git a/include/net/pkt_cls.h b/include/net/pkt_cls.h
+index 72ffb31..0987f94 100644
+--- a/include/net/pkt_cls.h
++++ b/include/net/pkt_cls.h
+@@ -81,6 +81,14 @@ void __tcf_block_cb_unregister(struct tcf_block *block,
+ 			       struct tcf_block_cb *block_cb);
+ void tcf_block_cb_unregister(struct tcf_block *block,
+ 			     tc_setup_cb_t *cb, void *cb_ident);
++int __tc_indr_block_cb_register(struct net_device *dev, void *cb_priv,
++				tc_indr_block_bind_cb_t *cb, void *cb_ident);
++int tc_indr_block_cb_register(struct net_device *dev, void *cb_priv,
++			      tc_indr_block_bind_cb_t *cb, void *cb_ident);
++void __tc_indr_block_cb_unregister(struct net_device *dev,
++				   tc_indr_block_bind_cb_t *cb, void *cb_ident);
++void tc_indr_block_cb_unregister(struct net_device *dev,
++				 tc_indr_block_bind_cb_t *cb, void *cb_ident);
+ 
+ int tcf_classify(struct sk_buff *skb, const struct tcf_proto *tp,
+ 		 struct tcf_result *res, bool compat_mode);
+@@ -183,6 +191,32 @@ void tcf_block_cb_unregister(struct tcf_block *block,
+ {
+ }
+ 
++static inline
++int __tc_indr_block_cb_register(struct net_device *dev, void *cb_priv,
++				tc_indr_block_bind_cb_t *cb, void *cb_ident)
++{
++	return 0;
++}
++
++static inline
++int tc_indr_block_cb_register(struct net_device *dev, void *cb_priv,
++			      tc_indr_block_bind_cb_t *cb, void *cb_ident)
++{
++	return 0;
++}
++
++static inline
++void __tc_indr_block_cb_unregister(struct net_device *dev,
++				   tc_indr_block_bind_cb_t *cb, void *cb_ident)
++{
++}
++
++static inline
++void tc_indr_block_cb_unregister(struct net_device *dev,
++				 tc_indr_block_bind_cb_t *cb, void *cb_ident)
++{
++}
++
+ static inline int tcf_classify(struct sk_buff *skb, const struct tcf_proto *tp,
+ 			       struct tcf_result *res, bool compat_mode)
+ {
+@@ -588,6 +622,8 @@ static inline int tcf_valid_offset(const struct sk_buff *skb,
+ int tc_setup_cb_call(struct tcf_block *block, struct tcf_exts *exts,
+ 		     enum tc_setup_type type, void *type_data, bool err_stop);
+ 
++int tc_setup_cb_call_all(enum tc_setup_type type, void *type_data);
++
+ enum tc_block_command {
+ 	TC_BLOCK_BIND,
+ 	TC_BLOCK_UNBIND,
+@@ -601,6 +637,7 @@ struct tc_block_offload {
+ };
+ 
+ struct tc_cls_common_offload {
++	u32 handle;
+ 	u32 chain_index;
+ 	__be16 protocol;
+ 	u32 prio;
+@@ -730,6 +767,10 @@ struct tc_cls_flower_offload {
+ 	struct fl_flow_key *key;
+ 	struct tcf_exts *exts;
+ 	u32 classid;
++
++	/* FIXME: ugly */
++	u8 ct_state_key;
++	u8 ct_state_mask;
+ };
+ 
+ enum tc_matchall_command {
+@@ -853,5 +894,4 @@ struct tc_prio_qopt_offload {
+ 		struct tc_prio_qopt_offload_graft_params graft_params;
+ 	};
+ };
+-
+ #endif
+diff --git a/include/net/sch_generic.h b/include/net/sch_generic.h
+index 13327bd..f673a8c 100644
+--- a/include/net/sch_generic.h
++++ b/include/net/sch_generic.h
+@@ -24,6 +24,9 @@
+ typedef int tc_setup_cb_t(enum tc_setup_type type,
+ 			  void *type_data, void *cb_priv);
+ 
++typedef int tc_indr_block_bind_cb_t(struct net_device *dev, void *cb_priv,
++				    enum tc_setup_type type, void *type_data);
++
+ struct qdisc_rate_table {
+ 	struct tc_ratespec rate;
+ 	u32		data[256];
+diff --git a/include/net/tc_act/tc_ct.h b/include/net/tc_act/tc_ct.h
+new file mode 100644
+index 00000000..fcc33a9
+--- /dev/null
++++ b/include/net/tc_act/tc_ct.h
+@@ -0,0 +1,41 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef __NET_TC_CT_H
++#define __NET_TC_CT_H
++
++#include <net/act_api.h>
++#include <uapi/linux/tc_act/tc_ct.h>
++#include <linux/netfilter/nf_nat.h>
++
++struct tcf_conntrack_info {
++	struct tc_action common;
++	struct net *net;
++	u16 zone;
++	struct nf_conn *tmpl;
++	u32 labels[4];
++	u32 labels_mask[4];
++	u32 mark;
++	u32 mark_mask;
++	bool commit;
++	bool clear;
++	/* NAT */
++	u8 nat;
++	struct nf_nat_range2 range;
++};
++
++#define to_conntrack(a) ((struct tcf_conntrack_info *)a)
++
++static inline bool is_tcf_ct(const struct tc_action *a)
++{
++#ifdef CONFIG_NET_CLS_ACT
++	if (a->ops && a->ops->type == TCA_ACT_CONNTRACK)
++		return true;
++#endif
++	return false;
++}
++
++static inline struct tcf_conntrack_info *tcf_ct_info(const struct tc_action *a)
++{
++	return to_conntrack(a);
++}
++
++#endif /* __NET_TC_CT_H */
+diff --git a/include/uapi/linux/pkt_cls.h b/include/uapi/linux/pkt_cls.h
+index 401d0c1..10a5d83 100644
+--- a/include/uapi/linux/pkt_cls.h
++++ b/include/uapi/linux/pkt_cls.h
+@@ -485,11 +485,43 @@ enum {
+ 
+ 	TCA_FLOWER_IN_HW_COUNT,
+ 
++	TCA_FLOWER_KEY_PORT_SRC_MIN,	/* be16 */
++	TCA_FLOWER_KEY_PORT_SRC_MAX,	/* be16 */
++	TCA_FLOWER_KEY_PORT_DST_MIN,	/* be16 */
++	TCA_FLOWER_KEY_PORT_DST_MAX,	/* be16 */
++
++	TCA_FLOWER_KEY_CT_STATE,	/* u16 */
++	TCA_FLOWER_KEY_CT_STATE_MASK,	/* u16 */
++	TCA_FLOWER_KEY_CT_ZONE,		/* u16 */
++	TCA_FLOWER_KEY_CT_ZONE_MASK,	/* u16 */
++	TCA_FLOWER_KEY_CT_MARK,		/* u32 */
++	TCA_FLOWER_KEY_CT_MARK_MASK,	/* u32 */
++	TCA_FLOWER_KEY_CT_LABELS,	/* u128 */
++	TCA_FLOWER_KEY_CT_LABELS_MASK,	/* u128 */
++
+ 	__TCA_FLOWER_MAX,
+ };
+ 
+ #define TCA_FLOWER_MAX (__TCA_FLOWER_MAX - 1)
+ 
++/* TODO: FIXME: CT_STATE flags; is that the correct place? */
++/* Should we use OVS defines? e.g., OVS_CS_F_NEW */
++#define TCA_FLOWER_KEY_CT_FLAGS_NEW               0x01 /* Beginning of a new connection. */
++#define TCA_FLOWER_KEY_CT_FLAGS_ESTABLISHED       0x02 /* Part of an existing connection. */
++#define TCA_FLOWER_KEY_CT_FLAGS_RELATED           0x04 /* Related to an established
++							* connection. */
++#define TCA_FLOWER_KEY_CT_FLAGS_REPLY_DIR	  0x08 /* Flow is in the reply direction. */
++#define TCA_FLOWER_KEY_CT_FLAGS_INVALID           0x10 /* Could not track connection. */
++#define TCA_FLOWER_KEY_CT_FLAGS_TRACKED           0x20 /* Conntrack has occurred. */
++#define TCA_FLOWER_KEY_CT_FLAGS_SRC_NAT           0x40 /* Packet's source address/port was
++							* mangled by NAT.
++							*/
++#define TCA_FLOWER_KEY_CT_FLAGS_DST_NAT           0x80 /* Packet's destination address/port
++							* was mangled by NAT.
++							*/
++#define TCA_FLOWER_KEY_CT_FLAGS_NAT_MASK (TCA_FLOWER_KEY_CT_FLAGS_SRC_NAT | \
++					  TCA_FLOWER_KEY_CT_FLAGS_DST_NAT)
++
+ enum {
+ 	TCA_FLOWER_KEY_ENC_OPTS_UNSPEC,
+ 	TCA_FLOWER_KEY_ENC_OPTS_GENEVE, /* Nested
+diff --git a/include/uapi/linux/tc_act/tc_ct.h b/include/uapi/linux/tc_act/tc_ct.h
+new file mode 100644
+index 00000000..be5edd4
+--- /dev/null
++++ b/include/uapi/linux/tc_act/tc_ct.h
+@@ -0,0 +1,40 @@
++/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
++#ifndef __UAPI_TC_CT_H
++#define __UAPI_TC_CT_H
++
++#include <linux/types.h>
++#include <linux/pkt_cls.h>
++
++#define TCA_ACT_CONNTRACK 18
++
++struct tc_conntrack {
++	tc_gen;
++	__u16 zone;
++	__u32 labels[4];
++	__u32 labels_mask[4];
++	__u32 mark;
++	__u32 mark_mask;
++	bool commit;
++	bool clear;
++};
++
++enum {
++	TCA_CONNTRACK_UNSPEC,
++	TCA_CONNTRACK_PARMS,
++
++	TCA_CONNTRACK_TM,
++	TCA_CONNTRACK_PAD,
++
++	TCA_CONNTRACK_NAT,
++	TCA_CONNTRACK_NAT_SRC,
++	TCA_CONNTRACK_NAT_DST,
++	TCA_CONNTRACK_NAT_IP_MIN,
++	TCA_CONNTRACK_NAT_IP_MAX,
++	TCA_CONNTRACK_NAT_PORT_MIN,
++	TCA_CONNTRACK_NAT_PORT_MAX,
++
++	__TCA_CONNTRACK_MAX
++};
++#define TCA_CONNTRACK_MAX (__TCA_CONNTRACK_MAX - 1)
++
++#endif /* __UAPI_TC_CT_H */
+diff --git a/kernel/workqueue.c b/kernel/workqueue.c
+index 288b210..f5495e1 100644
+--- a/kernel/workqueue.c
++++ b/kernel/workqueue.c
+@@ -2436,8 +2436,14 @@ static int rescuer_thread(void *__rescuer)
+ 			 */
+ 			if (need_to_create_worker(pool)) {
+ 				spin_lock(&wq_mayday_lock);
+-				get_pwq(pwq);
+-				list_move_tail(&pwq->mayday_node, &wq->maydays);
++				/*
++				 * Queue iff we aren't racing destruction
++				 * and somebody else hasn't queued it already.
++				 */
++				if (wq->rescuer && list_empty(&pwq->mayday_node)) {
++					get_pwq(pwq);
++					list_add_tail(&pwq->mayday_node, &wq->maydays);
++				}
+ 				spin_unlock(&wq_mayday_lock);
+ 			}
+ 		}
+@@ -4484,7 +4490,8 @@ static void show_pwq(struct pool_workqueue *pwq)
+ 	pr_info("  pwq %d:", pool->id);
+ 	pr_cont_pool_info(pool);
+ 
+-	pr_cont(" active=%d/%d%s\n", pwq->nr_active, pwq->max_active,
++	pr_cont(" active=%d/%d refcnt=%d%s\n",
++		pwq->nr_active, pwq->max_active, pwq->refcnt,
+ 		!list_empty(&pwq->mayday_node) ? " MAYDAY" : "");
+ 
+ 	hash_for_each(pool->busy_hash, bkt, worker, hentry) {
+diff --git a/net/Kconfig b/net/Kconfig
+index f235edb..eb78739 100644
+--- a/net/Kconfig
++++ b/net/Kconfig
+@@ -442,6 +442,7 @@ config MAY_USE_DEVLINK
+ 
+ config PAGE_POOL
+        bool
++       default y
+ 
+ config FAILOVER
+ 	tristate "Generic failover module"
+diff --git a/net/ipv4/ip_gre.c b/net/ipv4/ip_gre.c
+index b5488c5..ea9842f 100644
+--- a/net/ipv4/ip_gre.c
++++ b/net/ipv4/ip_gre.c
+@@ -1344,12 +1344,6 @@ static void ipgre_tap_setup(struct net_device *dev)
+ 	ip_tunnel_setup(dev, gre_tap_net_id);
+ }
+ 
+-bool is_gretap_dev(const struct net_device *dev)
+-{
+-	return dev->netdev_ops == &gre_tap_netdev_ops;
+-}
+-EXPORT_SYMBOL_GPL(is_gretap_dev);
+-
+ static int ipgre_newlink(struct net *src_net, struct net_device *dev,
+ 			 struct nlattr *tb[], struct nlattr *data[],
+ 			 struct netlink_ext_ack *extack)
+diff --git a/net/ipv6/ip6_gre.c b/net/ipv6/ip6_gre.c
+index e83c41c..986d7ae 100644
+--- a/net/ipv6/ip6_gre.c
++++ b/net/ipv6/ip6_gre.c
+@@ -1893,12 +1893,6 @@ static void ip6gre_tap_setup(struct net_device *dev)
+ 	netif_keep_dst(dev);
+ }
+ 
+-bool is_ip6gretap_dev(const struct net_device *dev)
+-{
+-	return dev->netdev_ops == &ip6gre_tap_netdev_ops;
+-}
+-EXPORT_SYMBOL_GPL(is_ip6gretap_dev);
+-
+ static bool ip6gre_netlink_encap_parms(struct nlattr *data[],
+ 				       struct ip_tunnel_encap *ipencap)
+ {
+diff --git a/net/openvswitch/datapath.h b/net/openvswitch/datapath.h
+index c9eb267..2c5589e 100644
+--- a/net/openvswitch/datapath.h
++++ b/net/openvswitch/datapath.h
+@@ -112,6 +112,7 @@ struct ovs_skb_cb {
+ 	u16			mru;
+ 	u16			acts_origlen;
+ 	u32			cutlen;
++	u32			recirc_id;
+ };
+ #define OVS_CB(skb) ((struct ovs_skb_cb *)(skb)->cb)
+ 
+diff --git a/net/openvswitch/flow.c b/net/openvswitch/flow.c
+index f920a34..a710c86 100644
+--- a/net/openvswitch/flow.c
++++ b/net/openvswitch/flow.c
+@@ -861,7 +861,7 @@ int ovs_flow_key_extract(const struct ip_tunnel_info *tun_info,
+ 	if (res < 0)
+ 		return res;
+ 	key->mac_proto = res;
+-	key->recirc_id = 0;
++	key->recirc_id = OVS_CB(skb)->recirc_id;
+ 
+ 	err = key_extract(skb, key);
+ 	if (!err)
+diff --git a/net/openvswitch/vport.c b/net/openvswitch/vport.c
+index 19f6765..20b9885 100644
+--- a/net/openvswitch/vport.c
++++ b/net/openvswitch/vport.c
+@@ -28,6 +28,7 @@
+ #include <linux/rtnetlink.h>
+ #include <linux/compat.h>
+ #include <net/net_namespace.h>
++#include <net/pkt_cls.h>
+ #include <linux/module.h>
+ 
+ #include "datapath.h"
+@@ -442,6 +443,11 @@ int ovs_vport_receive(struct vport *vport, struct sk_buff *skb,
+ 	struct sw_flow_key key;
+ 	int error;
+ 
++	if (vport->ops->type == OVS_VPORT_TYPE_INTERNAL)
++		OVS_CB(skb)->recirc_id = 0;
++	else
++		OVS_CB(skb)->recirc_id = skb->recirc_id;
++
+ 	OVS_CB(skb)->input_vport = vport;
+ 	OVS_CB(skb)->mru = 0;
+ 	OVS_CB(skb)->cutlen = 0;
+diff --git a/net/sched/Kconfig b/net/sched/Kconfig
+index 1b9afde..5f3f3d7 100644
+--- a/net/sched/Kconfig
++++ b/net/sched/Kconfig
+@@ -912,6 +912,17 @@ config NET_ACT_TUNNEL_KEY
+ 	  To compile this code as a module, choose M here: the
+ 	  module will be called act_tunnel_key.
+ 
++config NET_ACT_CT
++        tristate "Connection tracking action"
++        depends on NET_CLS_ACT
++        ---help---
++          Say Y here to enable connection tracking action.
++
++          If unsure, say N.
++
++          To compile this code as a module, choose M here: the
++          module will be called act_conntrack.
++
+ config NET_IFE_SKBMARK
+         tristate "Support to encoding decoding skb mark on IFE action"
+         depends on NET_ACT_IFE
+diff --git a/net/sched/Makefile b/net/sched/Makefile
+index 8a40431..c0a02de 100644
+--- a/net/sched/Makefile
++++ b/net/sched/Makefile
+@@ -27,6 +27,7 @@ obj-$(CONFIG_NET_IFE_SKBMARK)	+= act_meta_mark.o
+ obj-$(CONFIG_NET_IFE_SKBPRIO)	+= act_meta_skbprio.o
+ obj-$(CONFIG_NET_IFE_SKBTCINDEX)	+= act_meta_skbtcindex.o
+ obj-$(CONFIG_NET_ACT_TUNNEL_KEY)+= act_tunnel_key.o
++obj-$(CONFIG_NET_ACT_CT)	+= act_ct.o
+ obj-$(CONFIG_NET_SCH_FIFO)	+= sch_fifo.o
+ obj-$(CONFIG_NET_SCH_CBQ)	+= sch_cbq.o
+ obj-$(CONFIG_NET_SCH_HTB)	+= sch_htb.o
+diff --git a/net/sched/act_api.c b/net/sched/act_api.c
+index 9c1b072..6644fb0 100644
+--- a/net/sched/act_api.c
++++ b/net/sched/act_api.c
+@@ -1524,6 +1524,7 @@ static int tc_dump_action(struct sk_buff *skb, struct netlink_callback *cb)
+ 
+ struct tcf_action_net {
+ 	struct rhashtable egdev_ht;
++	struct list_head egdev_list;
+ };
+ 
+ static unsigned int tcf_action_net_id;
+@@ -1671,6 +1672,7 @@ static int __tc_setup_cb_egdev_register(const struct net_device *dev,
+ 	tcf_action_egdev_put(egdev);
+ 	return err;
+ }
++
+ int tc_setup_cb_egdev_register(const struct net_device *dev,
+ 			       tc_setup_cb_t *cb, void *cb_priv)
+ {
+@@ -1683,6 +1685,46 @@ int tc_setup_cb_egdev_register(const struct net_device *dev,
+ }
+ EXPORT_SYMBOL_GPL(tc_setup_cb_egdev_register);
+ 
++/* TODO: this name (egdev) does not make sense at all anymore */
++int tc_setup_cb_egdev_all_register(const struct net_device *dev,
++				   tc_setup_cb_t *cb, void *cb_priv)
++{
++	struct tcf_action_egdev_cb *egdev_cb;
++	struct tcf_action_net *tan;
++
++	egdev_cb = kzalloc(sizeof(*egdev_cb), GFP_KERNEL);
++	if (!egdev_cb)
++		return -ENOMEM;
++	egdev_cb->cb = cb;
++	egdev_cb->cb_priv = cb_priv;
++
++	rtnl_lock();
++	tan = net_generic(dev_net(dev), tcf_action_net_id);
++	list_add_tail(&egdev_cb->list, &tan->egdev_list);
++	rtnl_unlock();
++	return 0;
++}
++EXPORT_SYMBOL_GPL(tc_setup_cb_egdev_all_register);
++
++void tc_setup_cb_egdev_all_unregister(const struct net_device *dev,
++				      tc_setup_cb_t *cb, void *cb_priv)
++{
++	struct tcf_action_egdev_cb *egdev_cb;
++	struct tcf_action_net *tan;
++
++	rtnl_lock();
++	tan = net_generic(dev_net(dev), tcf_action_net_id);
++	list_for_each_entry(egdev_cb, &tan->egdev_list, list) {
++		if (egdev_cb->cb == cb && egdev_cb->cb_priv == cb_priv) {
++			list_del(&egdev_cb->list);
++			kfree(egdev_cb);
++			break;
++		}
++	}
++	rtnl_unlock();
++}
++EXPORT_SYMBOL_GPL(tc_setup_cb_egdev_all_unregister);
++
+ static void __tc_setup_cb_egdev_unregister(const struct net_device *dev,
+ 					   tc_setup_cb_t *cb, void *cb_priv)
+ {
+@@ -1693,6 +1735,7 @@ static void __tc_setup_cb_egdev_unregister(const struct net_device *dev,
+ 	tcf_action_egdev_cb_del(egdev, cb, cb_priv);
+ 	tcf_action_egdev_put(egdev);
+ }
++
+ void tc_setup_cb_egdev_unregister(const struct net_device *dev,
+ 				  tc_setup_cb_t *cb, void *cb_priv)
+ {
+@@ -1714,10 +1757,29 @@ int tc_setup_cb_egdev_call(const struct net_device *dev,
+ }
+ EXPORT_SYMBOL_GPL(tc_setup_cb_egdev_call);
+ 
++/* TODO: The egdev_list list is not protected */
++int tc_setup_cb_egdev_all_call_fast(enum tc_setup_type type, void *type_data)
++{
++	struct tcf_action_net *tan = net_generic(&init_net, tcf_action_net_id);
++	struct tcf_action_egdev_cb *egdev_cb;
++	int ok_count = 0;
++	int err;
++
++	list_for_each_entry(egdev_cb, &tan->egdev_list, list) {
++		err = egdev_cb->cb(type, type_data, egdev_cb->cb_priv);
++		if (!err)
++			ok_count++;
++	}
++
++	return ok_count;
++}
++EXPORT_SYMBOL_GPL(tc_setup_cb_egdev_all_call_fast);
++
+ static __net_init int tcf_action_net_init(struct net *net)
+ {
+ 	struct tcf_action_net *tan = net_generic(net, tcf_action_net_id);
+ 
++	INIT_LIST_HEAD(&tan->egdev_list);
+ 	return rhashtable_init(&tan->egdev_ht, &tcf_action_egdev_ht_params);
+ }
+ 
+diff --git a/net/sched/act_ct.c b/net/sched/act_ct.c
+new file mode 100644
+index 00000000..ad91ae0
+--- /dev/null
++++ b/net/sched/act_ct.c
+@@ -0,0 +1,820 @@
++/*
++ * net/sched/act_conntrack.c  connection tracking action
++ *
++ * Copyright (c) 2018 Yossi Kuperman <yossiku@mellanox.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++*/
++
++#include <linux/module.h>
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/skbuff.h>
++#include <linux/rtnetlink.h>
++#include <linux/pkt_cls.h>
++#include <linux/ip.h>
++#include <linux/ipv6.h>
++#include <net/netlink.h>
++#include <net/pkt_sched.h>
++#include <net/act_api.h>
++#include <uapi/linux/tc_act/tc_ct.h>
++#include <net/tc_act/tc_ct.h>
++
++#include <net/netfilter/nf_conntrack.h>
++#include <net/netfilter/nf_conntrack_core.h>
++#include <net/netfilter/nf_conntrack_zones.h>
++#include <net/netfilter/nf_conntrack_helper.h>
++#include <net/netfilter/nf_conntrack_labels.h>
++#include <linux/netfilter/nf_nat.h>
++#include <net/netfilter/nf_nat_core.h>
++#include <net/netfilter/nf_nat_l3proto.h>
++
++#include <net/ip.h>
++#include <net/pkt_cls.h>
++
++static unsigned int conntrack_net_id;
++static struct tc_action_ops act_conntrack_ops;
++
++enum ovs_ct_nat {
++	OVS_CT_NAT = 1 << 0,     /* NAT for committed connections only. */
++	OVS_CT_SRC_NAT = 1 << 1, /* Source NAT for NEW connections. */
++	OVS_CT_DST_NAT = 1 << 2, /* Destination NAT for NEW connections. */
++};
++
++static void ct_parse_nat(struct tc_ct_offload *cto,
++			 struct tcf_conntrack_info *ca,
++			 struct nf_conn *ct,
++			 enum ip_conntrack_info ctinfo)
++{
++	struct nf_conntrack_tuple target;
++	unsigned long nat = 0;
++
++	if (!(ct->status & IPS_NAT_MASK) || !ca->nat)
++		return;
++
++	if (ca->nat & OVS_CT_SRC_NAT) {
++		nat = IPS_SRC_NAT;
++	} else if (ca->nat & OVS_CT_DST_NAT) {
++		nat = IPS_DST_NAT;
++	} else {
++		if (CTINFO2DIR(ctinfo) == IP_CT_DIR_REPLY)
++			nat = ct->status & IPS_SRC_NAT ?
++			      IPS_DST_NAT : IPS_SRC_NAT;
++		else
++			nat = ct->status & IPS_SRC_NAT ?
++			      IPS_SRC_NAT : IPS_DST_NAT;
++	}
++
++	/* We are aiming to look like inverse of other direction. */
++	nf_ct_invert_tuplepr(&target, nf_ct_tuple(ct, !CTINFO2DIR(ctinfo)));
++
++	if (nat & IPS_SRC_NAT) {
++		cto->ipv4 = target.src.u3.ip;
++		cto->port = target.src.u.all;
++	}
++
++	if (nat & IPS_DST_NAT) {
++		cto->ipv4 = target.dst.u3.ip;
++		cto->port = target.dst.u.all;
++	}
++
++	cto->proto = target.dst.protonum;
++	cto->nat = nat;
++}
++
++static void ct_notify_underlying_device(struct sk_buff *skb,
++					struct tcf_conntrack_info *ca,
++					struct nf_conn *ct,
++					enum ip_conntrack_info ctinfo,
++					struct net *net)
++{
++	struct tc_ct_offload cto = { skb, net, NULL, NULL };
++
++	if (ct) {
++		cto.zone = (struct nf_conntrack_zone *)nf_ct_zone(ct);
++		cto.tuple = nf_ct_tuple(ct, CTINFO2DIR(ctinfo));
++
++		ct_parse_nat(&cto, ca, ct, ctinfo);
++	}
++
++	tc_setup_cb_call_all(TC_SETUP_CT, &cto);
++}
++
++static bool skb_nfct_cached(struct net *net, struct sk_buff *skb, u16 zone_id)
++{
++	enum ip_conntrack_info ctinfo;
++	struct nf_conn *ct;
++
++	ct = nf_ct_get(skb, &ctinfo);
++	if (!ct)
++		return false;
++
++	if (!net_eq(net, read_pnet(&ct->ct_net)))
++		return false;
++	if (nf_ct_zone(ct)->id != zone_id)
++		return false;
++	return true;
++}
++
++/* Trim the skb to the length specified by the IP/IPv6 header,
++ * removing any trailing lower-layer padding. This prepares the skb
++ * for higher-layer processing that assumes skb->len excludes padding
++ * (such as nf_ip_checksum). The caller needs to pull the skb to the
++ * network header, and ensure ip_hdr/ipv6_hdr points to valid data.
++ */
++static int tcf_skb_network_trim(struct sk_buff *skb)
++{
++	unsigned int len;
++	int err;
++
++	switch (skb->protocol) {
++	case htons(ETH_P_IP):
++		len = ntohs(ip_hdr(skb)->tot_len);
++		break;
++	case htons(ETH_P_IPV6):
++		len = sizeof(struct ipv6hdr)
++			+ ntohs(ipv6_hdr(skb)->payload_len);
++		break;
++	default:
++		len = skb->len;
++	}
++
++	err = pskb_trim_rcsum(skb, len);
++
++	return err;
++}
++
++static u_int8_t tcf_skb_family(struct sk_buff *skb)
++{
++	u_int8_t family = PF_UNSPEC;
++
++	switch (skb->protocol) {
++	case htons(ETH_P_IP):
++		family = PF_INET;
++		break;
++	case htons(ETH_P_IPV6):
++		family = PF_INET6;
++		break;
++	default:
++        break;
++	}
++
++	return family;
++}
++
++static int tcf_conntrack_nat_execute(struct sk_buff *skb, struct nf_conn *ct,
++				     enum ip_conntrack_info ctinfo,
++				     const struct nf_nat_range2 *range,
++				     enum nf_nat_manip_type maniptype)
++{
++	int hooknum, err = NF_ACCEPT;
++
++	/* See HOOK2MANIP(). */
++	if (maniptype == NF_NAT_MANIP_SRC)
++		hooknum = NF_INET_LOCAL_IN; /* Source NAT */
++	else
++		hooknum = NF_INET_LOCAL_OUT; /* Destination NAT */
++
++	switch (ctinfo) {
++	case IP_CT_RELATED:
++	case IP_CT_RELATED_REPLY:
++		if (IS_ENABLED(CONFIG_NF_NAT_IPV4) &&
++		    skb->protocol == htons(ETH_P_IP) &&
++		    ip_hdr(skb)->protocol == IPPROTO_ICMP) {
++			if (!nf_nat_icmp_reply_translation(skb, ct, ctinfo,
++							   hooknum))
++				err = NF_DROP;
++			goto push;
++		} else if (IS_ENABLED(CONFIG_NF_NAT_IPV6) &&
++			   skb->protocol == htons(ETH_P_IPV6)) {
++			__be16 frag_off;
++			u8 nexthdr = ipv6_hdr(skb)->nexthdr;
++			int hdrlen = ipv6_skip_exthdr(skb,
++						      sizeof(struct ipv6hdr),
++						      &nexthdr, &frag_off);
++
++			if (hdrlen >= 0 && nexthdr == IPPROTO_ICMPV6) {
++				if (!nf_nat_icmpv6_reply_translation(skb, ct,
++								     ctinfo,
++								     hooknum,
++								     hdrlen))
++					err = NF_DROP;
++				goto push;
++			}
++		}
++		/* Non-ICMP, fall thru to initialize if needed. */
++	case IP_CT_NEW:
++		/* Seen it before?  This can happen for loopback, retrans,
++		 * or local packets.
++		 */
++		if (!nf_nat_initialized(ct, maniptype)) {
++			/* Initialize according to the NAT action. */
++			err = (range && range->flags & NF_NAT_RANGE_MAP_IPS)
++				/* Action is set up to establish a new
++				 * mapping.
++				 */
++				? nf_nat_setup_info(ct, range, maniptype)
++				: nf_nat_alloc_null_binding(ct, hooknum);
++			if (err != NF_ACCEPT)
++				goto push;
++		}
++		break;
++
++	case IP_CT_ESTABLISHED:
++	case IP_CT_ESTABLISHED_REPLY:
++		break;
++
++	default:
++		err = NF_DROP;
++		goto push;
++	}
++
++	err = nf_nat_packet(ct, ctinfo, hooknum, skb);
++push:
++	return err;
++}
++
++/* Returns NF_DROP if the packet should be dropped, NF_ACCEPT otherwise. */
++static int tcf_conntrack_nat(struct net *net,
++			     struct tcf_conntrack_info *info,
++			     struct sk_buff *skb, struct nf_conn *ct,
++			     enum ip_conntrack_info ctinfo)
++{
++	enum nf_nat_manip_type maniptype;
++	int err;
++
++	/* Add NAT extension if not confirmed yet. */
++	if (!nf_ct_is_confirmed(ct) && !nf_ct_nat_ext_add(ct))
++		return NF_ACCEPT;   /* Can't NAT. */
++
++	/* Determine NAT type.
++	 * Check if the NAT type can be deduced from the tracked connection.
++	 * Make sure new expected connections (IP_CT_RELATED) are NATted only
++	 * when committing.
++	 */
++	if (info->nat & OVS_CT_NAT && ctinfo != IP_CT_NEW &&
++	    ct->status & IPS_NAT_MASK &&
++	    (ctinfo != IP_CT_RELATED || info->commit)) {
++		/* NAT an established or related connection like before. */
++		if (CTINFO2DIR(ctinfo) == IP_CT_DIR_REPLY)
++			/* This is the REPLY direction for a connection
++			 * for which NAT was applied in the forward
++			 * direction.  Do the reverse NAT.
++			 */
++			maniptype = ct->status & IPS_SRC_NAT
++				? NF_NAT_MANIP_DST : NF_NAT_MANIP_SRC;
++		else
++			maniptype = ct->status & IPS_SRC_NAT
++				? NF_NAT_MANIP_SRC : NF_NAT_MANIP_DST;
++	} else if (info->nat & OVS_CT_SRC_NAT) {
++		maniptype = NF_NAT_MANIP_SRC;
++	} else if (info->nat & OVS_CT_DST_NAT) {
++		maniptype = NF_NAT_MANIP_DST;
++	} else {
++		return NF_ACCEPT; /* Connection is not NATed. */
++	}
++
++	err = tcf_conntrack_nat_execute(skb, ct, ctinfo, &info->range,
++					maniptype);
++
++	return err;
++}
++
++static void tcf_ct_clear(struct sk_buff *skb)
++{
++	if (skb_nfct(skb)) {
++		nf_conntrack_put(skb_nfct(skb));
++		nf_ct_set(skb, NULL, IP_CT_UNTRACKED);
++	}
++}
++
++static int __tcf_conntrack(struct sk_buff *skb,
++			   struct tcf_conntrack_info *ca,
++			   u_int8_t family,
++			   const struct tc_action *a,
++			   struct tcf_result *res)
++{
++	struct net *net = dev_net(skb->dev);
++	enum ip_conntrack_info ctinfo;
++	struct nf_conn *tmpl = NULL;
++	struct nf_conn *ct;
++	bool cached;
++	struct nf_hook_state state = {
++		.hook = NF_INET_PRE_ROUTING,
++		.pf = PF_INET,
++		.net = net,
++	};
++	int err;
++
++	tmpl = ca->tmpl;
++	cached = skb_nfct_cached(net, skb, ca->zone);
++
++	if (!cached) {
++		if (tmpl) {
++			if (skb_nfct(skb))
++				nf_conntrack_put(skb_nfct(skb));
++
++			nf_ct_set(skb, tmpl, IP_CT_NEW);
++		}
++
++		state.pf = family;
++		err = nf_conntrack_in(skb, &state);
++		if (err != NF_ACCEPT)
++			goto drop;
++	} else {
++		if (tmpl)
++			nf_conntrack_put(&tmpl->ct_general);
++	}
++
++	ct = nf_ct_get(skb, &ctinfo);
++	if (!ct)
++		goto out;
++
++	if (ca->nat && (nf_ct_is_confirmed(ct) || ca->commit)) {
++		err = tcf_conntrack_nat(net, ca, skb, ct, ctinfo);
++		if (err != NF_ACCEPT)
++			goto drop;
++	}
++
++	if (ctinfo == IP_CT_ESTABLISHED ||
++	    ctinfo == IP_CT_ESTABLISHED_REPLY) {
++		/* TODO: I'm not sure if that "cached" thing affects NAT? */
++		if (!cached)
++			ct_notify_underlying_device(skb, ca, ct, ctinfo, net);
++	}
++
++	/* TODO: must check this code very carefully; move to another function */
++	if (ca->commit) {
++		u32 *labels = ca->labels;
++		u32 *labels_m = ca->labels_mask;
++
++#if IS_ENABLED(CONFIG_NF_CONNTRACK_MARK)
++		if (ca->mark_mask) {
++			u32 ct_mark = ca->mark;
++			u32 mask = ca->mark_mask;
++			u32 new_mark;
++
++			new_mark = ct_mark | (ct->mark & ~(mask));
++			if (ct->mark != new_mark) {
++				ct->mark = new_mark;
++				if (nf_ct_is_confirmed(ct))
++					nf_conntrack_event_cache(IPCT_MARK, ct);
++			}
++		}
++#endif
++		if (!nf_ct_is_confirmed(ct)) {
++			struct nf_conn_labels *cl, *master_cl;
++			bool have_mask = !!(memchr_inv(ca->labels_mask, 0, sizeof(ca->labels_mask)));
++
++			/* Inherit master's labels to the related connection? */
++			master_cl = ct->master ? nf_ct_labels_find(ct->master) : NULL;
++
++			if (!master_cl && !have_mask)
++				goto skip; /* Nothing to do. */
++
++			cl = nf_ct_labels_find(ct);
++			if (!cl) {
++				nf_ct_labels_ext_add(ct);
++				cl = nf_ct_labels_find(ct);
++			}
++
++			if (!cl)
++				goto drop;
++
++			/* Inherit the master's labels, if any.  Must use memcpy for backport
++			 * as struct assignment only copies the length field in older
++			 * kernels.
++	 		*/
++			if (master_cl)
++				memcpy(cl->bits, master_cl->bits, NF_CT_LABELS_MAX_SIZE);
++
++			if (have_mask) {
++				u32 *dst = (u32 *)cl->bits;
++				int i;
++
++				for (i = 0; i < 4; i++)
++					dst[i] = (dst[i] & ~labels_m[i]) | (labels[i] & labels_m[i]);
++
++				//todo: can we just replace?
++			}
++
++			/* Labels are included in the IPCTNL_MSG_CT_NEW event only if the
++			 * IPCT_LABEL bit is set in the event cache.
++			 */
++			nf_conntrack_event_cache(IPCT_LABEL, ct);
++		} else if (!!memchr_inv(labels_m, 0, sizeof(ca->labels_mask))) {
++			struct nf_conn_labels *cl;
++
++			cl = nf_ct_labels_find(ct);
++			if (!cl) {
++				nf_ct_labels_ext_add(ct);
++				cl = nf_ct_labels_find(ct);
++			}
++
++			if (!cl)
++				goto drop;
++
++			nf_connlabels_replace(ct, ca->labels, ca->labels_mask, 4);
++		}
++skip:
++		if (nf_conntrack_confirm(skb) != NF_ACCEPT)
++			goto drop;
++	}
++
++	return ca->tcf_action;
++
++out:
++	ct_notify_underlying_device(skb, ca, NULL, IP_CT_UNTRACKED, net);
++	return ca->tcf_action;
++
++drop:
++	return TC_ACT_SHOT;
++}
++
++static int tcf_conntrack(struct sk_buff *skb, const struct tc_action *a,
++			 struct tcf_result *res)
++{
++	struct tcf_conntrack_info *orig_ca = to_conntrack(a);
++	struct tcf_conntrack_info tmp_ca;
++	u_int8_t family;
++	int nh_ofs;
++	int err;
++
++	err = tcf_skb_network_trim(skb);
++	if (err)
++		return TC_ACT_SHOT;
++
++	family = tcf_skb_family(skb);
++	if (family == PF_UNSPEC)
++		return TC_ACT_SHOT;
++
++	/* TODO: temporary; should be in a different action? */
++	if (orig_ca->clear) {
++		tcf_ct_clear(skb);
++		return orig_ca->tcf_action;
++	}
++
++	/* The conntrack module expects to be working at L3. */
++	nh_ofs = skb_network_offset(skb);
++	skb_pull_rcsum(skb, nh_ofs);
++
++	spin_lock(&orig_ca->tcf_lock);
++	tcf_lastuse_update(&orig_ca->tcf_tm);
++	bstats_update(&orig_ca->tcf_bstats, skb);
++	memcpy(&tmp_ca, orig_ca, sizeof(tmp_ca));
++
++	if (orig_ca->tmpl)
++		nf_conntrack_get(&orig_ca->tmpl->ct_general);
++	spin_unlock(&orig_ca->tcf_lock);
++
++	err = __tcf_conntrack(skb, &tmp_ca, family, a, res);
++
++	skb_push(skb, nh_ofs);
++	skb_postpush_rcsum(skb, skb->data, nh_ofs);
++
++	return err;
++}
++
++static const struct nla_policy conntrack_policy[TCA_CONNTRACK_MAX + 1] = {
++	[TCA_CONNTRACK_PARMS] = { .len = sizeof(struct tc_conntrack) },
++	/* TODO: should be nested */
++	/* TODO: support IPv6 */
++	[TCA_CONNTRACK_NAT] = { .type = NLA_FLAG },
++	[TCA_CONNTRACK_NAT_SRC] = { .type = NLA_FLAG },
++	[TCA_CONNTRACK_NAT_DST] = { .type = NLA_FLAG },
++	[TCA_CONNTRACK_NAT_IP_MIN] = { .type = NLA_U32 },
++	[TCA_CONNTRACK_NAT_IP_MAX] = { .type = NLA_U32 },
++	[TCA_CONNTRACK_NAT_PORT_MIN] = { .type = NLA_U16 },
++	[TCA_CONNTRACK_NAT_PORT_MAX] = { .type = NLA_U16 },
++};
++
++static void tcf_conntrack_nat_parse(struct tcf_conntrack_info *info,
++				    struct nlattr *tb[])
++{
++	bool have_ip_max = false;
++	bool have_proto_max = false;
++
++	if (!tb[TCA_CONNTRACK_NAT])
++		return;
++
++	info->nat |= OVS_CT_NAT;
++
++	if (tb[TCA_CONNTRACK_NAT_SRC])
++		info->nat |= OVS_CT_SRC_NAT;
++	if (tb[TCA_CONNTRACK_NAT_DST])
++		info->nat |= OVS_CT_DST_NAT;
++
++	if (tb[TCA_CONNTRACK_NAT_IP_MIN]) {
++		info->range.min_addr.ip = nla_get_u32(tb[TCA_CONNTRACK_NAT_IP_MIN]);
++		info->range.flags |= NF_NAT_RANGE_MAP_IPS;
++	}
++	if (tb[TCA_CONNTRACK_NAT_IP_MAX]) {
++		info->range.max_addr.ip = nla_get_u32(tb[TCA_CONNTRACK_NAT_IP_MAX]);
++		info->range.flags |= NF_NAT_RANGE_MAP_IPS;
++		have_ip_max = true;
++	}
++
++	if (tb[TCA_CONNTRACK_NAT_PORT_MIN]) {
++		info->range.min_proto.all = htons(nla_get_u16(tb[TCA_CONNTRACK_NAT_PORT_MIN]));
++		info->range.flags |= NF_NAT_RANGE_PROTO_SPECIFIED;
++	}
++	if (tb[TCA_CONNTRACK_NAT_PORT_MAX]) {
++		info->range.max_proto.all = htons(nla_get_u16(tb[TCA_CONNTRACK_NAT_PORT_MAX]));
++		info->range.flags |= NF_NAT_RANGE_PROTO_SPECIFIED;
++		have_proto_max = true;
++	}
++
++	/* Allow missing IP_MAX. */
++	if (info->range.flags & NF_NAT_RANGE_MAP_IPS && !have_ip_max)
++		info->range.max_addr.ip = info->range.min_addr.ip;
++
++	/* Allow missing PROTO_MAX. */
++	if (info->range.flags & NF_NAT_RANGE_PROTO_SPECIFIED &&
++	    !have_proto_max) {
++		info->range.max_proto.all = info->range.min_proto.all;
++	}
++}
++
++static int tcf_conntrack_init(struct net *net, struct nlattr *nla,
++			     struct nlattr *est, struct tc_action **a,
++			     int ovr, int bind, bool rtnl_held,
++			     struct netlink_ext_ack *extack)
++{
++	struct tc_action_net *tn = net_generic(net, conntrack_net_id);
++	struct nlattr *tb[TCA_CONNTRACK_MAX + 1];
++	struct tcf_conntrack_info *ci;
++	struct tc_conntrack *parm;
++	int ret = 0;
++	struct nf_conntrack_zone zone;
++	struct nf_conn *tmpl = NULL;
++
++	if (!nla)
++		return -EINVAL;
++
++	ret = nla_parse_nested(tb, TCA_CONNTRACK_MAX, nla, conntrack_policy,
++			       NULL);
++	if (ret < 0)
++		return ret;
++
++	if (!tb[TCA_CONNTRACK_PARMS])
++		return -EINVAL;
++
++	parm = nla_data(tb[TCA_CONNTRACK_PARMS]);
++
++	ret = tcf_idr_check_alloc(tn, &parm->index, a, bind);
++	if (!ret) {
++		ret = tcf_idr_create(tn, parm->index, est, a,
++				     &act_conntrack_ops, bind, false);
++		if (ret) {
++			tcf_idr_cleanup(tn, parm->index);
++			return ret;
++		}
++
++		ci = to_conntrack(*a);
++		ci->tcf_action = parm->action;
++		ci->net = net;
++		ci->commit = parm->commit;
++		ci->clear = parm->clear;
++
++		tcf_conntrack_nat_parse(ci, tb);
++
++		ci->zone = parm->zone;
++		if (parm->zone != NF_CT_DEFAULT_ZONE_ID) {
++			nf_ct_zone_init(&zone, parm->zone,
++							NF_CT_DEFAULT_ZONE_DIR, 0);
++
++			tmpl = nf_ct_tmpl_alloc(net, &zone, GFP_ATOMIC);
++			if (!tmpl) {
++				pr_debug("Failed to allocate conntrack template");
++				tcf_idr_cleanup(tn, parm->index);
++				return -ENOMEM;
++			}
++			__set_bit(IPS_CONFIRMED_BIT, &tmpl->status);
++			nf_conntrack_get(&tmpl->ct_general);
++		}
++
++		ci->tmpl = tmpl;
++		ci->mark = parm->mark;
++		ci->mark_mask = parm->mark_mask;
++		memcpy(ci->labels, parm->labels, sizeof(parm->labels));
++		memcpy(ci->labels_mask, parm->labels_mask, sizeof(parm->labels_mask));
++
++		tcf_idr_insert(tn, *a);
++		ret = ACT_P_CREATED;
++	} else if (ret > 0) {
++		if (bind)
++			return 0;
++
++		if (!ovr) {
++			tcf_idr_release(*a, bind);
++			return -EEXIST;
++		}
++
++		if (parm->zone != NF_CT_DEFAULT_ZONE_ID) {
++			nf_ct_zone_init(&zone, parm->zone,
++							NF_CT_DEFAULT_ZONE_DIR, 0);
++
++			tmpl = nf_ct_tmpl_alloc(net, &zone, GFP_ATOMIC);
++			if (!tmpl) {
++				pr_debug("Failed to allocate conntrack template");
++				return -ENOMEM;
++			}
++		}
++
++		/* replacing action and zone */
++		ci = to_conntrack(*a);
++		spin_lock_bh(&ci->tcf_lock);
++		ci->tcf_action = parm->action;
++		ci->zone = parm->zone;
++		swap(ci->tmpl, tmpl);
++		spin_unlock_bh(&ci->tcf_lock);
++
++		if (tmpl) {
++			nf_conntrack_put(&tmpl->ct_general);
++		}
++
++		ret = 0;
++	}
++
++	return ret;
++}
++
++static void tcf_conntrack_release(struct tc_action *a)
++{
++	struct tcf_conntrack_info *ci = to_conntrack(a);
++	struct nf_conn *tmpl = NULL;
++
++	spin_lock_bh(&ci->tcf_lock);
++	if (ci->tmpl) {
++		swap(ci->tmpl, tmpl);
++	}
++	spin_unlock_bh(&ci->tcf_lock);
++
++	if (tmpl) {
++		nf_conntrack_put(&tmpl->ct_general);
++	}
++}
++
++static int tcf_conntrack_dump_nat(struct sk_buff *skb,
++				  struct tcf_conntrack_info *info)
++{
++	int err;
++
++	if (!info->nat)
++		return 0;
++
++	err = nla_put_flag(skb, TCA_CONNTRACK_NAT);
++	if (err)
++		goto nla_put_failure;
++
++	if (info->nat & OVS_CT_SRC_NAT) {
++		err = nla_put_flag(skb, TCA_CONNTRACK_NAT_SRC);
++		if (err)
++			goto nla_put_failure;
++	}
++
++	if (info->nat & OVS_CT_DST_NAT) {
++		err = nla_put_flag(skb, TCA_CONNTRACK_NAT_DST);
++		if (err)
++			goto nla_put_failure;
++	}
++
++	if (info->range.flags & NF_NAT_RANGE_MAP_IPS) {
++		err = nla_put_be32(skb, TCA_CONNTRACK_NAT_IP_MIN,
++				   info->range.min_addr.ip);
++		if (err)
++			goto nla_put_failure;
++
++		err = nla_put_be32(skb, TCA_CONNTRACK_NAT_IP_MAX,
++				   info->range.max_addr.ip);
++		if (err)
++			goto nla_put_failure;
++	}
++
++	if (info->range.flags & NF_NAT_RANGE_PROTO_SPECIFIED) {
++		err = nla_put_be16(skb, TCA_CONNTRACK_NAT_PORT_MIN,
++				   info->range.min_proto.all);
++		if (err)
++			goto nla_put_failure;
++
++		err = nla_put_be16(skb, TCA_CONNTRACK_NAT_PORT_MAX,
++				   info->range.max_proto.all);
++		if (err)
++			goto nla_put_failure;
++	}
++
++nla_put_failure:
++	return err;
++}
++
++static inline int tcf_conntrack_dump(struct sk_buff *skb, struct tc_action *a,
++				    int bind, int ref)
++{
++	unsigned char *b = skb_tail_pointer(skb);
++	struct tcf_conntrack_info *ci = to_conntrack(a);
++
++	struct tc_conntrack opt = {
++		.index   = ci->tcf_index,
++		.refcnt  = refcount_read(&ci->tcf_refcnt) - ref,
++		.bindcnt = atomic_read(&ci->tcf_bindcnt) - bind,
++	};
++	struct tcf_t t;
++
++ 	spin_lock_bh(&ci->tcf_lock);
++	opt.action  = ci->tcf_action,
++	opt.zone   = ci->zone,
++	opt.commit = ci->commit,
++	opt.clear = ci->clear,
++	opt.mark = ci->mark,
++	opt.mark_mask = ci->mark_mask,
++
++ 	memcpy(opt.labels, ci->labels, sizeof(opt.labels));
++	memcpy(opt.labels_mask, ci->labels_mask, sizeof(opt.labels_mask));
++
++	if (nla_put(skb, TCA_CONNTRACK_PARMS, sizeof(opt), &opt))
++		goto nla_put_failure;
++
++	if (tcf_conntrack_dump_nat(skb, ci))
++		goto nla_put_failure;
++
++	tcf_tm_dump(&t, &ci->tcf_tm);
++	if (nla_put_64bit(skb, TCA_CONNTRACK_TM, sizeof(t), &t,
++			  TCA_CONNTRACK_PAD))
++		goto nla_put_failure;
++	spin_unlock_bh(&ci->tcf_lock);
++
++	return skb->len;
++nla_put_failure:
++	spin_unlock_bh(&ci->tcf_lock);
++	nlmsg_trim(skb, b);
++	return -1;
++}
++
++static int tcf_conntrack_walker(struct net *net, struct sk_buff *skb,
++			       struct netlink_callback *cb, int type,
++			       const struct tc_action_ops *ops,
++			       struct netlink_ext_ack *extack)
++{
++	struct tc_action_net *tn = net_generic(net, conntrack_net_id);
++
++	return tcf_generic_walker(tn, skb, cb, type, ops, extack);
++}
++
++static int tcf_conntrack_search(struct net *net, struct tc_action **a, u32 index)
++{
++	struct tc_action_net *tn = net_generic(net, conntrack_net_id);
++
++	return tcf_idr_search(tn, a, index);
++}
++
++static struct tc_action_ops act_conntrack_ops = {
++	.kind		=	"ct",
++	.type		=	TCA_ACT_CONNTRACK,
++	.owner		=	THIS_MODULE,
++	.act		=	tcf_conntrack,
++	.dump		=	tcf_conntrack_dump,
++	.init		=	tcf_conntrack_init,
++	.cleanup	=	tcf_conntrack_release,
++	.walk		=	tcf_conntrack_walker,
++	.lookup		=	tcf_conntrack_search,
++	.size		=	sizeof(struct tcf_conntrack_info),
++};
++
++static __net_init int conntrack_init_net(struct net *net)
++{
++	struct tc_action_net *tn = net_generic(net, conntrack_net_id);
++
++	return tc_action_net_init(tn, &act_conntrack_ops);
++}
++
++static void __net_exit conntrack_exit_net(struct list_head *net_list)
++{
++	tc_action_net_exit(net_list, conntrack_net_id);
++}
++
++static struct pernet_operations conntrack_net_ops = {
++	.init = conntrack_init_net,
++	.exit_batch = conntrack_exit_net,
++	.id   = &conntrack_net_id,
++	.size = sizeof(struct tc_action_net),
++};
++
++static int __init conntrack_init_module(void)
++{
++	return tcf_register_action(&act_conntrack_ops, &conntrack_net_ops);
++}
++
++static void __exit conntrack_cleanup_module(void)
++{
++	tcf_unregister_action(&act_conntrack_ops, &conntrack_net_ops);
++}
++
++module_init(conntrack_init_module);
++module_exit(conntrack_cleanup_module);
++MODULE_AUTHOR("Yossi Kuperman <yossiku@mellanox.com>");
++MODULE_DESCRIPTION("Connection tracking action");
++MODULE_LICENSE("GPL");
++
+diff --git a/net/sched/act_mirred.c b/net/sched/act_mirred.c
+index c8cf4d1..1850bb8 100644
+--- a/net/sched/act_mirred.c
++++ b/net/sched/act_mirred.c
+@@ -158,6 +158,8 @@ static int tcf_mirred_init(struct net *net, struct nlattr *nla,
+ 		return -EEXIST;
+ 	}
+ 	m = to_mirred(*a);
++	if (ret == ACT_P_CREATED)
++		INIT_LIST_HEAD(&m->tcfm_list);
+ 
+ 	spin_lock_bh(&m->tcf_lock);
+ 	m->tcf_action = parm->action;
+diff --git a/net/sched/act_pedit.c b/net/sched/act_pedit.c
+index 2b372a0..8cf6b93 100644
+--- a/net/sched/act_pedit.c
++++ b/net/sched/act_pedit.c
+@@ -264,6 +264,7 @@ static bool offset_valid(struct sk_buff *skb, int offset)
+ static int pedit_skb_hdr_offset(struct sk_buff *skb,
+ 				enum pedit_header_type htype, int *hoffset)
+ {
++	struct flow_keys keys;
+ 	int ret = -EINVAL;
+ 
+ 	switch (htype) {
+@@ -281,8 +282,8 @@ static int pedit_skb_hdr_offset(struct sk_buff *skb,
+ 		break;
+ 	case TCA_PEDIT_KEY_EX_HDR_TYPE_TCP:
+ 	case TCA_PEDIT_KEY_EX_HDR_TYPE_UDP:
+-		if (skb_transport_header_was_set(skb)) {
+-			*hoffset = skb_transport_offset(skb);
++		if (skb_flow_dissect_flow_keys(skb, &keys, 0)) {
++			*hoffset = keys.control.thoff;
+ 			ret = 0;
+ 		}
+ 		break;
+diff --git a/net/sched/act_tunnel_key.c b/net/sched/act_tunnel_key.c
+index 6f16202..3f943de 100644
+--- a/net/sched/act_tunnel_key.c
++++ b/net/sched/act_tunnel_key.c
+@@ -219,9 +219,9 @@ static int tunnel_key_init(struct net *net, struct nlattr *nla,
+ 	struct tcf_tunnel_key *t;
+ 	bool exists = false;
+ 	__be16 dst_port = 0;
++	__be64 key_id = 0;
+ 	int opts_len = 0;
+-	__be64 key_id;
+-	__be16 flags;
++	__be16 flags = 0;
+ 	u8 tos, ttl;
+ 	int ret = 0;
+ 	int err;
+@@ -255,15 +255,15 @@ static int tunnel_key_init(struct net *net, struct nlattr *nla,
+ 	case TCA_TUNNEL_KEY_ACT_RELEASE:
+ 		break;
+ 	case TCA_TUNNEL_KEY_ACT_SET:
+-		if (!tb[TCA_TUNNEL_KEY_ENC_KEY_ID]) {
+-			NL_SET_ERR_MSG(extack, "Missing tunnel key id");
+-			ret = -EINVAL;
+-			goto err_out;
+-		}
++		if (tb[TCA_TUNNEL_KEY_ENC_KEY_ID]) {
++			__be32 key32;
+ 
+-		key_id = key32_to_tunnel_id(nla_get_be32(tb[TCA_TUNNEL_KEY_ENC_KEY_ID]));
++			key32 = nla_get_be32(tb[TCA_TUNNEL_KEY_ENC_KEY_ID]);
++			key_id = key32_to_tunnel_id(key32);
++			flags = TUNNEL_KEY;
++		}
+ 
+-		flags = TUNNEL_KEY | TUNNEL_CSUM;
++		flags |= TUNNEL_CSUM;
+ 		if (tb[TCA_TUNNEL_KEY_NO_CSUM] &&
+ 		    nla_get_u8(tb[TCA_TUNNEL_KEY_NO_CSUM]))
+ 			flags &= ~TUNNEL_CSUM;
+@@ -512,10 +512,13 @@ static int tunnel_key_dump(struct sk_buff *skb, struct tc_action *a,
+ 		struct ip_tunnel_key *key = &info->key;
+ 		__be32 key_id = tunnel_id_to_key32(key->tun_id);
+ 
+-		if (nla_put_be32(skb, TCA_TUNNEL_KEY_ENC_KEY_ID, key_id) ||
++		if (((key->tun_flags & TUNNEL_KEY) &&
++		     nla_put_be32(skb, TCA_TUNNEL_KEY_ENC_KEY_ID, key_id)) ||
+ 		    tunnel_key_dump_addresses(skb,
+ 					      &params->tcft_enc_metadata->u.tun_info) ||
+-		    nla_put_be16(skb, TCA_TUNNEL_KEY_ENC_DST_PORT, key->tp_dst) ||
++		    (key->tp_dst &&
++		      nla_put_be16(skb, TCA_TUNNEL_KEY_ENC_DST_PORT,
++				   key->tp_dst)) ||
+ 		    nla_put_u8(skb, TCA_TUNNEL_KEY_NO_CSUM,
+ 			       !(key->tun_flags & TUNNEL_CSUM)) ||
+ 		    tunnel_key_opts_dump(skb, info))
+diff --git a/net/sched/cls_api.c b/net/sched/cls_api.c
+index 1c44365..0616cdf 100644
+--- a/net/sched/cls_api.c
++++ b/net/sched/cls_api.c
+@@ -25,6 +25,7 @@
+ #include <linux/kmod.h>
+ #include <linux/slab.h>
+ #include <linux/idr.h>
++#include <linux/rhashtable.h>
+ #include <net/net_namespace.h>
+ #include <net/sock.h>
+ #include <net/netlink.h>
+@@ -365,6 +366,245 @@ static void tcf_chain_flush(struct tcf_chain *chain)
+ 	}
+ }
+ 
++static struct tcf_block *tc_dev_ingress_block(struct net_device *dev)
++{
++	const struct Qdisc_class_ops *cops;
++	struct Qdisc *qdisc;
++
++	if (!dev_ingress_queue(dev))
++		return NULL;
++
++	qdisc = dev_ingress_queue(dev)->qdisc_sleeping;
++	if (!qdisc)
++		return NULL;
++
++	cops = qdisc->ops->cl_ops;
++	if (!cops)
++		return NULL;
++
++	if (!cops->tcf_block)
++		return NULL;
++
++	return cops->tcf_block(qdisc, TC_H_MIN_INGRESS, NULL);
++}
++
++static struct rhashtable indr_setup_block_ht;
++
++struct tc_indr_block_dev {
++	struct rhash_head ht_node;
++	struct net_device *dev;
++	unsigned int refcnt;
++	struct list_head cb_list;
++	struct tcf_block *block;
++};
++
++struct tc_indr_block_cb {
++	struct list_head list;
++	void *cb_priv;
++	tc_indr_block_bind_cb_t *cb;
++	void *cb_ident;
++};
++
++static const struct rhashtable_params tc_indr_setup_block_ht_params = {
++	.key_offset	= offsetof(struct tc_indr_block_dev, dev),
++	.head_offset	= offsetof(struct tc_indr_block_dev, ht_node),
++	.key_len	= sizeof(struct net_device *),
++};
++
++static struct tc_indr_block_dev *
++tc_indr_block_dev_lookup(struct net_device *dev)
++{
++	return rhashtable_lookup_fast(&indr_setup_block_ht, &dev,
++				      tc_indr_setup_block_ht_params);
++}
++
++static struct tc_indr_block_dev *tc_indr_block_dev_get(struct net_device *dev)
++{
++	struct tc_indr_block_dev *indr_dev;
++
++	indr_dev = tc_indr_block_dev_lookup(dev);
++	if (indr_dev)
++		goto inc_ref;
++
++	indr_dev = kzalloc(sizeof(*indr_dev), GFP_KERNEL);
++	if (!indr_dev)
++		return NULL;
++
++	INIT_LIST_HEAD(&indr_dev->cb_list);
++	indr_dev->dev = dev;
++	indr_dev->block = tc_dev_ingress_block(dev);
++	if (rhashtable_insert_fast(&indr_setup_block_ht, &indr_dev->ht_node,
++				   tc_indr_setup_block_ht_params)) {
++		kfree(indr_dev);
++		return NULL;
++	}
++
++inc_ref:
++	indr_dev->refcnt++;
++	return indr_dev;
++}
++
++static void tc_indr_block_dev_put(struct tc_indr_block_dev *indr_dev)
++{
++	if (--indr_dev->refcnt)
++		return;
++
++	rhashtable_remove_fast(&indr_setup_block_ht, &indr_dev->ht_node,
++			       tc_indr_setup_block_ht_params);
++	kfree(indr_dev);
++}
++
++static struct tc_indr_block_cb *
++tc_indr_block_cb_lookup(struct tc_indr_block_dev *indr_dev,
++			tc_indr_block_bind_cb_t *cb, void *cb_ident)
++{
++	struct tc_indr_block_cb *indr_block_cb;
++
++	list_for_each_entry(indr_block_cb, &indr_dev->cb_list, list)
++		if (indr_block_cb->cb == cb &&
++		    indr_block_cb->cb_ident == cb_ident)
++			return indr_block_cb;
++	return NULL;
++}
++
++static struct tc_indr_block_cb *
++tc_indr_block_cb_add(struct tc_indr_block_dev *indr_dev, void *cb_priv,
++		     tc_indr_block_bind_cb_t *cb, void *cb_ident)
++{
++	struct tc_indr_block_cb *indr_block_cb;
++
++	indr_block_cb = tc_indr_block_cb_lookup(indr_dev, cb, cb_ident);
++	if (indr_block_cb)
++		return ERR_PTR(-EEXIST);
++
++	indr_block_cb = kzalloc(sizeof(*indr_block_cb), GFP_KERNEL);
++	if (!indr_block_cb)
++		return ERR_PTR(-ENOMEM);
++
++	indr_block_cb->cb_priv = cb_priv;
++	indr_block_cb->cb = cb;
++	indr_block_cb->cb_ident = cb_ident;
++	list_add(&indr_block_cb->list, &indr_dev->cb_list);
++
++	return indr_block_cb;
++}
++
++static void tc_indr_block_cb_del(struct tc_indr_block_cb *indr_block_cb)
++{
++	list_del(&indr_block_cb->list);
++	kfree(indr_block_cb);
++}
++
++static void tc_indr_block_ing_cmd(struct tc_indr_block_dev *indr_dev,
++				  struct tc_indr_block_cb *indr_block_cb,
++				  enum tc_block_command command)
++{
++	struct tc_block_offload bo = {
++		.command	= command,
++		.binder_type	= TCF_BLOCK_BINDER_TYPE_CLSACT_INGRESS,
++		.block		= indr_dev->block,
++	};
++
++	if (!indr_dev->block)
++		return;
++
++	indr_block_cb->cb(indr_dev->dev, indr_block_cb->cb_priv, TC_SETUP_BLOCK,
++			  &bo);
++}
++
++int __tc_indr_block_cb_register(struct net_device *dev, void *cb_priv,
++				tc_indr_block_bind_cb_t *cb, void *cb_ident)
++{
++	struct tc_indr_block_cb *indr_block_cb;
++	struct tc_indr_block_dev *indr_dev;
++	int err;
++
++	indr_dev = tc_indr_block_dev_get(dev);
++	if (!indr_dev)
++		return -ENOMEM;
++
++	indr_block_cb = tc_indr_block_cb_add(indr_dev, cb_priv, cb, cb_ident);
++	err = PTR_ERR_OR_ZERO(indr_block_cb);
++	if (err)
++		goto err_dev_put;
++
++	tc_indr_block_ing_cmd(indr_dev, indr_block_cb, TC_BLOCK_BIND);
++	return 0;
++
++err_dev_put:
++	tc_indr_block_dev_put(indr_dev);
++	return err;
++}
++EXPORT_SYMBOL_GPL(__tc_indr_block_cb_register);
++
++int tc_indr_block_cb_register(struct net_device *dev, void *cb_priv,
++			      tc_indr_block_bind_cb_t *cb, void *cb_ident)
++{
++	int err;
++
++	rtnl_lock();
++	err = __tc_indr_block_cb_register(dev, cb_priv, cb, cb_ident);
++	rtnl_unlock();
++
++	return err;
++}
++EXPORT_SYMBOL_GPL(tc_indr_block_cb_register);
++
++void __tc_indr_block_cb_unregister(struct net_device *dev,
++				   tc_indr_block_bind_cb_t *cb, void *cb_ident)
++{
++	struct tc_indr_block_cb *indr_block_cb;
++	struct tc_indr_block_dev *indr_dev;
++
++	indr_dev = tc_indr_block_dev_lookup(dev);
++	if (!indr_dev)
++		return;
++
++	indr_block_cb = tc_indr_block_cb_lookup(indr_dev, cb, cb_ident);
++	if (!indr_block_cb)
++		return;
++
++	/* Send unbind message if required to free any block cbs. */
++	tc_indr_block_ing_cmd(indr_dev, indr_block_cb, TC_BLOCK_UNBIND);
++	tc_indr_block_cb_del(indr_block_cb);
++	tc_indr_block_dev_put(indr_dev);
++}
++EXPORT_SYMBOL_GPL(__tc_indr_block_cb_unregister);
++
++void tc_indr_block_cb_unregister(struct net_device *dev,
++				 tc_indr_block_bind_cb_t *cb, void *cb_ident)
++{
++	rtnl_lock();
++	__tc_indr_block_cb_unregister(dev, cb, cb_ident);
++	rtnl_unlock();
++}
++EXPORT_SYMBOL_GPL(tc_indr_block_cb_unregister);
++
++static void tc_indr_block_call(struct tcf_block *block, struct net_device *dev,
++			       struct tcf_block_ext_info *ei,
++			       enum tc_block_command command,
++			       struct netlink_ext_ack *extack)
++{
++	struct tc_indr_block_cb *indr_block_cb;
++	struct tc_indr_block_dev *indr_dev;
++	struct tc_block_offload bo = {
++		.command	= command,
++		.binder_type	= ei->binder_type,
++		.block		= block,
++		.extack		= extack,
++	};
++
++	indr_dev = tc_indr_block_dev_lookup(dev);
++	if (!indr_dev)
++		return;
++
++	indr_dev->block = command == TC_BLOCK_BIND ? block : NULL;
++
++	list_for_each_entry(indr_block_cb, &indr_dev->cb_list, list)
++		indr_block_cb->cb(dev, indr_block_cb->cb_priv, TC_SETUP_BLOCK,
++				  &bo);
++}
++
+ static bool tcf_block_offload_in_use(struct tcf_block *block)
+ {
+ 	return block->offloadcnt;
+@@ -406,12 +646,17 @@ static int tcf_block_offload_bind(struct tcf_block *block, struct Qdisc *q,
+ 	err = tcf_block_offload_cmd(block, dev, ei, TC_BLOCK_BIND, extack);
+ 	if (err == -EOPNOTSUPP)
+ 		goto no_offload_dev_inc;
+-	return err;
++	if (err)
++		return err;
++
++	tc_indr_block_call(block, dev, ei, TC_BLOCK_BIND, extack);
++	return 0;
+ 
+ no_offload_dev_inc:
+ 	if (tcf_block_offload_in_use(block))
+ 		return -EOPNOTSUPP;
+ 	block->nooffloaddevcnt++;
++	tc_indr_block_call(block, dev, ei, TC_BLOCK_BIND, extack);
+ 	return 0;
+ }
+ 
+@@ -421,6 +666,8 @@ static void tcf_block_offload_unbind(struct tcf_block *block, struct Qdisc *q,
+ 	struct net_device *dev = q->dev_queue->dev;
+ 	int err;
+ 
++	tc_indr_block_call(block, dev, ei, TC_BLOCK_UNBIND, NULL);
++
+ 	if (!dev->netdev_ops->ndo_setup_tc)
+ 		goto no_offload_dev_dec;
+ 	err = tcf_block_offload_cmd(block, dev, ei, TC_BLOCK_UNBIND, NULL);
+@@ -1075,6 +1322,7 @@ int tcf_classify(struct sk_buff *skb, const struct tcf_proto *tp,
+ 			first_tp = orig_tp;
+ 			goto reset;
+ 		} else if (unlikely(TC_ACT_EXT_CMP(err, TC_ACT_GOTO_CHAIN))) {
++			skb->recirc_id = err & (TC_ACT_EXT_VAL_MASK);
+ 			first_tp = res->goto_tp;
+ 			goto reset;
+ 		}
+@@ -1210,6 +1458,7 @@ static int tfilter_notify(struct net *net, struct sk_buff *oskb,
+ {
+ 	struct sk_buff *skb;
+ 	u32 portid = oskb ? NETLINK_CB(oskb).portid : 0;
++	int err = 0;
+ 
+ 	skb = alloc_skb(NLMSG_GOODSIZE, GFP_KERNEL);
+ 	if (!skb)
+@@ -1222,10 +1471,14 @@ static int tfilter_notify(struct net *net, struct sk_buff *oskb,
+ 	}
+ 
+ 	if (unicast)
+-		return netlink_unicast(net->rtnl, skb, portid, MSG_DONTWAIT);
++		err = netlink_unicast(net->rtnl, skb, portid, MSG_DONTWAIT);
++	else
++		err = rtnetlink_send(skb, net, portid, RTNLGRP_TC,
++				     n->nlmsg_flags & NLM_F_ECHO);
+ 
+-	return rtnetlink_send(skb, net, portid, RTNLGRP_TC,
+-			      n->nlmsg_flags & NLM_F_ECHO);
++	if (err > 0)
++		err = 0;
++	return err;
+ }
+ 
+ static int tfilter_del_notify(struct net *net, struct sk_buff *oskb,
+@@ -1256,12 +1509,15 @@ static int tfilter_del_notify(struct net *net, struct sk_buff *oskb,
+ 	}
+ 
+ 	if (unicast)
+-		return netlink_unicast(net->rtnl, skb, portid, MSG_DONTWAIT);
+-
+-	err = rtnetlink_send(skb, net, portid, RTNLGRP_TC,
+-			     n->nlmsg_flags & NLM_F_ECHO);
++		err = netlink_unicast(net->rtnl, skb, portid, MSG_DONTWAIT);
++	else
++		err = rtnetlink_send(skb, net, portid, RTNLGRP_TC,
++				     n->nlmsg_flags & NLM_F_ECHO);
+ 	if (err < 0)
+ 		NL_SET_ERR_MSG(extack, "Failed to send filter delete notification");
++
++	if (err > 0)
++		err = 0;
+ 	return err;
+ }
+ 
+@@ -1859,6 +2115,7 @@ static int tc_chain_notify(struct tcf_chain *chain, struct sk_buff *oskb,
+ 	struct tcf_block *block = chain->block;
+ 	struct net *net = block->net;
+ 	struct sk_buff *skb;
++	int err = 0;
+ 
+ 	skb = alloc_skb(NLMSG_GOODSIZE, GFP_KERNEL);
+ 	if (!skb)
+@@ -1871,9 +2128,14 @@ static int tc_chain_notify(struct tcf_chain *chain, struct sk_buff *oskb,
+ 	}
+ 
+ 	if (unicast)
+-		return netlink_unicast(net->rtnl, skb, portid, MSG_DONTWAIT);
++		err = netlink_unicast(net->rtnl, skb, portid, MSG_DONTWAIT);
++	else
++		err = rtnetlink_send(skb, net, portid, RTNLGRP_TC,
++				     flags & NLM_F_ECHO);
+ 
+-	return rtnetlink_send(skb, net, portid, RTNLGRP_TC, flags & NLM_F_ECHO);
++	if (err > 0)
++		err = 0;
++	return err;
+ }
+ 
+ static int tc_chain_tmplt_add(struct tcf_chain *chain, struct net *net,
+@@ -2315,10 +2577,19 @@ int tc_setup_cb_call(struct tcf_block *block, struct tcf_exts *exts,
+ 		return ret;
+ 	ok_count += ret;
+ 
+-	return ok_count;
++	if (ok_count)
++		return ok_count;
++
++	return tc_setup_cb_egdev_all_call_fast(type, type_data);
+ }
+ EXPORT_SYMBOL(tc_setup_cb_call);
+ 
++int tc_setup_cb_call_all(enum tc_setup_type type, void *type_data)
++{
++	return tc_setup_cb_egdev_all_call_fast(type, type_data);
++}
++EXPORT_SYMBOL(tc_setup_cb_call_all);
++
+ static __net_init int tcf_net_init(struct net *net)
+ {
+ 	struct tcf_net *tn = net_generic(net, tcf_net_id);
+@@ -2354,6 +2625,11 @@ static int __init tc_filter_init(void)
+ 	if (err)
+ 		goto err_register_pernet_subsys;
+ 
++	err = rhashtable_init(&indr_setup_block_ht,
++			      &tc_indr_setup_block_ht_params);
++	if (err)
++		goto err_rhash_setup_block_ht;
++
+ 	rtnl_register(PF_UNSPEC, RTM_NEWTFILTER, tc_new_tfilter, NULL, 0);
+ 	rtnl_register(PF_UNSPEC, RTM_DELTFILTER, tc_del_tfilter, NULL, 0);
+ 	rtnl_register(PF_UNSPEC, RTM_GETTFILTER, tc_get_tfilter,
+@@ -2365,6 +2641,8 @@ static int __init tc_filter_init(void)
+ 
+ 	return 0;
+ 
++err_rhash_setup_block_ht:
++	unregister_pernet_subsys(&tcf_net_ops);
+ err_register_pernet_subsys:
+ 	destroy_workqueue(tc_filter_wq);
+ 	return err;
+diff --git a/net/sched/cls_flower.c b/net/sched/cls_flower.c
+index 2d81cd9..9aaa679 100644
+--- a/net/sched/cls_flower.c
++++ b/net/sched/cls_flower.c
+@@ -29,8 +29,17 @@
+ #include <net/dst.h>
+ #include <net/dst_metadata.h>
+ 
++#include <net/netfilter/nf_conntrack_core.h>
++#include <net/netfilter/nf_conntrack_labels.h>
++
++#include <net/tc_act/tc_gact.h>
++
+ struct fl_flow_key {
+ 	int	indev_ifindex;
++	u8	ct_state;
++	u16	ct_zone;
++	u32	ct_mark;
++	u32	ct_labels[4];
+ 	struct flow_dissector_key_control control;
+ 	struct flow_dissector_key_control enc_control;
+ 	struct flow_dissector_key_basic basic;
+@@ -186,6 +195,78 @@ static struct cls_fl_filter *fl_lookup(struct fl_flow_mask *mask,
+ 				      mask->filter_ht_params);
+ }
+ 
++static u8 fl_ct_get_state(struct nf_conn *ct, enum ip_conntrack_info ctinfo)
++{
++	u8 ct_state = TCA_FLOWER_KEY_CT_FLAGS_TRACKED;
++
++	switch (ctinfo) {
++	case IP_CT_ESTABLISHED_REPLY:
++	case IP_CT_RELATED_REPLY:
++		ct_state |= TCA_FLOWER_KEY_CT_FLAGS_REPLY_DIR;
++		break;
++	default:
++		break;
++	}
++
++	switch (ctinfo) {
++	case IP_CT_ESTABLISHED_REPLY:
++	case IP_CT_RELATED_REPLY:
++		ct_state |= TCA_FLOWER_KEY_CT_FLAGS_REPLY_DIR;
++		break;
++	default:
++		break;
++	}
++
++	switch (ctinfo) {
++	case IP_CT_ESTABLISHED:
++	case IP_CT_ESTABLISHED_REPLY:
++		ct_state |= TCA_FLOWER_KEY_CT_FLAGS_ESTABLISHED;
++		break;
++	case IP_CT_RELATED:
++	case IP_CT_RELATED_REPLY:
++		ct_state |= TCA_FLOWER_KEY_CT_FLAGS_RELATED;
++		break;
++	case IP_CT_NEW:
++		ct_state |= TCA_FLOWER_KEY_CT_FLAGS_NEW;
++		break;
++	default:
++		break;
++	}
++
++	if (ct->master)
++		ct_state |= TCA_FLOWER_KEY_CT_FLAGS_RELATED;
++
++	if (ct->status & IPS_SRC_NAT)
++		ct_state |= ct_state & TCA_FLOWER_KEY_CT_FLAGS_REPLY_DIR ?
++				       TCA_FLOWER_KEY_CT_FLAGS_DST_NAT :
++				       TCA_FLOWER_KEY_CT_FLAGS_SRC_NAT;
++	if (ct->status & IPS_DST_NAT)
++		ct_state |= ct_state & TCA_FLOWER_KEY_CT_FLAGS_REPLY_DIR ?
++				       TCA_FLOWER_KEY_CT_FLAGS_SRC_NAT :
++				       TCA_FLOWER_KEY_CT_FLAGS_DST_NAT;
++
++	return ct_state;
++}
++
++static void fl_notify_underlying_device(struct sk_buff *skb, const struct tcf_proto *tp,
++					struct cls_fl_filter *f)
++{
++	struct tcf_block *block = tp->chain->block;
++	struct tc_action **actions = f->exts.actions;
++	int nr_actions = f->exts.nr_actions;
++	struct tc_miniflow_offload mf;
++
++	WARN_ON(nr_actions < 1);
++
++	mf.skb = skb;
++	mf.cookie = tc_in_hw(f->flags) ? (unsigned long) f : 0;
++	mf.last_flow = !is_tcf_gact_goto_chain(actions[nr_actions-1]);
++	mf.is_drop = is_tcf_gact_shot(actions[nr_actions-1]);
++	mf.chain_index = tp->chain->index;
++
++	tc_setup_cb_call(block, &f->exts, TC_SETUP_MINIFLOW, &mf, false);
++}
++
+ static int fl_classify(struct sk_buff *skb, const struct tcf_proto *tp,
+ 		       struct tcf_result *res)
+ {
+@@ -194,11 +275,24 @@ static int fl_classify(struct sk_buff *skb, const struct tcf_proto *tp,
+ 	struct fl_flow_mask *mask;
+ 	struct fl_flow_key skb_key;
+ 	struct fl_flow_key skb_mkey;
++	enum ip_conntrack_info ctinfo;
++	struct nf_conn_labels *cl;
++	struct nf_conn *ct;
+ 
+ 	list_for_each_entry_rcu(mask, &head->masks, list) {
+ 		fl_clear_masked_range(&skb_key, mask);
+ 
+ 		skb_key.indev_ifindex = skb->skb_iif;
++		ct = nf_ct_get(skb, &ctinfo);
++		if (ct) {
++			skb_key.ct_state = fl_ct_get_state(ct, ctinfo);
++			skb_key.ct_zone = ct->zone.id;
++			skb_key.ct_mark = ct->mark;
++
++			cl = nf_ct_labels_find(ct);
++			if (cl)
++				memcpy(skb_key.ct_labels, cl->bits, sizeof(skb_key.ct_labels));
++		}
+ 		/* skb_flow_dissect() does not set n_proto in case an unknown
+ 		 * protocol, so do it rather here.
+ 		 */
+@@ -210,10 +304,12 @@ static int fl_classify(struct sk_buff *skb, const struct tcf_proto *tp,
+ 
+ 		f = fl_lookup(mask, &skb_mkey);
+ 		if (f && !tc_skip_sw(f->flags)) {
++			fl_notify_underlying_device(skb, tp, f);
+ 			*res = f->res;
+ 			return tcf_exts_exec(skb, &f->exts, res);
+ 		}
+ 	}
++
+ 	return -1;
+ }
+ 
+@@ -311,6 +407,10 @@ static int fl_hw_replace_filter(struct tcf_proto *tp,
+ 	cls_flower.key = &f->mkey;
+ 	cls_flower.exts = &f->exts;
+ 	cls_flower.classid = f->res.classid;
++	cls_flower.common.handle = f->handle;
++
++	cls_flower.ct_state_key = cls_flower.key->ct_state;
++	cls_flower.ct_state_mask = cls_flower.mask->ct_state;
+ 
+ 	err = tc_setup_cb_call(block, &f->exts, TC_SETUP_CLSFLOWER,
+ 			       &cls_flower, skip_sw);
+@@ -486,6 +586,16 @@ static void *fl_get(struct tcf_proto *tp, u32 handle)
+ 	[TCA_FLOWER_KEY_ENC_IP_TTL_MASK] = { .type = NLA_U8 },
+ 	[TCA_FLOWER_KEY_ENC_OPTS]	= { .type = NLA_NESTED },
+ 	[TCA_FLOWER_KEY_ENC_OPTS_MASK]	= { .type = NLA_NESTED },
++	[TCA_FLOWER_KEY_CT_STATE]	= { .type = NLA_U8 },
++	[TCA_FLOWER_KEY_CT_STATE_MASK]	= { .type = NLA_U8 },
++	[TCA_FLOWER_KEY_CT_ZONE]	= { .type = NLA_U16 },
++	[TCA_FLOWER_KEY_CT_ZONE_MASK]	= { .type = NLA_U16 },
++	[TCA_FLOWER_KEY_CT_MARK]	= { .type = NLA_U32 },
++	[TCA_FLOWER_KEY_CT_MARK_MASK]	= { .type = NLA_U32 },
++	[TCA_FLOWER_KEY_CT_LABELS]	= { .type = NLA_UNSPEC,
++					    .len = 16 },
++	[TCA_FLOWER_KEY_CT_LABELS_MASK]	= { .type = NLA_UNSPEC,
++					    .len = 16 },
+ };
+ 
+ static const struct nla_policy
+@@ -787,6 +897,26 @@ static int fl_set_key(struct net *net, struct nlattr **tb,
+ 	}
+ #endif
+ 
++	if (tb[TCA_FLOWER_KEY_CT_STATE]) {
++		key->ct_state = nla_get_u8(tb[TCA_FLOWER_KEY_CT_STATE]);
++		mask->ct_state = nla_get_u8(tb[TCA_FLOWER_KEY_CT_STATE_MASK]);
++	}
++
++	if (tb[TCA_FLOWER_KEY_CT_ZONE_MASK]) {
++		key->ct_zone = nla_get_u16(tb[TCA_FLOWER_KEY_CT_ZONE]);
++		mask->ct_zone = nla_get_u16(tb[TCA_FLOWER_KEY_CT_ZONE_MASK]);
++	}
++
++	if (tb[TCA_FLOWER_KEY_CT_MARK_MASK]) {
++		key->ct_mark = nla_get_u32(tb[TCA_FLOWER_KEY_CT_MARK]);
++		mask->ct_mark = nla_get_u32(tb[TCA_FLOWER_KEY_CT_MARK_MASK]);
++	}
++
++	if (tb[TCA_FLOWER_KEY_CT_LABELS_MASK]) {
++		memcpy(key->ct_labels, nla_data(tb[TCA_FLOWER_KEY_CT_LABELS]), nla_len(tb[TCA_FLOWER_KEY_CT_LABELS]));
++		memcpy(mask->ct_labels, nla_data(tb[TCA_FLOWER_KEY_CT_LABELS_MASK]), nla_len(tb[TCA_FLOWER_KEY_CT_LABELS_MASK]));
++	}
++
+ 	fl_set_key_val(tb, key->eth.dst, TCA_FLOWER_KEY_ETH_DST,
+ 		       mask->eth.dst, TCA_FLOWER_KEY_ETH_DST_MASK,
+ 		       sizeof(key->eth.dst));
+@@ -1688,6 +1818,23 @@ static int fl_dump_key(struct sk_buff *skb, struct net *net,
+ 			goto nla_put_failure;
+ 	}
+ 
++	/* TODO: check return value */
++	fl_dump_key_val(skb, &key->ct_state, TCA_FLOWER_KEY_CT_STATE,
++			&mask->ct_state, TCA_FLOWER_KEY_CT_STATE_MASK,
++			sizeof(key->ct_state));
++
++	fl_dump_key_val(skb, &key->ct_zone, TCA_FLOWER_KEY_CT_ZONE,
++			&mask->ct_zone, TCA_FLOWER_KEY_CT_ZONE_MASK,
++			sizeof(key->ct_zone));
++
++	fl_dump_key_val(skb, &key->ct_mark, TCA_FLOWER_KEY_CT_MARK,
++			&mask->ct_mark, TCA_FLOWER_KEY_CT_MARK_MASK,
++			sizeof(key->ct_mark));
++
++	fl_dump_key_val(skb, &key->ct_labels, TCA_FLOWER_KEY_CT_LABELS,
++			&mask->ct_labels, TCA_FLOWER_KEY_CT_LABELS_MASK,
++			sizeof(key->ct_labels));
++
+ 	if (fl_dump_key_val(skb, key->eth.dst, TCA_FLOWER_KEY_ETH_DST,
+ 			    mask->eth.dst, TCA_FLOWER_KEY_ETH_DST_MASK,
+ 			    sizeof(key->eth.dst)) ||
+diff --git a/net/sched/sch_api.c b/net/sched/sch_api.c
+index ca3b0f4..eecaa73 100644
+--- a/net/sched/sch_api.c
++++ b/net/sched/sch_api.c
+@@ -1763,6 +1763,7 @@ static int tclass_notify(struct net *net, struct sk_buff *oskb,
+ {
+ 	struct sk_buff *skb;
+ 	u32 portid = oskb ? NETLINK_CB(oskb).portid : 0;
++	int err = 0;
+ 
+ 	skb = alloc_skb(NLMSG_GOODSIZE, GFP_KERNEL);
+ 	if (!skb)
+@@ -1773,8 +1774,11 @@ static int tclass_notify(struct net *net, struct sk_buff *oskb,
+ 		return -EINVAL;
+ 	}
+ 
+-	return rtnetlink_send(skb, net, portid, RTNLGRP_TC,
+-			      n->nlmsg_flags & NLM_F_ECHO);
++	err = rtnetlink_send(skb, net, portid, RTNLGRP_TC,
++			     n->nlmsg_flags & NLM_F_ECHO);
++	if (err > 0)
++		err = 0;
++	return err;
+ }
+ 
+ static int tclass_del_notify(struct net *net,
+@@ -1805,8 +1809,11 @@ static int tclass_del_notify(struct net *net,
+ 		return err;
+ 	}
+ 
+-	return rtnetlink_send(skb, net, portid, RTNLGRP_TC,
+-			      n->nlmsg_flags & NLM_F_ECHO);
++	err = rtnetlink_send(skb, net, portid, RTNLGRP_TC,
++			     n->nlmsg_flags & NLM_F_ECHO);
++	if (err > 0)
++		err = 0;
++	return err;
+ }
+ 
+ #ifdef CONFIG_NET_CLS

@@ -1,0 +1,68 @@
+--- net/sched/cls_flower.c
++++ net/sched/cls_flower.c
+@@ -275,11 +356,24 @@ static int fl_classify(struct sk_buff *skb, const struct tcf_proto *tp,
+ 	struct fl_flow_mask *mask;
+ 	struct fl_flow_key skb_key;
+ 	struct fl_flow_key skb_mkey;
++	enum ip_conntrack_info ctinfo;
++	struct nf_conn_labels *cl;
++	struct nf_conn *ct;
+ 
+ 	list_for_each_entry_rcu(mask, &head->masks, list) {
+ 		fl_clear_masked_range(&skb_key, mask);
+ 
+ 		skb_key.indev_ifindex = skb->skb_iif;
++		ct = nf_ct_get(skb, &ctinfo);
++		if (ct) {
++			skb_key.ct_state = fl_ct_get_state(ct, ctinfo);
++			skb_key.ct_zone = ct->zone.id;
++			skb_key.ct_mark = ct->mark;
++
++			cl = nf_ct_labels_find(ct);
++			if (cl)
++				memcpy(skb_key.ct_labels, cl->bits, sizeof(skb_key.ct_labels));
++		}
+ 		/* skb_flow_dissect() does not set n_proto in case an unknown
+ 		 * protocol, so do it rather here.
+ 		 */
+@@ -291,10 +385,12 @@ static int fl_classify(struct sk_buff *skb, const struct tcf_proto *tp,
+ 
+ 		f = fl_lookup(mask, &skb_mkey);
+ 		if (f && !tc_skip_sw(f->flags)) {
++			fl_notify_underlying_device(skb, tp, f);
+ 			*res = f->res;
+ 			return tcf_exts_exec(skb, &f->exts, res);
+ 		}
+ 	}
++
+ 	return -1;
+ }
+ 
+@@ -392,6 +488,10 @@ static int fl_hw_replace_filter(struct tcf_proto *tp,
+ 	cls_flower.key = &f->mkey;
+ 	cls_flower.exts = &f->exts;
+ 	cls_flower.classid = f->res.classid;
++	cls_flower.common.handle = f->handle;
++
++	cls_flower.ct_state_key = cls_flower.key->ct_state;
++	cls_flower.ct_state_mask = cls_flower.mask->ct_state;
+ 
+ 	err = tc_setup_cb_call(block, &f->exts, TC_SETUP_CLSFLOWER,
+ 			       &cls_flower, skip_sw);
+@@ -567,6 +667,16 @@ static void *fl_get(struct tcf_proto *tp, u32 handle)
+ 	[TCA_FLOWER_KEY_ENC_IP_TTL_MASK] = { .type = NLA_U8 },
+ 	[TCA_FLOWER_KEY_ENC_OPTS]	= { .type = NLA_NESTED },
+ 	[TCA_FLOWER_KEY_ENC_OPTS_MASK]	= { .type = NLA_NESTED },
++	[TCA_FLOWER_KEY_CT_STATE]	= { .type = NLA_U8 },
++	[TCA_FLOWER_KEY_CT_STATE_MASK]	= { .type = NLA_U8 },
++	[TCA_FLOWER_KEY_CT_ZONE]	= { .type = NLA_U16 },
++	[TCA_FLOWER_KEY_CT_ZONE_MASK]	= { .type = NLA_U16 },
++	[TCA_FLOWER_KEY_CT_MARK]	= { .type = NLA_U32 },
++	[TCA_FLOWER_KEY_CT_MARK_MASK]	= { .type = NLA_U32 },
++	[TCA_FLOWER_KEY_CT_LABELS]	= { .type = NLA_UNSPEC,
++					    .len = 16 },
++	[TCA_FLOWER_KEY_CT_LABELS_MASK]	= { .type = NLA_UNSPEC,
++					    .len = 16 },
+ };
+ 
+ static const struct nla_policy

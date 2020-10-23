@@ -1,0 +1,16 @@
+--- net/sched/sch_api.c
++++ net/sched/sch_api.c
+@@ -1809,8 +1813,11 @@ static int tclass_del_notify(struct net *net,
+ 		return err;
+ 	}
+ 
+-	return rtnetlink_send(skb, net, portid, RTNLGRP_TC,
+-			      n->nlmsg_flags & NLM_F_ECHO);
++	err = rtnetlink_send(skb, net, portid, RTNLGRP_TC,
++			     n->nlmsg_flags & NLM_F_ECHO);
++	if (err > 0)
++		err = 0;
++	return err;
+ }
+ 
+ #ifdef CONFIG_NET_CLS

@@ -1,0 +1,30 @@
+--- drivers/mmc/host/dw_mmc.h
++++ drivers/mmc/host/dw_mmc.h
+@@ -202,14 +202,18 @@ struct dw_mci {
+ 
+ 	u32			bus_hz;
+ 	u32			current_speed;
++	u32			num_slots;
+ 	u32			fifoth_val;
+ 	u16			verid;
++	u8			card_type;
+ 	struct device		*dev;
+ 	struct dw_mci_board	*pdata;
+ 	const struct dw_mci_drv_data	*drv_data;
+ 	void			*priv;
+ 	struct clk		*biu_clk;
+ 	struct clk		*ciu_clk;
++#define DW_MMC_SLOT_NUM	2
++	struct dw_mci_slot	*slots[DW_MMC_SLOT_NUM];
+ 	struct dw_mci_slot	*slot;
+ 
+ 	/* FIFO push and pull */
+@@ -251,6 +255,8 @@ struct dw_mci_dma_ops {
+ 
+ /* Board platform data */
+ struct dw_mci_board {
++	u32 num_slots;
++
+ 	unsigned int bus_hz; /* Clock speed at the cclk_in pad */
+ 
+ 	u32 caps;	/* Capabilities */
