@@ -27,7 +27,6 @@
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
-#include <linux/moduleparam.h>
 #include <linux/netdevice.h>
 #include <linux/hdlc.h>
 #include <linux/pci.h>
@@ -270,7 +269,6 @@ static void pci200_pci_remove_one(struct pci_dev *pdev)
 static const struct net_device_ops pci200_ops = {
 	.ndo_open       = pci200_open,
 	.ndo_stop       = pci200_close,
-	.ndo_change_mtu = hdlc_change_mtu,
 	.ndo_start_xmit = hdlc_start_xmit,
 	.ndo_do_ioctl   = pci200_ioctl,
 };

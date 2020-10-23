@@ -1094,7 +1094,7 @@ static int gelic_wl_get_encode(struct net_device *netdev,
 	struct gelic_wl_info *wl = port_wl(netdev_priv(netdev));
 	struct iw_point *enc = &data->encoding;
 	unsigned long irqflag;
-	unsigned int key_index, index_specified;
+	unsigned int key_index;
 	int ret = 0;
 
 	pr_debug("%s: <-\n", __func__);
@@ -1105,13 +1105,10 @@ static int gelic_wl_get_encode(struct net_device *netdev,
 		return -EINVAL;
 
 	spin_lock_irqsave(&wl->lock, irqflag);
-	if (key_index) {
-		index_specified = 1;
+	if (key_index)
 		key_index--;
-	} else {
-		index_specified = 0;
+	else
 		key_index = wl->current_key;
-	}
 
 	if (wl->group_cipher_method == GELIC_WL_CIPHER_WEP) {
 		switch (wl->auth_method) {
@@ -1616,13 +1613,13 @@ static void gelic_wl_scan_complete_event(struct gelic_wl_info *wl)
 		target->valid = 1;
 		target->eurus_index = i;
 		kfree(target->hwinfo);
-		target->hwinfo = kzalloc(be16_to_cpu(scan_info->size),
+		target->hwinfo = kmemdup(scan_info,
+					 be16_to_cpu(scan_info->size),
 					 GFP_KERNEL);
 		if (!target->hwinfo)
 			continue;
 
 		/* copy hw scan info */
-		memcpy(target->hwinfo, scan_info, scan_info->size);
 		target->essid_len = strnlen(scan_info->essid,
 					    sizeof(scan_info->essid));
 		target->rate_len = 0;
@@ -1694,7 +1691,7 @@ struct gelic_wl_scan_info *gelic_wl_find_best_bss(struct gelic_wl_info *wl)
 				pr_debug("%s: bssid matched\n", __func__);
 				break;
 			} else {
-				pr_debug("%s: bssid unmached\n", __func__);
+				pr_debug("%s: bssid unmatched\n", __func__);
 				continue;
 			}
 		}
@@ -2320,8 +2317,9 @@ static struct net_device *gelic_wl_alloc(struct gelic_card *card)
 	pr_debug("%s: wl=%p port=%p\n", __func__, wl, port);
 
 	/* allocate scan list */
-	wl->networks = kzalloc(sizeof(struct gelic_wl_scan_info) *
-			       GELIC_WL_BSS_MAX_ENT, GFP_KERNEL);
+	wl->networks = kcalloc(GELIC_WL_BSS_MAX_ENT,
+			       sizeof(struct gelic_wl_scan_info),
+			       GFP_KERNEL);
 
 	if (!wl->networks)
 		goto fail_bss;
@@ -2558,7 +2556,6 @@ static const struct net_device_ops gelic_wl_netdevice_ops = {
 	.ndo_stop = gelic_wl_stop,
 	.ndo_start_xmit = gelic_net_xmit,
 	.ndo_set_rx_mode = gelic_net_set_multi,
-	.ndo_change_mtu = gelic_net_change_mtu,
 	.ndo_tx_timeout = gelic_net_tx_timeout,
 	.ndo_set_mac_address = eth_mac_addr,
 	.ndo_validate_addr = eth_validate_addr,

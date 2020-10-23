@@ -40,10 +40,10 @@ static int bcm87xx_of_reg_init(struct phy_device *phydev)
 	const __be32 *paddr_end;
 	int len, ret;
 
-	if (!phydev->dev.of_node)
+	if (!phydev->mdio.dev.of_node)
 		return 0;
 
-	paddr = of_get_property(phydev->dev.of_node,
+	paddr = of_get_property(phydev->mdio.dev.of_node,
 				"broadcom,c45-reg-init", &len);
 	if (!paddr)
 		return 0;
@@ -163,8 +163,9 @@ static int bcm87xx_did_interrupt(struct phy_device *phydev)
 	reg = phy_read(phydev, BCM87XX_LASI_STATUS);
 
 	if (reg < 0) {
-		dev_err(&phydev->dev,
-			"Error: Read of BCM87XX_LASI_STATUS failed: %d\n", reg);
+		phydev_err(phydev,
+			   "Error: Read of BCM87XX_LASI_STATUS failed: %d\n",
+			   reg);
 		return 0;
 	}
 	return (reg & 1) != 0;
@@ -192,6 +193,7 @@ static struct phy_driver bcm87xx_driver[] = {
 	.phy_id		= PHY_ID_BCM8706,
 	.phy_id_mask	= 0xffffffff,
 	.name		= "Broadcom BCM8706",
+	.features	= PHY_10GBIT_FEC_FEATURES,
 	.flags		= PHY_HAS_INTERRUPT,
 	.config_init	= bcm87xx_config_init,
 	.config_aneg	= bcm87xx_config_aneg,
@@ -200,11 +202,11 @@ static struct phy_driver bcm87xx_driver[] = {
 	.config_intr	= bcm87xx_config_intr,
 	.did_interrupt	= bcm87xx_did_interrupt,
 	.match_phy_device = bcm8706_match_phy_device,
-	.driver		= { .owner = THIS_MODULE },
 }, {
 	.phy_id		= PHY_ID_BCM8727,
 	.phy_id_mask	= 0xffffffff,
 	.name		= "Broadcom BCM8727",
+	.features	= PHY_10GBIT_FEC_FEATURES,
 	.flags		= PHY_HAS_INTERRUPT,
 	.config_init	= bcm87xx_config_init,
 	.config_aneg	= bcm87xx_config_aneg,
@@ -213,7 +215,6 @@ static struct phy_driver bcm87xx_driver[] = {
 	.config_intr	= bcm87xx_config_intr,
 	.did_interrupt	= bcm87xx_did_interrupt,
 	.match_phy_device = bcm8727_match_phy_device,
-	.driver		= { .owner = THIS_MODULE },
 } };
 
 module_phy_driver(bcm87xx_driver);
