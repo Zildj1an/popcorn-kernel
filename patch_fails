@@ -1,0 +1,202 @@
+patching file arch/arm64/configs/defconfig
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+1 out of 1 hunk ignored -- saving rejects to file arch/arm64/configs/defconfig.rej
+patching file drivers/mmc/core/mmc.c
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+1 out of 1 hunk ignored -- saving rejects to file drivers/mmc/core/mmc.c.rej
+patching file drivers/mmc/host/dw_mmc.c
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+22 out of 22 hunks ignored -- saving rejects to file drivers/mmc/host/dw_mmc.c.rej
+patching file drivers/mmc/host/dw_mmc.h
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+5 out of 5 hunks ignored -- saving rejects to file drivers/mmc/host/dw_mmc.h.rej
+patching file drivers/net/ethernet/mellanox/mlxsw/spectrum_span.c
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+2 out of 2 hunks ignored -- saving rejects to file drivers/net/ethernet/mellanox/mlxsw/spectrum_span.c.rej
+patching file drivers/net/ethernet/netronome/nfp/flower/action.c
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+4 out of 4 hunks ignored -- saving rejects to file drivers/net/ethernet/netronome/nfp/flower/action.c.rej
+patching file drivers/net/ethernet/netronome/nfp/flower/cmsg.h
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+2 out of 2 hunks ignored -- saving rejects to file drivers/net/ethernet/netronome/nfp/flower/cmsg.h.rej
+patching file drivers/net/ethernet/netronome/nfp/flower/main.c
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+4 out of 4 hunks ignored -- saving rejects to file drivers/net/ethernet/netronome/nfp/flower/main.c.rej
+patching file drivers/net/ethernet/netronome/nfp/flower/main.h
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+8 out of 8 hunks ignored -- saving rejects to file drivers/net/ethernet/netronome/nfp/flower/main.h.rej
+patching file drivers/net/ethernet/netronome/nfp/flower/match.c
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+4 out of 4 hunks ignored -- saving rejects to file drivers/net/ethernet/netronome/nfp/flower/match.c.rej
+patching file drivers/net/ethernet/netronome/nfp/flower/metadata.c
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+5 out of 5 hunks ignored -- saving rejects to file drivers/net/ethernet/netronome/nfp/flower/metadata.c.rej
+patching file drivers/net/ethernet/netronome/nfp/flower/offload.c
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+20 out of 20 hunks ignored -- saving rejects to file drivers/net/ethernet/netronome/nfp/flower/offload.c.rej
+patching file drivers/net/ethernet/netronome/nfp/flower/tunnel_conf.c
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+4 out of 4 hunks ignored -- saving rejects to file drivers/net/ethernet/netronome/nfp/flower/tunnel_conf.c.rej
+patching file drivers/pci/hotplug/pciehp_ctrl.c
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+1 out of 1 hunk ignored -- saving rejects to file drivers/pci/hotplug/pciehp_ctrl.c.rej
+patching file drivers/pci/hotplug/pciehp_hpc.c
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+1 out of 1 hunk ignored -- saving rejects to file drivers/pci/hotplug/pciehp_hpc.c.rej
+patching file include/linux/netdevice.h
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+1 out of 1 hunk ignored -- saving rejects to file include/linux/netdevice.h.rej
+patching file include/linux/skbuff.h
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+2 out of 2 hunks ignored -- saving rejects to file include/linux/skbuff.h.rej
+patching file include/net/act_api.h
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+2 out of 2 hunks ignored -- saving rejects to file include/net/act_api.h.rej
+patching file include/net/gre.h
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+1 out of 1 hunk ignored -- saving rejects to file include/net/gre.h.rej
+patching file include/net/pkt_cls.h
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+6 out of 6 hunks ignored -- saving rejects to file include/net/pkt_cls.h.rej
+patching file include/net/sch_generic.h
+Hunk #1 succeeded at 28 with fuzz 2 (offset 4 lines).
+The next patch would create the file include/net/tc_act/tc_ct.h,
+which already exists!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+1 out of 1 hunk ignored
+patching file include/uapi/linux/pkt_cls.h
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+1 out of 1 hunk ignored -- saving rejects to file include/uapi/linux/pkt_cls.h.rej
+The next patch would create the file include/uapi/linux/tc_act/tc_ct.h,
+which already exists!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+1 out of 1 hunk ignored
+patching file kernel/workqueue.c
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+2 out of 2 hunks ignored -- saving rejects to file kernel/workqueue.c.rej
+patching file net/Kconfig
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+1 out of 1 hunk ignored -- saving rejects to file net/Kconfig.rej
+patching file net/ipv4/ip_gre.c
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+1 out of 1 hunk ignored -- saving rejects to file net/ipv4/ip_gre.c.rej
+patching file net/ipv6/ip6_gre.c
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+1 out of 1 hunk ignored -- saving rejects to file net/ipv6/ip6_gre.c.rej
+patching file net/openvswitch/datapath.h
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+1 out of 1 hunk ignored -- saving rejects to file net/openvswitch/datapath.h.rej
+patching file net/openvswitch/flow.c
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+1 out of 1 hunk ignored -- saving rejects to file net/openvswitch/flow.c.rej
+patching file net/openvswitch/vport.c
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+2 out of 2 hunks ignored -- saving rejects to file net/openvswitch/vport.c.rej
+patching file net/sched/Kconfig
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+1 out of 1 hunk ignored -- saving rejects to file net/sched/Kconfig.rej
+patching file net/sched/Makefile
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+1 out of 1 hunk ignored -- saving rejects to file net/sched/Makefile.rej
+patching file net/sched/act_api.c
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+5 out of 5 hunks ignored -- saving rejects to file net/sched/act_api.c.rej
+The next patch would create the file net/sched/act_ct.c,
+which already exists!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+1 out of 1 hunk ignored
+patching file net/sched/act_mirred.c
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+1 out of 1 hunk ignored -- saving rejects to file net/sched/act_mirred.c.rej
+patching file net/sched/act_pedit.c
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+2 out of 2 hunks ignored -- saving rejects to file net/sched/act_pedit.c.rej
+patching file net/sched/act_tunnel_key.c
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+3 out of 3 hunks ignored -- saving rejects to file net/sched/act_tunnel_key.c.rej
+patching file net/sched/cls_api.c
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+13 out of 13 hunks ignored -- saving rejects to file net/sched/cls_api.c.rej
+patching file net/sched/cls_flower.c
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+8 out of 8 hunks ignored -- saving rejects to file net/sched/cls_flower.c.rej
+patching file net/sched/sch_api.c
+Reversed (or previously applied) patch detected!  Assume -R? [n] 
+Apply anyway? [n] 
+Skipping patch.
+3 out of 3 hunks ignored -- saving rejects to file net/sched/sch_api.c.rej

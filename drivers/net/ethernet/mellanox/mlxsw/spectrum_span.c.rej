@@ -1,0 +1,20 @@
+--- drivers/net/ethernet/mellanox/mlxsw/spectrum_span.c
++++ drivers/net/ethernet/mellanox/mlxsw/spectrum_span.c
+@@ -383,7 +383,7 @@ static int mlxsw_sp_span_dmac(struct neigh_table *tbl,
+ }
+ 
+ static const struct mlxsw_sp_span_entry_ops mlxsw_sp_span_entry_ops_gretap4 = {
+-	.can_handle = is_gretap_dev,
++	.can_handle = netif_is_gretap,
+ 	.parms = mlxsw_sp_span_entry_gretap4_parms,
+ 	.configure = mlxsw_sp_span_entry_gretap4_configure,
+ 	.deconfigure = mlxsw_sp_span_entry_gretap4_deconfigure,
+@@ -484,7 +484,7 @@ static int mlxsw_sp_span_dmac(struct neigh_table *tbl,
+ 
+ static const
+ struct mlxsw_sp_span_entry_ops mlxsw_sp_span_entry_ops_gretap6 = {
+-	.can_handle = is_ip6gretap_dev,
++	.can_handle = netif_is_ip6gretap,
+ 	.parms = mlxsw_sp_span_entry_gretap6_parms,
+ 	.configure = mlxsw_sp_span_entry_gretap6_configure,
+ 	.deconfigure = mlxsw_sp_span_entry_gretap6_deconfigure,

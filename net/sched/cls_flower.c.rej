@@ -1,6 +1,103 @@
 --- net/sched/cls_flower.c
 +++ net/sched/cls_flower.c
-@@ -275,11 +356,24 @@ static int fl_classify(struct sk_buff *skb, const struct tcf_proto *tp,
+@@ -29,8 +29,17 @@
+ #include <net/dst.h>
+ #include <net/dst_metadata.h>
+ 
++#include <net/netfilter/nf_conntrack_core.h>
++#include <net/netfilter/nf_conntrack_labels.h>
++
++#include <net/tc_act/tc_gact.h>
++
+ struct fl_flow_key {
+ 	int	indev_ifindex;
++	u8	ct_state;
++	u16	ct_zone;
++	u32	ct_mark;
++	u32	ct_labels[4];
+ 	struct flow_dissector_key_control control;
+ 	struct flow_dissector_key_control enc_control;
+ 	struct flow_dissector_key_basic basic;
+@@ -186,6 +195,78 @@ static struct cls_fl_filter *fl_lookup(struct fl_flow_mask *mask,
+ 				      mask->filter_ht_params);
+ }
+ 
++static u8 fl_ct_get_state(struct nf_conn *ct, enum ip_conntrack_info ctinfo)
++{
++	u8 ct_state = TCA_FLOWER_KEY_CT_FLAGS_TRACKED;
++
++	switch (ctinfo) {
++	case IP_CT_ESTABLISHED_REPLY:
++	case IP_CT_RELATED_REPLY:
++		ct_state |= TCA_FLOWER_KEY_CT_FLAGS_REPLY_DIR;
++		break;
++	default:
++		break;
++	}
++
++	switch (ctinfo) {
++	case IP_CT_ESTABLISHED_REPLY:
++	case IP_CT_RELATED_REPLY:
++		ct_state |= TCA_FLOWER_KEY_CT_FLAGS_REPLY_DIR;
++		break;
++	default:
++		break;
++	}
++
++	switch (ctinfo) {
++	case IP_CT_ESTABLISHED:
++	case IP_CT_ESTABLISHED_REPLY:
++		ct_state |= TCA_FLOWER_KEY_CT_FLAGS_ESTABLISHED;
++		break;
++	case IP_CT_RELATED:
++	case IP_CT_RELATED_REPLY:
++		ct_state |= TCA_FLOWER_KEY_CT_FLAGS_RELATED;
++		break;
++	case IP_CT_NEW:
++		ct_state |= TCA_FLOWER_KEY_CT_FLAGS_NEW;
++		break;
++	default:
++		break;
++	}
++
++	if (ct->master)
++		ct_state |= TCA_FLOWER_KEY_CT_FLAGS_RELATED;
++
++	if (ct->status & IPS_SRC_NAT)
++		ct_state |= ct_state & TCA_FLOWER_KEY_CT_FLAGS_REPLY_DIR ?
++				       TCA_FLOWER_KEY_CT_FLAGS_DST_NAT :
++				       TCA_FLOWER_KEY_CT_FLAGS_SRC_NAT;
++	if (ct->status & IPS_DST_NAT)
++		ct_state |= ct_state & TCA_FLOWER_KEY_CT_FLAGS_REPLY_DIR ?
++				       TCA_FLOWER_KEY_CT_FLAGS_SRC_NAT :
++				       TCA_FLOWER_KEY_CT_FLAGS_DST_NAT;
++
++	return ct_state;
++}
++
++static void fl_notify_underlying_device(struct sk_buff *skb, const struct tcf_proto *tp,
++					struct cls_fl_filter *f)
++{
++	struct tcf_block *block = tp->chain->block;
++	struct tc_action **actions = f->exts.actions;
++	int nr_actions = f->exts.nr_actions;
++	struct tc_miniflow_offload mf;
++
++	WARN_ON(nr_actions < 1);
++
++	mf.skb = skb;
++	mf.cookie = tc_in_hw(f->flags) ? (unsigned long) f : 0;
++	mf.last_flow = !is_tcf_gact_goto_chain(actions[nr_actions-1]);
++	mf.is_drop = is_tcf_gact_shot(actions[nr_actions-1]);
++	mf.chain_index = tp->chain->index;
++
++	tc_setup_cb_call(block, &f->exts, TC_SETUP_MINIFLOW, &mf, false);
++}
++
+ static int fl_classify(struct sk_buff *skb, const struct tcf_proto *tp,
+ 		       struct tcf_result *res)
+ {
+@@ -194,11 +275,24 @@ static int fl_classify(struct sk_buff *skb, const struct tcf_proto *tp,
  	struct fl_flow_mask *mask;
  	struct fl_flow_key skb_key;
  	struct fl_flow_key skb_mkey;
@@ -25,7 +122,7 @@
  		/* skb_flow_dissect() does not set n_proto in case an unknown
  		 * protocol, so do it rather here.
  		 */
-@@ -291,10 +385,12 @@ static int fl_classify(struct sk_buff *skb, const struct tcf_proto *tp,
+@@ -210,10 +304,12 @@ static int fl_classify(struct sk_buff *skb, const struct tcf_proto *tp,
  
  		f = fl_lookup(mask, &skb_mkey);
  		if (f && !tc_skip_sw(f->flags)) {
@@ -38,7 +135,7 @@
  	return -1;
  }
  
-@@ -392,6 +488,10 @@ static int fl_hw_replace_filter(struct tcf_proto *tp,
+@@ -311,6 +407,10 @@ static int fl_hw_replace_filter(struct tcf_proto *tp,
  	cls_flower.key = &f->mkey;
  	cls_flower.exts = &f->exts;
  	cls_flower.classid = f->res.classid;
@@ -49,7 +146,7 @@
  
  	err = tc_setup_cb_call(block, &f->exts, TC_SETUP_CLSFLOWER,
  			       &cls_flower, skip_sw);
-@@ -567,6 +667,16 @@ static void *fl_get(struct tcf_proto *tp, u32 handle)
+@@ -486,6 +586,16 @@ static void *fl_get(struct tcf_proto *tp, u32 handle)
  	[TCA_FLOWER_KEY_ENC_IP_TTL_MASK] = { .type = NLA_U8 },
  	[TCA_FLOWER_KEY_ENC_OPTS]	= { .type = NLA_NESTED },
  	[TCA_FLOWER_KEY_ENC_OPTS_MASK]	= { .type = NLA_NESTED },
@@ -66,3 +163,54 @@
  };
  
  static const struct nla_policy
+@@ -787,6 +897,26 @@ static int fl_set_key(struct net *net, struct nlattr **tb,
+ 	}
+ #endif
+ 
++	if (tb[TCA_FLOWER_KEY_CT_STATE]) {
++		key->ct_state = nla_get_u8(tb[TCA_FLOWER_KEY_CT_STATE]);
++		mask->ct_state = nla_get_u8(tb[TCA_FLOWER_KEY_CT_STATE_MASK]);
++	}
++
++	if (tb[TCA_FLOWER_KEY_CT_ZONE_MASK]) {
++		key->ct_zone = nla_get_u16(tb[TCA_FLOWER_KEY_CT_ZONE]);
++		mask->ct_zone = nla_get_u16(tb[TCA_FLOWER_KEY_CT_ZONE_MASK]);
++	}
++
++	if (tb[TCA_FLOWER_KEY_CT_MARK_MASK]) {
++		key->ct_mark = nla_get_u32(tb[TCA_FLOWER_KEY_CT_MARK]);
++		mask->ct_mark = nla_get_u32(tb[TCA_FLOWER_KEY_CT_MARK_MASK]);
++	}
++
++	if (tb[TCA_FLOWER_KEY_CT_LABELS_MASK]) {
++		memcpy(key->ct_labels, nla_data(tb[TCA_FLOWER_KEY_CT_LABELS]), nla_len(tb[TCA_FLOWER_KEY_CT_LABELS]));
++		memcpy(mask->ct_labels, nla_data(tb[TCA_FLOWER_KEY_CT_LABELS_MASK]), nla_len(tb[TCA_FLOWER_KEY_CT_LABELS_MASK]));
++	}
++
+ 	fl_set_key_val(tb, key->eth.dst, TCA_FLOWER_KEY_ETH_DST,
+ 		       mask->eth.dst, TCA_FLOWER_KEY_ETH_DST_MASK,
+ 		       sizeof(key->eth.dst));
+@@ -1688,6 +1818,23 @@ static int fl_dump_key(struct sk_buff *skb, struct net *net,
+ 			goto nla_put_failure;
+ 	}
+ 
++	/* TODO: check return value */
++	fl_dump_key_val(skb, &key->ct_state, TCA_FLOWER_KEY_CT_STATE,
++			&mask->ct_state, TCA_FLOWER_KEY_CT_STATE_MASK,
++			sizeof(key->ct_state));
++
++	fl_dump_key_val(skb, &key->ct_zone, TCA_FLOWER_KEY_CT_ZONE,
++			&mask->ct_zone, TCA_FLOWER_KEY_CT_ZONE_MASK,
++			sizeof(key->ct_zone));
++
++	fl_dump_key_val(skb, &key->ct_mark, TCA_FLOWER_KEY_CT_MARK,
++			&mask->ct_mark, TCA_FLOWER_KEY_CT_MARK_MASK,
++			sizeof(key->ct_mark));
++
++	fl_dump_key_val(skb, &key->ct_labels, TCA_FLOWER_KEY_CT_LABELS,
++			&mask->ct_labels, TCA_FLOWER_KEY_CT_LABELS_MASK,
++			sizeof(key->ct_labels));
++
+ 	if (fl_dump_key_val(skb, key->eth.dst, TCA_FLOWER_KEY_ETH_DST,
+ 			    mask->eth.dst, TCA_FLOWER_KEY_ETH_DST_MASK,
+ 			    sizeof(key->eth.dst)) ||

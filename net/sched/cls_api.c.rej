@@ -290,7 +290,15 @@
  			first_tp = res->goto_tp;
  			goto reset;
  		}
-@@ -1223,10 +1472,14 @@ static int tfilter_notify(struct net *net, struct sk_buff *oskb,
+@@ -1210,6 +1458,7 @@ static int tfilter_notify(struct net *net, struct sk_buff *oskb,
+ {
+ 	struct sk_buff *skb;
+ 	u32 portid = oskb ? NETLINK_CB(oskb).portid : 0;
++	int err = 0;
+ 
+ 	skb = alloc_skb(NLMSG_GOODSIZE, GFP_KERNEL);
+ 	if (!skb)
+@@ -1222,10 +1471,14 @@ static int tfilter_notify(struct net *net, struct sk_buff *oskb,
  	}
  
  	if (unicast)
@@ -308,7 +316,7 @@
  }
  
  static int tfilter_del_notify(struct net *net, struct sk_buff *oskb,
-@@ -1257,12 +1510,15 @@ static int tfilter_del_notify(struct net *net, struct sk_buff *oskb,
+@@ -1256,12 +1509,15 @@ static int tfilter_del_notify(struct net *net, struct sk_buff *oskb,
  	}
  
  	if (unicast)
@@ -328,7 +336,7 @@
  	return err;
  }
  
-@@ -1860,6 +2116,7 @@ static int tc_chain_notify(struct tcf_chain *chain, struct sk_buff *oskb,
+@@ -1859,6 +2115,7 @@ static int tc_chain_notify(struct tcf_chain *chain, struct sk_buff *oskb,
  	struct tcf_block *block = chain->block;
  	struct net *net = block->net;
  	struct sk_buff *skb;
@@ -336,7 +344,7 @@
  
  	skb = alloc_skb(NLMSG_GOODSIZE, GFP_KERNEL);
  	if (!skb)
-@@ -1872,9 +2129,14 @@ static int tc_chain_notify(struct tcf_chain *chain, struct sk_buff *oskb,
+@@ -1871,9 +2128,14 @@ static int tc_chain_notify(struct tcf_chain *chain, struct sk_buff *oskb,
  	}
  
  	if (unicast)
@@ -353,7 +361,7 @@
  }
  
  static int tc_chain_tmplt_add(struct tcf_chain *chain, struct net *net,
-@@ -2316,10 +2578,19 @@ int tc_setup_cb_call(struct tcf_block *block, struct tcf_exts *exts,
+@@ -2315,10 +2577,19 @@ int tc_setup_cb_call(struct tcf_block *block, struct tcf_exts *exts,
  		return ret;
  	ok_count += ret;
  
@@ -374,7 +382,7 @@
  static __net_init int tcf_net_init(struct net *net)
  {
  	struct tcf_net *tn = net_generic(net, tcf_net_id);
-@@ -2355,6 +2626,11 @@ static int __init tc_filter_init(void)
+@@ -2354,6 +2625,11 @@ static int __init tc_filter_init(void)
  	if (err)
  		goto err_register_pernet_subsys;
  
@@ -386,7 +394,7 @@
  	rtnl_register(PF_UNSPEC, RTM_NEWTFILTER, tc_new_tfilter, NULL, 0);
  	rtnl_register(PF_UNSPEC, RTM_DELTFILTER, tc_del_tfilter, NULL, 0);
  	rtnl_register(PF_UNSPEC, RTM_GETTFILTER, tc_get_tfilter,
-@@ -2366,6 +2642,8 @@ static int __init tc_filter_init(void)
+@@ -2365,6 +2641,8 @@ static int __init tc_filter_init(void)
  
  	return 0;
  
