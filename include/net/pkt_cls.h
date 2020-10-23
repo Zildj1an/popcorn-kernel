@@ -81,6 +81,14 @@ void __tcf_block_cb_unregister(struct tcf_block *block,
 			       struct tcf_block_cb *block_cb);
 void tcf_block_cb_unregister(struct tcf_block *block,
 			     tc_setup_cb_t *cb, void *cb_ident);
+int __tc_indr_block_cb_register(struct net_device *dev, void *cb_priv,
+				tc_indr_block_bind_cb_t *cb, void *cb_ident);
+int tc_indr_block_cb_register(struct net_device *dev, void *cb_priv,
+			      tc_indr_block_bind_cb_t *cb, void *cb_ident);
+void __tc_indr_block_cb_unregister(struct net_device *dev,
+				   tc_indr_block_bind_cb_t *cb, void *cb_ident);
+void tc_indr_block_cb_unregister(struct net_device *dev,
+				 tc_indr_block_bind_cb_t *cb, void *cb_ident);
 
 int tcf_classify(struct sk_buff *skb, const struct tcf_proto *tp,
 		 struct tcf_result *res, bool compat_mode);
@@ -180,6 +188,32 @@ void __tcf_block_cb_unregister(struct tcf_block *block,
 static inline
 void tcf_block_cb_unregister(struct tcf_block *block,
 			     tc_setup_cb_t *cb, void *cb_ident)
+{
+}
+
+static inline
+int __tc_indr_block_cb_register(struct net_device *dev, void *cb_priv,
+				tc_indr_block_bind_cb_t *cb, void *cb_ident)
+{
+	return 0;
+}
+
+static inline
+int tc_indr_block_cb_register(struct net_device *dev, void *cb_priv,
+			      tc_indr_block_bind_cb_t *cb, void *cb_ident)
+{
+	return 0;
+}
+
+static inline
+void __tc_indr_block_cb_unregister(struct net_device *dev,
+				   tc_indr_block_bind_cb_t *cb, void *cb_ident)
+{
+}
+
+static inline
+void tc_indr_block_cb_unregister(struct net_device *dev,
+				 tc_indr_block_bind_cb_t *cb, void *cb_ident)
 {
 }
 
@@ -588,6 +622,8 @@ tcf_match_indev(struct sk_buff *skb, int ifindex)
 int tc_setup_cb_call(struct tcf_block *block, struct tcf_exts *exts,
 		     enum tc_setup_type type, void *type_data, bool err_stop);
 
+int tc_setup_cb_call_all(enum tc_setup_type type, void *type_data);
+
 enum tc_block_command {
 	TC_BLOCK_BIND,
 	TC_BLOCK_UNBIND,
@@ -601,6 +637,7 @@ struct tc_block_offload {
 };
 
 struct tc_cls_common_offload {
+	u32 handle;
 	u32 chain_index;
 	__be16 protocol;
 	u32 prio;
@@ -730,6 +767,10 @@ struct tc_cls_flower_offload {
 	struct fl_flow_key *key;
 	struct tcf_exts *exts;
 	u32 classid;
+
+	/* FIXME: ugly */
+	u8 ct_state_key;
+	u8 ct_state_mask;
 };
 
 enum tc_matchall_command {
@@ -853,5 +894,4 @@ struct tc_prio_qopt_offload {
 		struct tc_prio_qopt_offload_graft_params graft_params;
 	};
 };
-
 #endif
