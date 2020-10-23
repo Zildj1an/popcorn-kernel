@@ -4,8 +4,8 @@
  	if (res < 0)
  		return res;
  	key->mac_proto = res;
--	key->recirc_id = 0;
-+	key->recirc_id = OVS_CB(skb)->recirc_id;
+-	key->recirc_id = OVS_CB(skb)->recirc_id;
++	key->recirc_id = 0;
  
  	err = key_extract(skb, key);
  	if (!err)
