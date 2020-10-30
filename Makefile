@@ -1,7 +1,7 @@
 VERSION = 4
 PATCHLEVEL = 20
 SUBLEVEL = 17
-EXTRAVERSION =
+EXTRAVERSION = 
 NAME = popcorn embedded
 
 # *DOCUMENTATION*
@@ -615,7 +615,14 @@ endif
 # Tell gcc to never replace conditional load with a non-conditional one
 KBUILD_CFLAGS	+= $(call cc-option,--param=allow-store-data-races=0)
 
-ifdef CONFIG_REAg)
+ifdef CONFIG_READABLE_ASM
+# Disable optimizations that make assembler listings hard to read.
+# reorder blocks reorders the control in the function
+# ipa clone creates specialized cloned functions
+# partial inlining inlines only parts of functions
+KBUILD_CFLAGS += $(call cc-option,-fno-reorder-blocks,) \
+                 $(call cc-option,-fno-ipa-cp-clone,) \
+                 $(call cc-option,-fno-partial-inlining)
 endif
 
 ifneq ($(CONFIG_FRAME_WARN),0)
@@ -709,7 +716,25 @@ KBUILD_CFLAGS	+= -g
 endif
 KBUILD_AFLAGS	+= -Wa,-gdwarf-2
 endif
-ifdef CONFIG_DEBUG_ITRY)
+ifdef CONFIG_DEBUG_INFO_DWARF4
+KBUILD_CFLAGS	+= $(call cc-option, -gdwarf-4,)
+endif
+
+ifdef CONFIG_DEBUG_INFO_REDUCED
+KBUILD_CFLAGS 	+= $(call cc-option, -femit-struct-debug-baseonly) \
+		   $(call cc-option,-fno-var-tracking)
+endif
+
+ifdef CONFIG_FUNCTION_TRACER
+ifndef CC_FLAGS_FTRACE
+CC_FLAGS_FTRACE := -pg
+endif
+export CC_FLAGS_FTRACE
+ifdef CONFIG_HAVE_FENTRY
+CC_USING_FENTRY	:= $(call cc-option, -mfentry -DCC_USING_FENTRY)
+endif
+KBUILD_CFLAGS	+= $(CC_FLAGS_FTRACE) $(CC_USING_FENTRY)
+KBUILD_AFLAGS	+= $(CC_USING_FENTRY)
 ifdef CONFIG_DYNAMIC_FTRACE
 	ifdef CONFIG_HAVE_C_RECORDMCOUNT
 		BUILD_C_RECORDMCOUNT := y
@@ -813,7 +838,27 @@ export MODLIB
 ifdef INSTALL_MOD_STRIP
 ifeq ($(INSTALL_MOD_STRIP),1)
 mod_strip_cmd = $(STRIP) --strip-debug
-elODULE_COMPRESS
+else
+mod_strip_cmd = $(STRIP) $(INSTALL_MOD_STRIP)
+endif # INSTALL_MOD_STRIP=1
+else
+mod_strip_cmd = true
+endif # INSTALL_MOD_STRIP
+export mod_strip_cmd
+
+# CONFIG_MODULE_COMPRESS, if defined, will cause module to be compressed
+# after they are installed in agreement with CONFIG_MODULE_COMPRESS_GZIP
+# or CONFIG_MODULE_COMPRESS_XZ.
+
+mod_compress_cmd = true
+ifdef CONFIG_MODULE_COMPRESS
+  ifdef CONFIG_MODULE_COMPRESS_GZIP
+    mod_compress_cmd = gzip -n -f
+  endif # CONFIG_MODULE_COMPRESS_GZIP
+  ifdef CONFIG_MODULE_COMPRESS_XZ
+    mod_compress_cmd = xz -f
+  endif # CONFIG_MODULE_COMPRESS_XZ
+endif # CONFIG_MODULE_COMPRESS
 export mod_compress_cmd
 
 # Select initial ramdisk compression format, default is gzip(1).
@@ -913,7 +958,9 @@ include/config/kernel.release: include/config/auto.conf FORCE
 
 
 # Things we need to do before we recursively start building the kernel
-# or the modu used in arch Makefiles and when processed asm symlink,
+# or the modules are listed in "prepare".
+# A multi level approach is used. prepareN is processed before prepareN-1.
+# archprepare is used in arch Makefiles and when processed asm symlink,
 # version.h and scripts_basic is processed / created.
 
 # Listed in dependency order
@@ -1020,7 +1067,13 @@ headers_install: __headers
 	$(Q)$(MAKE) $(hdr-inst)=include/uapi
 	$(Q)$(MAKE) $(hdr-inst)=arch/$(hdr-arch)/include/uapi/asm $(hdr-dst)
 
-PHclude/uapi HDRCHECK=1
+PHONY += headers_check_all
+headers_check_all: headers_install_all
+	$(Q)$(CONFIG_SHELL) $(srctree)/scripts/headers.sh check
+
+PHONY += headers_check
+headers_check: headers_install
+	$(Q)$(MAKE) $(hdr-inst)=include/uapi HDRCHECK=1
 	$(Q)$(MAKE) $(hdr-inst)=arch/$(hdr-arch)/include/uapi/asm $(hdr-dst) HDRCHECK=1
 
 # ---------------------------------------------------------------------------
@@ -1132,7 +1185,12 @@ MRPROPER_FILES += .config .config.old .version .old_version \
 # clean - Delete most, but leave enough to build external modules
 #
 clean: rm-dirs  := $(CLEAN_DIRS)
-cleanclean)=$(patsubst _clean_%,%,$@)
+clean: rm-files := $(CLEAN_FILES)
+clean-dirs      := $(addprefix _clean_, . $(vmlinux-alldirs) Documentation samples)
+
+PHONY += $(clean-dirs) clean archclean vmlinuxclean
+$(clean-dirs):
+	$(Q)$(MAKE) $(clean)=$(patsubst _clean_%,%,$@)
 
 vmlinuxclean:
 	$(Q)$(CONFIG_SHELL) $(srctree)/scripts/link-vmlinux.sh clean
@@ -1219,7 +1277,10 @@ help:
 	 echo  '                    (default: $(INSTALL_HDR_PATH))'; \
 	 echo  ''
 	@echo  'Static analysers'
-	@echo  '  checkstack      - Generate a list of stack  included header files'
+	@echo  '  checkstack      - Generate a list of stack hogs'
+	@echo  '  namespacecheck  - Name space analysis on compiled kernel'
+	@echo  '  versioncheck    - Sanity check on version.h usage'
+	@echo  '  includecheck    - Check for duplicate included header files'
 	@echo  '  export_report   - List the usages of all exported symbols'
 	@echo  '  headers_check   - Sanity check on exported headers'
 	@echo  '  headerdep       - Detect inclusion cycles in headers'
@@ -1305,7 +1366,33 @@ else # KBUILD_EXTMOD
 #                      Install the modules built in the module directory
 #                      Assumes install directory is already created
 
-# We are always building mo $(if $(INSTALL_MOD_DIR),$(INSTALL_MOD_DIR),extra)
+# We are always building modules
+KBUILD_MODULES := 1
+PHONY += crmodverdir
+crmodverdir:
+	$(cmd_crmodverdir)
+
+PHONY += $(objtree)/Module.symvers
+$(objtree)/Module.symvers:
+	@test -e $(objtree)/Module.symvers || ( \
+	echo; \
+	echo "  WARNING: Symbol version dump $(objtree)/Module.symvers"; \
+	echo "           is missing; modules will have no dependencies and modversions."; \
+	echo )
+
+module-dirs := $(addprefix _module_,$(KBUILD_EXTMOD))
+PHONY += $(module-dirs) modules
+$(module-dirs): crmodverdir $(objtree)/Module.symvers
+	$(Q)$(MAKE) $(build)=$(patsubst _module_%,%,$@)
+
+modules: $(module-dirs)
+	@$(kecho) '  Building modules, stage 2.';
+	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.modpost
+
+PHONY += modules_install
+modules_install: _emodinst_ _emodinst_post
+
+install-dir := $(if $(INSTALL_MOD_DIR),$(INSTALL_MOD_DIR),extra)
 PHONY += _emodinst_
 _emodinst_:
 	$(Q)mkdir -p $(MODLIB)/$(install-dir)
@@ -1423,7 +1510,29 @@ tools/%: FORCE
 # ---------------------------------------------------------------------------
 # Single targets are compatible with:
 # - build with mixed source and output
-# - build with separate odir $@)
+# - build with separate output dir 'make O=...'
+# - external modules
+#
+#  target-dir => where to store outputfile
+#  build-dir  => directory in kernel source tree to use
+
+ifeq ($(KBUILD_EXTMOD),)
+        build-dir  = $(patsubst %/,%,$(dir $@))
+        target-dir = $(dir $@)
+else
+        zap-slash=$(filter-out .,$(patsubst %/,%,$(dir $@)))
+        build-dir  = $(KBUILD_EXTMOD)$(if $(zap-slash),/$(zap-slash))
+        target-dir = $(if $(KBUILD_EXTMOD),$(dir $<),$(dir $@))
+endif
+
+%.s: %.c prepare scripts FORCE
+	$(Q)$(MAKE) $(build)=$(build-dir) $(target-dir)$(notdir $@)
+%.i: %.c prepare scripts FORCE
+	$(Q)$(MAKE) $(build)=$(build-dir) $(target-dir)$(notdir $@)
+%.o: %.c prepare scripts FORCE
+	$(Q)$(MAKE) $(build)=$(build-dir) $(target-dir)$(notdir $@)
+%.lst: %.c prepare scripts FORCE
+	$(Q)$(MAKE) $(build)=$(build-dir) $(target-dir)$(notdir $@)
 %.s: %.S prepare scripts FORCE
 	$(Q)$(MAKE) $(build)=$(build-dir) $(target-dir)$(notdir $@)
 %.o: %.S prepare scripts FORCE
@@ -1485,4 +1594,3 @@ FORCE:
 # Declare the contents of the .PHONY variable as phony.  We keep that
 # information in a variable so we can use it in if_changed and friends.
 .PHONY: $(PHONY)
-
