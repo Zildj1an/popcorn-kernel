@@ -615,7 +615,10 @@ endif
 # Tell gcc to never replace conditional load with a non-conditional one
 KBUILD_CFLAGS	+= $(call cc-option,--param=allow-store-data-races=0)
 
-ifdef CONFIG_REAONFIG_FRAME_WARN),0)
+ifdef CONFIG_REAg)
+endif
+
+ifneq ($(CONFIG_FRAME_WARN),0)
 KBUILD_CFLAGS += $(call cc-option,-Wframe-larger-than=${CONFIG_FRAME_WARN})
 endif
 
@@ -706,8 +709,8 @@ KBUILD_CFLAGS	+= -g
 endif
 KBUILD_AFLAGS	+= -Wa,-gdwarf-2
 endif
-ifdef CONFIG_DEBUG_INFO_DWARF4
-KBUILD_CFYNAMIC_FTRACE
+ifdef CONFIG_DEBUG_ITRY)
+ifdef CONFIG_DYNAMIC_FTRACE
 	ifdef CONFIG_HAVE_C_RECORDMCOUNT
 		BUILD_C_RECORDMCOUNT := y
 		export BUILD_C_RECORDMCOUNT
@@ -810,10 +813,7 @@ export MODLIB
 ifdef INSTALL_MOD_STRIP
 ifeq ($(INSTALL_MOD_STRIP),1)
 mod_strip_cmd = $(STRIP) --strip-debug
-else
-mod_strip_cmd = compress_cmd = xz -f
-  endif # CONFIG_MODULE_COMPRESS_XZ
-endif # CONFIG_MODULE_COMPRESS
+elODULE_COMPRESS
 export mod_compress_cmd
 
 # Select initial ramdisk compression format, default is gzip(1).
@@ -912,8 +912,8 @@ include/config/kernel.release: include/config/auto.conf FORCE
 	$(call filechk,kernel.release)
 
 
-# Things weproach is used. prepareN is processed before prepareN-1.
-# archprepare is used in arch Makefiles and when processed asm symlink,
+# Things we need to do before we recursively start building the kernel
+# or the modu used in arch Makefiles and when processed asm symlink,
 # version.h and scripts_basic is processed / created.
 
 # Listed in dependency order
@@ -1018,9 +1018,9 @@ headers_install: __headers
 	$(if $(wildcard $(srctree)/arch/$(hdr-arch)/include/uapi/asm/Kbuild),, \
 	  $(error Headers not exportable for the $(SRCARCH) architecture))
 	$(Q)$(MAKE) $(hdr-inst)=include/uapi
-eaders_check
-headers_check: headers_install
-	$(Q)$(MAKE) $(hdr-inst)=include/uapi HDRCHECK=1
+	$(Q)$(MAKE) $(hdr-inst)=arch/$(hdr-arch)/include/uapi/asm $(hdr-dst)
+
+PHclude/uapi HDRCHECK=1
 	$(Q)$(MAKE) $(hdr-inst)=arch/$(hdr-arch)/include/uapi/asm $(hdr-dst) HDRCHECK=1
 
 # ---------------------------------------------------------------------------
@@ -1129,9 +1129,10 @@ MRPROPER_FILES += .config .config.old .version .old_version \
 		  extra_certificates signing_key.x509.keyid		\
 		  signing_key.x509.signer vmlinux-gdb.py
 
-# clean - Delete most, but leave enean-dirs) clean archclean vmlinuxclean
-$(clean-dirs):
-	$(Q)$(MAKE) $(clean)=$(patsubst _clean_%,%,$@)
+# clean - Delete most, but leave enough to build external modules
+#
+clean: rm-dirs  := $(CLEAN_DIRS)
+cleanclean)=$(patsubst _clean_%,%,$@)
 
 vmlinuxclean:
 	$(Q)$(CONFIG_SHELL) $(srctree)/scripts/link-vmlinux.sh clean
@@ -1217,8 +1218,8 @@ help:
 	@echo  '  headers_install - Install sanitised kernel headers to INSTALL_HDR_PATH'; \
 	 echo  '                    (default: $(INSTALL_HDR_PATH))'; \
 	 echo  ''
-	@echo  'Stan version.h usage'
-	@echo  '  includecheck    - Check for duplicate included header files'
+	@echo  'Static analysers'
+	@echo  '  checkstack      - Generate a list of stack  included header files'
 	@echo  '  export_report   - List the usages of all exported symbols'
 	@echo  '  headers_check   - Sanity check on exported headers'
 	@echo  '  headerdep       - Detect inclusion cycles in headers'
@@ -1302,7 +1303,19 @@ else # KBUILD_EXTMOD
 # make M=dir	       Same as 'make M=dir modules'
 # make M=dir modules_install
 #                      Install the modules built in the module directory
-#                      Assume := $(addprefix _clean_,$(KBUILD_EXTMOD))
+#                      Assumes install directory is already created
+
+# We are always building mo $(if $(INSTALL_MOD_DIR),$(INSTALL_MOD_DIR),extra)
+PHONY += _emodinst_
+_emodinst_:
+	$(Q)mkdir -p $(MODLIB)/$(install-dir)
+	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.modinst
+
+PHONY += _emodinst_post
+_emodinst_post: _emodinst_
+	$(call cmd,depmod)
+
+clean-dirs := $(addprefix _clean_,$(KBUILD_EXTMOD))
 
 PHONY += $(clean-dirs) clean
 $(clean-dirs):
@@ -1410,17 +1423,9 @@ tools/%: FORCE
 # ---------------------------------------------------------------------------
 # Single targets are compatible with:
 # - build with mixed source and output
-# - build with separate output dir 'make O=...'
-# - external modules
-#
-#  target-dir => where to store outputfile
-#  build-dir  => directory in kernel source tree to use
-
-ifeq ($(KBUILD_EXTMOD),)
-        build-dir  = $(patsubst %/,%,$(dir $@))
-        target-dir = $(dir $@)
-else
-  Q)$(MAKE) $(build)=$(build-dir) $(target-dir)$(notdir $@)
+# - build with separate odir $@)
+%.s: %.S prepare scripts FORCE
+	$(Q)$(MAKE) $(build)=$(build-dir) $(target-dir)$(notdir $@)
 %.o: %.S prepare scripts FORCE
 	$(Q)$(MAKE) $(build)=$(build-dir) $(target-dir)$(notdir $@)
 %.symtypes: %.c prepare scripts FORCE
