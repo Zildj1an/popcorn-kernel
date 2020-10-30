@@ -53,6 +53,8 @@
 #include <linux/uaccess.h>
 #include <linux/syscalls.h>
 #include <linux/tracehook.h>
+#include <linux/context_tracking.h>
+#include <linux/isolation.h>
 #include <asm/ucontext.h>
 
 struct rt_sigframe {
@@ -107,13 +109,13 @@ static int restore_usr_regs(struct pt_regs *regs, struct rt_sigframe __user *sf)
 	struct user_regs_struct uregs;
 
 	err = __copy_from_user(&set, &sf->uc.uc_sigmask, sizeof(set));
+	if (!err)
+		set_current_blocked(&set);
+
 	err |= __copy_from_user(&uregs.scratch,
 				&(sf->uc.uc_mcontext.regs.scratch),
 				sizeof(sf->uc.uc_mcontext.regs.scratch));
-	if (err)
-		return err;
 
-	set_current_blocked(&set);
 	regs->bta	= uregs.scratch.bta;
 	regs->lp_start	= uregs.scratch.lp_start;
 	regs->lp_end	= uregs.scratch.lp_end;
@@ -138,7 +140,7 @@ static int restore_usr_regs(struct pt_regs *regs, struct rt_sigframe __user *sf)
 	regs->r0	= uregs.scratch.r0;
 	regs->sp	= uregs.scratch.sp;
 
-	return 0;
+	return err;
 }
 
 static inline int is_do_ss_needed(unsigned int magic)
@@ -389,12 +391,51 @@ void do_signal(struct pt_regs *regs)
 	restore_saved_sigmask();
 }
 
-void do_notify_resume(struct pt_regs *regs)
+/*
+ * Addition for task_isolation_ready to keep waiting until timer irq is masked.
+ * Prevents a single hrtimer that may occur after returning to usermode.
+ */
+static bool _timer_isolation_ready(void)
 {
-	/*
-	 * ASM glue gaurantees that this is only called when returning to
-	 * user mode
-	 */
-	if (test_and_clear_thread_flag(TIF_NOTIFY_RESUME))
-		tracehook_notify_resume(regs);
+	/* Request rescheduling if timer irq is not masked. */
+	if (read_aux_reg(AUX_IENABLE) & (1 << TIMER0_IRQ)) {
+		set_tsk_need_resched(current);
+		return false;
+	}
+	return true;
+}
+
+static inline bool timer_isolation_ready(void)
+{
+	return !task_isolation_enabled() || _timer_isolation_ready();
+}
+
+asmlinkage void prepare_exit_to_usermode(struct pt_regs *regs,
+					 unsigned int thread_flags)
+{
+	do {
+		if (thread_flags & _TIF_NEED_RESCHED) {
+			schedule();
+		} else {
+		local_irq_enable();
+
+			if (thread_flags & _TIF_SIGPENDING)
+			do_signal(regs);
+
+		if (thread_flags & _TIF_NOTIFY_RESUME) {
+			clear_thread_flag(TIF_NOTIFY_RESUME);
+			tracehook_notify_resume(regs);
+		}
+
+		task_isolation_enter();
+		}
+
+		local_irq_disable();
+
+		thread_flags = READ_ONCE(current_thread_info()->flags) &
+				 _TIF_WORK_LOOP_MASK;
+
+	} while (thread_flags || !task_isolation_ready() || !timer_isolation_ready());
+
+	user_enter();
 }

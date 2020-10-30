@@ -4,8 +4,7 @@
  * Copyright (c) 2013 ELAN Microelectronics Corp.
  *
  * Author: 林政維 (Duson Lin) <dusonlin@emc.com.tw>
- * Author: KT Liao <kt.liao@emc.com.tw>
- * Version: 1.6.2
+ * Version: 1.5.9
  *
  * Based on cyapa driver:
  * copyright (c) 2011-2012 Cypress Semiconductor, Inc.
@@ -41,8 +40,7 @@
 #include "elan_i2c.h"
 
 #define DRIVER_NAME		"elan_i2c"
-#define ELAN_DRIVER_VERSION	"1.6.2"
-#define ELAN_VENDOR_ID		0x04f3
+#define ELAN_DRIVER_VERSION	"1.5.9"
 #define ETP_MAX_PRESSURE	255
 #define ETP_FWIDTH_REDUCE	90
 #define ETP_FINGER_WIDTH	15
@@ -78,7 +76,7 @@ struct elan_tp_data {
 	unsigned int		x_res;
 	unsigned int		y_res;
 
-	u16			product_id;
+	u8			product_id;
 	u8			fw_version;
 	u8			sm_version;
 	u8			iap_version;
@@ -86,7 +84,7 @@ struct elan_tp_data {
 	int			pressure_adjustment;
 	u8			mode;
 	u8			ic_type;
-	u16			fw_validpage_count;
+	u16			fw_vaildpage_count;
 	u16			fw_signature_address;
 
 	bool			irq_wake;
@@ -96,38 +94,25 @@ struct elan_tp_data {
 	bool			baseline_ready;
 };
 
-static int elan_get_fwinfo(u8 iap_version, u16 *validpage_count,
+static int elan_get_fwinfo(u8 ic_type, u16 *vaildpage_count,
 			   u16 *signature_address)
 {
-	switch (iap_version) {
-	case 0x00:
-	case 0x06:
-	case 0x08:
-		*validpage_count = 512;
-		break;
-	case 0x03:
-	case 0x07:
+	switch(ic_type) {
 	case 0x09:
-	case 0x0A:
-	case 0x0B:
-	case 0x0C:
-		*validpage_count = 768;
+		*vaildpage_count = 768;
 		break;
 	case 0x0D:
-		*validpage_count = 896;
-		break;
-	case 0x0E:
-		*validpage_count = 640;
+		*vaildpage_count = 896;
 		break;
 	default:
 		/* unknown ic type clear value */
-		*validpage_count = 0;
+		*vaildpage_count = 0;
 		*signature_address = 0;
 		return -ENXIO;
 	}
 
 	*signature_address =
-		(*validpage_count * ETP_FW_PAGE_SIZE) - ETP_FW_SIGNATURE_SIZE;
+		(*vaildpage_count * ETP_FW_PAGE_SIZE) - ETP_FW_SIGNATURE_SIZE;
 
 	return 0;
 }
@@ -200,70 +185,15 @@ static int elan_sleep(struct elan_tp_data *data)
 	return error;
 }
 
-static int elan_query_product(struct elan_tp_data *data)
-{
-	int error;
-
-	error = data->ops->get_product_id(data->client, &data->product_id);
-	if (error)
-		return error;
-
-	error = data->ops->get_sm_version(data->client, &data->ic_type,
-					  &data->sm_version);
-	if (error)
-		return error;
-
-	return 0;
-}
-
-static int elan_check_ASUS_special_fw(struct elan_tp_data *data)
-{
-	if (data->ic_type == 0x0E) {
-		switch (data->product_id) {
-		case 0x05 ... 0x07:
-		case 0x09:
-		case 0x13:
-			return true;
-		}
-	} else if (data->ic_type == 0x08 && data->product_id == 0x26) {
-		/* ASUS EeeBook X205TA */
-		return true;
-	}
-
-	return false;
-}
-
 static int __elan_initialize(struct elan_tp_data *data)
 {
 	struct i2c_client *client = data->client;
-	bool woken_up = false;
 	int error;
 
 	error = data->ops->initialize(client);
 	if (error) {
 		dev_err(&client->dev, "device initialize failed: %d\n", error);
 		return error;
-	}
-
-	error = elan_query_product(data);
-	if (error)
-		return error;
-
-	/*
-	 * Some ASUS devices were shipped with firmware that requires
-	 * touchpads to be woken up first, before attempting to switch
-	 * them into absolute reporting mode.
-	 */
-	if (elan_check_ASUS_special_fw(data)) {
-		error = data->ops->sleep_control(client, false);
-		if (error) {
-			dev_err(&client->dev,
-				"failed to wake device up: %d\n", error);
-			return error;
-		}
-
-		msleep(200);
-		woken_up = true;
 	}
 
 	data->mode |= ETP_ENABLE_ABS;
@@ -274,13 +204,11 @@ static int __elan_initialize(struct elan_tp_data *data)
 		return error;
 	}
 
-	if (!woken_up) {
-		error = data->ops->sleep_control(client, false);
-		if (error) {
-			dev_err(&client->dev,
-				"failed to wake device up: %d\n", error);
-			return error;
-		}
+	error = data->ops->sleep_control(client, false);
+	if (error) {
+		dev_err(&client->dev,
+			"failed to wake device up: %d\n", error);
+		return error;
 	}
 
 	return 0;
@@ -306,12 +234,21 @@ static int elan_query_device_info(struct elan_tp_data *data)
 {
 	int error;
 
+	error = data->ops->get_product_id(data->client, &data->product_id);
+	if (error)
+		return error;
+
 	error = data->ops->get_version(data->client, false, &data->fw_version);
 	if (error)
 		return error;
 
 	error = data->ops->get_checksum(data->client, false,
 					&data->fw_checksum);
+	if (error)
+		return error;
+
+	error = data->ops->get_sm_version(data->client, &data->ic_type,
+					  &data->sm_version);
 	if (error)
 		return error;
 
@@ -324,12 +261,13 @@ static int elan_query_device_info(struct elan_tp_data *data)
 	if (error)
 		return error;
 
-	error = elan_get_fwinfo(data->iap_version, &data->fw_validpage_count,
+	error = elan_get_fwinfo(data->ic_type, &data->fw_vaildpage_count,
 				&data->fw_signature_address);
-	if (error)
-		dev_warn(&data->client->dev,
-			 "unexpected iap version %#04x (ic type: %#04x), firmware update will not work\n",
-			 data->iap_version, data->ic_type);
+	if (error) {
+		dev_err(&data->client->dev,
+			"unknown ic type %d\n", data->ic_type);
+		return error;
+	}
 
 	return 0;
 }
@@ -415,7 +353,7 @@ static int __elan_update_firmware(struct elan_tp_data *data,
 	iap_start_addr = get_unaligned_le16(&fw->data[ETP_IAP_START_ADDR * 2]);
 
 	boot_page_count = (iap_start_addr * 2) / ETP_FW_PAGE_SIZE;
-	for (i = boot_page_count; i < data->fw_validpage_count; i++) {
+	for (i = boot_page_count; i < data->fw_vaildpage_count; i++) {
 		u16 checksum = 0;
 		const u8 *page = &fw->data[i * ETP_FW_PAGE_SIZE];
 
@@ -544,9 +482,6 @@ static ssize_t elan_sysfs_update_fw(struct device *dev,
 	int error;
 	const u8 *fw_signature;
 	static const u8 signature[] = {0xAA, 0x55, 0xCC, 0x33, 0xFF, 0xFF};
-
-	if (data->fw_validpage_count == 0)
-		return -EINVAL;
 
 	/* Look for a firmware with the product id appended. */
 	fw_name = kasprintf(GFP_KERNEL, ETP_FW_NAME, data->product_id);
@@ -964,8 +899,6 @@ static int elan_setup_input_device(struct elan_tp_data *data)
 
 	input->name = "Elan Touchpad";
 	input->id.bustype = BUS_I2C;
-	input->id.vendor = ELAN_VENDOR_ID;
-	input->id.product = data->product_id;
 	input_set_drvdata(input, data);
 
 	error = input_mt_init_slots(input, ETP_MAX_FINGERS,
@@ -1080,13 +1013,6 @@ static int elan_probe(struct i2c_client *client,
 			"Failed to add disable regulator action: %d\n",
 			error);
 		return error;
-	}
-
-	/* Make sure there is something at this address */
-	error = i2c_smbus_read_byte(client);
-	if (error < 0) {
-		dev_dbg(&client->dev, "nothing at this address: %d\n", error);
-		return -ENXIO;
 	}
 
 	/* Initialize the touchpad. */
@@ -1239,17 +1165,6 @@ MODULE_DEVICE_TABLE(i2c, elan_id);
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id elan_acpi_id[] = {
 	{ "ELAN0000", 0 },
-	{ "ELAN0100", 0 },
-	{ "ELAN0600", 0 },
-	{ "ELAN0602", 0 },
-	{ "ELAN0605", 0 },
-	{ "ELAN0608", 0 },
-	{ "ELAN0605", 0 },
-	{ "ELAN0609", 0 },
-	{ "ELAN060B", 0 },
-	{ "ELAN060C", 0 },
-	{ "ELAN0611", 0 },
-	{ "ELAN1000", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, elan_acpi_id);
@@ -1266,10 +1181,10 @@ MODULE_DEVICE_TABLE(of, elan_of_match);
 static struct i2c_driver elan_driver = {
 	.driver = {
 		.name	= DRIVER_NAME,
+		.owner	= THIS_MODULE,
 		.pm	= &elan_pm_ops,
 		.acpi_match_table = ACPI_PTR(elan_acpi_id),
 		.of_match_table = of_match_ptr(elan_of_match),
-		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},
 	.probe		= elan_probe,
 	.id_table	= elan_id,

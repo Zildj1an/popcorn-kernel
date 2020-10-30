@@ -112,16 +112,6 @@ struct x86_emulate_ops {
 			struct x86_exception *fault);
 
 	/*
-	 * read_phys: Read bytes of standard (non-emulated/special) memory.
-	 *            Used for descriptor reading.
-	 *  @addr:  [IN ] Physical address from which to read.
-	 *  @val:   [OUT] Value read from memory.
-	 *  @bytes: [IN ] Number of bytes to read from memory.
-	 */
-	int (*read_phys)(struct x86_emulate_ctxt *ctxt, unsigned long addr,
-			void *val, unsigned int bytes);
-
-	/*
 	 * write_std: Write bytes of standard (non-emulated/special) memory.
 	 *            Used for descriptor writing.
 	 *  @addr:  [IN ] Linear address to which to write.
@@ -221,9 +211,6 @@ struct x86_emulate_ops {
 	void (*get_cpuid)(struct x86_emulate_ctxt *ctxt,
 			  u32 *eax, u32 *ebx, u32 *ecx, u32 *edx);
 	void (*set_nmi_mask)(struct x86_emulate_ctxt *ctxt, bool masked);
-
-	unsigned (*get_hflags)(struct x86_emulate_ctxt *ctxt);
-	void (*set_hflags)(struct x86_emulate_ctxt *ctxt, unsigned hflags);
 };
 
 typedef u32 __attribute__((vector_size(16))) sse128_t;
@@ -293,10 +280,10 @@ struct x86_emulate_ctxt {
 
 	/* interruptibility state, as a result of execution of STI or MOV SS */
 	int interruptibility;
+	int emul_flags;
 
 	bool perm_ok; /* do not check permissions if true */
 	bool ud;	/* inject an #UD if host doesn't support insn */
-	bool tf;	/* TF value before instruction (after for syscall/sysret) */
 
 	bool have_exception;
 	struct x86_exception exception;

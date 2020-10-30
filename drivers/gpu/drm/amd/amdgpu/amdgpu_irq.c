@@ -25,7 +25,6 @@
  *          Alex Deucher
  *          Jerome Glisse
  */
-#include <linux/irq.h>
 #include <drm/drmP.h>
 #include <drm/drm_crtc_helper.h>
 #include <drm/amdgpu_drm.h>
@@ -141,7 +140,7 @@ void amdgpu_irq_preinstall(struct drm_device *dev)
  */
 int amdgpu_irq_postinstall(struct drm_device *dev)
 {
-	dev->max_vblank_count = 0x00ffffff;
+	dev->max_vblank_count = 0x001fffff;
 	return 0;
 }
 
@@ -273,11 +272,6 @@ void amdgpu_irq_fini(struct amdgpu_device *adev)
 
 		kfree(src->enabled_types);
 		src->enabled_types = NULL;
-		if (src->data) {
-			kfree(src->data);
-			kfree(src);
-			adev->irq.sources[i] = NULL;
-		}
 	}
 }
 

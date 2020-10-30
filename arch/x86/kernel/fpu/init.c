@@ -96,7 +96,6 @@ static void fpu__init_system_early_generic(struct cpuinfo_x86 *c)
  * Boot time FPU feature detection code:
  */
 unsigned int mxcsr_feature_mask __read_mostly = 0xffffffffu;
-EXPORT_SYMBOL_GPL(mxcsr_feature_mask);
 
 static void __init fpu__init_system_mxcsr(void)
 {
@@ -291,11 +290,11 @@ static void __init fpu__init_system_ctx_switch(void)
 	if (cpu_has_xsaveopt && eagerfpu != DISABLE)
 		eagerfpu = ENABLE;
 
-	if (xfeatures_mask & XFEATURE_MASK_EAGER) {
+	if (xfeatures_mask & XSTATE_EAGER) {
 		if (eagerfpu == DISABLE) {
 			pr_err("x86/fpu: eagerfpu switching disabled, disabling the following xstate features: 0x%llx.\n",
-			       xfeatures_mask & XFEATURE_MASK_EAGER);
-			xfeatures_mask &= ~XFEATURE_MASK_EAGER;
+			       xfeatures_mask & XSTATE_EAGER);
+			xfeatures_mask &= ~XSTATE_EAGER;
 		} else {
 			eagerfpu = ENABLE;
 		}
@@ -355,7 +354,17 @@ static int __init x86_noxsave_setup(char *s)
 	if (strlen(s))
 		return 0;
 
-	fpu__xstate_clear_all_cpu_caps();
+	setup_clear_cpu_cap(X86_FEATURE_XSAVE);
+	setup_clear_cpu_cap(X86_FEATURE_XSAVEOPT);
+	setup_clear_cpu_cap(X86_FEATURE_XSAVEC);
+	setup_clear_cpu_cap(X86_FEATURE_XSAVES);
+	setup_clear_cpu_cap(X86_FEATURE_AVX);
+	setup_clear_cpu_cap(X86_FEATURE_AVX2);
+	setup_clear_cpu_cap(X86_FEATURE_AVX512F);
+	setup_clear_cpu_cap(X86_FEATURE_AVX512PF);
+	setup_clear_cpu_cap(X86_FEATURE_AVX512ER);
+	setup_clear_cpu_cap(X86_FEATURE_AVX512CD);
+	setup_clear_cpu_cap(X86_FEATURE_MPX);
 
 	return 1;
 }

@@ -86,7 +86,7 @@
  */
 
 ; ********* Critical System Events **********************
-VECTOR   res_service             ; 0x0, Reset Vector	(0x0)
+VECTOR   res_service             ; 0x0, Restart Vector  (0x0)
 VECTOR   mem_service             ; 0x8, Mem exception   (0x1)
 VECTOR   instr_service           ; 0x10, Instrn Error   (0x2)
 
@@ -126,8 +126,9 @@ VECTOR   EV_TLBProtV             ; 0x118, Protection Violation  (0x23)
 VECTOR   EV_PrivilegeV           ; 0x120, Privilege Violation   (0x24)
 VECTOR   EV_Trap                 ; 0x128, Trap exception        (0x25)
 VECTOR   EV_Extension            ; 0x130, Extn Intruction Excp  (0x26)
+VECTOR   EV_PerfMon              ; 0x138, Perf Monitor Excp     (0x27)
 
-.rept   24
+.rept   23
 VECTOR   reserved                ; Reserved Exceptions
 .endr
 
@@ -142,18 +143,31 @@ int1_saved_reg:
 	.zero 4
 
 /* Each Interrupt level needs its own scratch */
+#ifdef CONFIG_ARC_COMPACT_IRQ_LEVELS
+
 ARCFP_DATA int2_saved_reg
 	.type   int2_saved_reg, @object
 	.size   int2_saved_reg, 4
 int2_saved_reg:
 	.zero 4
 
+#endif
+
 ; ---------------------------------------------
 	.section .text, "ax",@progbits
 
+res_service:		; processor restart
+#ifdef CONFIG_EZNPS_MTM_EXT
+	; Except of first thread all other are awaken
+	; to the first entry of reset vector
+	j first_lines_of_secondary
+#endif
+	flag    0x1     ; not implemented
+	nop
+	nop
 
-reserved:
-	flag 1		; Unexpected event, halt
+reserved:		; processor restart
+	rtie            ; jump to processor initializations
 
 ;##################### Interrupt Handling ##############################
 
@@ -167,25 +181,12 @@ ENTRY(handle_interrupt_level2)
 
 	;------------------------------------------------------
 	; if L2 IRQ interrupted a L1 ISR, disable preemption
-	;
-	; This is to avoid a potential L1-L2-L1 scenario
-	;  -L1 IRQ taken
-	;  -L2 interrupts L1 (before L1 ISR could run)
-	;  -preemption off IRQ, user task in syscall picked to run
-	;  -RTIE to userspace
-	;	Returns from L2 context fine
-	;	But both L1 and L2 re-enabled, so another L1 can be taken
-	;	while prev L1 is still unserviced
-	;
 	;------------------------------------------------------
-
-	; L2 interrupting L1 implies both L2 and L1 active
-	; However both A2 and A1 are NOT set in STATUS32, thus
-	; need to check STATUS32_L2 to determine if L1 was active
 
 	ld r9, [sp, PT_status32]        ; get statu32_l2 (saved in pt_regs)
 	bbit0 r9, STATUS_A1_BIT, 1f     ; L1 not active when L2 IRQ, so normal
 
+	; A1 is set in status32_l2
 	; bump thread_info->preempt_count (Disable preemption)
 	GET_CURR_THR_INFO_FROM_SP   r10
 	ld      r9, [r10, THREAD_INFO_PREEMPT_COUNT]
@@ -212,31 +213,6 @@ END(handle_interrupt_level2)
 #endif
 
 ; ---------------------------------------------
-; User Mode Memory Bus Error Interrupt Handler
-; (Kernel mode memory errors handled via seperate exception vectors)
-; ---------------------------------------------
-ENTRY(mem_service)
-
-	INTERRUPT_PROLOGUE 2
-
-	mov r0, ilink2
-	mov r1, sp
-
-	; User process needs to be killed with SIGBUS, but first need to get
-	; out of the L2 interrupt context (drop to pure kernel mode) and jump
-	; off to "C" code where SIGBUS in enqueued
-	lr  r3, [status32]
-	bclr r3, r3, STATUS_A2_BIT
-	or  r3, r3, (STATUS_E1_MASK|STATUS_E2_MASK)
-	sr  r3, [status32_l2]
-	mov ilink2, 1f
-	rtie
-1:
-	bl  do_memory_error
-	b   ret_from_exception
-END(mem_service)
-
-; ---------------------------------------------
 ;  Level 1 ISR
 ; ---------------------------------------------
 ENTRY(handle_interrupt_level1)
@@ -251,6 +227,12 @@ ENTRY(handle_interrupt_level1)
 	; can clobber scratch regs, hence use of stack to stash it
 	push r0
 	TRACE_ASM_IRQ_DISABLE
+	pop  r0
+#endif
+
+#ifdef CONFIG_CONTEXT_TRACKING
+	push r0
+	bl context_tracking_user_exit
 	pop  r0
 #endif
 
@@ -313,6 +295,28 @@ ENTRY(EV_TLBProtV)
 
 END(EV_TLBProtV)
 
+; ---------------------------------------------
+; Perf Monitor Exception Handler
+; ---------------------------------------------
+ENTRY(EV_PerfMon)
+
+#if defined(CONFIG_ARC_PLAT_EZNPS) && defined(CONFIG_PERF_EVENTS)
+	EXCEPTION_PROLOGUE
+
+	mov r0, sp
+
+	bl  do_perfmon
+
+	; not using ret_from_exception to prevent invoking preemption and
+	; enabling interrupts which may lead to a double fault since we're
+	; not faking
+	EXCEPTION_EPILOGUE
+#endif /* CONFIG_ARC_PLAT_EZNPS && CONFIG_PERF_EVENTS */
+
+	rtie
+
+END(EV_PerfMon)
+
 ; Wrapper for Linux page fault handler called from EV_TLBMiss*
 ; Very similar to ProtV handler case (6a) above, but avoids the extra checks
 ; for Misaligned access
@@ -350,10 +354,11 @@ END(call_do_page_fault)
 	; Note that we use realtime STATUS32 (not pt_regs->status32) to
 	; decide that.
 
-	and.f	0, r10, (STATUS_A1_MASK|STATUS_A2_MASK)
-	bz	.Lexcep_or_pure_K_ret
+	; if Returning from Exception
+	btst   r10, STATUS_AE_BIT
+	bnz    .Lexcep_ret
 
-	; Returning from Interrupts (Level 1 or 2)
+	; Not Exception so maybe Interrupts (Level 1 or 2)
 
 #ifdef CONFIG_ARC_COMPACT_IRQ_LEVELS
 
@@ -394,7 +399,8 @@ END(call_do_page_fault)
 	st      r9, [r10, THREAD_INFO_PREEMPT_COUNT]
 
 149:
-	INTERRUPT_EPILOGUE 2	; return from level 2 interrupt
+	;return from level 2
+	INTERRUPT_EPILOGUE 2
 debug_marker_l2:
 	rtie
 
@@ -402,14 +408,24 @@ not_level2_interrupt:
 
 #endif
 
-	INTERRUPT_EPILOGUE 1	; return from level 1 interrupt
+	bbit0  r10, STATUS_A1_BIT, .Lpure_k_mode_ret
+
+	;return from level 1
+	INTERRUPT_EPILOGUE 1
 debug_marker_l1:
 	rtie
 
-.Lexcep_or_pure_K_ret:
+.Lexcep_ret:
+.Lpure_k_mode_ret:
 
 	;this case is for syscalls or Exceptions or pure kernel mode
 
+	; switch back to CPU Exception context mode before restoring regs
+	; to prevent the registeres (i.e eret) from being overwritten
+	; by another exception (i.e perf overflow exception)
+	trap_s ECR_P_TRAP_FAKE_REVERT
+
+ret_as_exception:
 	EXCEPTION_EPILOGUE
 debug_marker_syscall:
 	rtie

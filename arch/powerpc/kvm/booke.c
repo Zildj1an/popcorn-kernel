@@ -63,7 +63,6 @@ struct kvm_stats_debugfs_item debugfs_entries[] = {
 	{ "dec",        VCPU_STAT(dec_exits) },
 	{ "ext_intr",   VCPU_STAT(ext_intr_exits) },
 	{ "halt_successful_poll", VCPU_STAT(halt_successful_poll) },
-	{ "halt_attempted_poll", VCPU_STAT(halt_attempted_poll) },
 	{ "halt_wakeup", VCPU_STAT(halt_wakeup) },
 	{ "doorbell", VCPU_STAT(dbell_exits) },
 	{ "guest doorbell", VCPU_STAT(gdbell_exits) },
@@ -934,7 +933,6 @@ static void kvmppc_restart_interrupt(struct kvm_vcpu *vcpu,
 #endif
 		break;
 	case BOOKE_INTERRUPT_CRITICAL:
-		kvmppc_fill_pt_regs(&regs);
 		unknown_exception(&regs);
 		break;
 	case BOOKE_INTERRUPT_DEBUG:
@@ -2033,7 +2031,7 @@ int kvm_arch_vcpu_ioctl_set_guest_debug(struct kvm_vcpu *vcpu,
 		if (type == KVMPPC_DEBUG_NONE)
 			continue;
 
-		if (type & ~(KVMPPC_DEBUG_WATCH_READ |
+		if (type & !(KVMPPC_DEBUG_WATCH_READ |
 			     KVMPPC_DEBUG_WATCH_WRITE |
 			     KVMPPC_DEBUG_BREAKPOINT))
 			return -EINVAL;

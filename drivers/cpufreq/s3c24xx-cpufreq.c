@@ -364,13 +364,7 @@ struct clk *s3c_cpufreq_clk_get(struct device *dev, const char *name)
 static int s3c_cpufreq_init(struct cpufreq_policy *policy)
 {
 	policy->clk = clk_arm;
-
-	policy->cpuinfo.transition_latency = cpu_cur.info->latency;
-
-	if (ftab)
-		return cpufreq_table_validate_and_show(policy, ftab);
-
-	return 0;
+	return cpufreq_generic_init(policy, ftab, cpu_cur.info->latency);
 }
 
 static int __init s3c_cpufreq_initclks(void)
@@ -654,7 +648,7 @@ late_initcall(s3c_cpufreq_initcall);
  *
  * Register the given set of PLLs with the system.
  */
-int s3c_plltab_register(struct cpufreq_frequency_table *plls,
+int __init s3c_plltab_register(struct cpufreq_frequency_table *plls,
 			       unsigned int plls_no)
 {
 	struct cpufreq_frequency_table *vals;

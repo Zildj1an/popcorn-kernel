@@ -2,7 +2,7 @@
  * USB Attached SCSI
  * Note that this is not the same as the USB Mass Storage driver
  *
- * Copyright Hans de Goede <hdegoede@redhat.com> for Red Hat, Inc. 2013 - 2016
+ * Copyright Hans de Goede <hdegoede@redhat.com> for Red Hat, Inc. 2013 - 2014
  * Copyright Matthew Wilcox for Intel Corp, 2010
  * Copyright Sarah Sharp for Intel Corp, 2010
  *
@@ -257,16 +257,17 @@ static void uas_stat_cmplt(struct urb *urb)
 	struct uas_cmd_info *cmdinfo;
 	unsigned long flags;
 	unsigned int idx;
-	int status = urb->status;
 
 	spin_lock_irqsave(&devinfo->lock, flags);
 
 	if (devinfo->resetting)
 		goto out;
 
-	if (status) {
-		if (status != -ENOENT && status != -ECONNRESET && status != -ESHUTDOWN)
-			dev_err(&urb->dev->dev, "stat urb: status %d\n", status);
+	if (urb->status) {
+		if (urb->status != -ENOENT && urb->status != -ECONNRESET) {
+			dev_err(&urb->dev->dev, "stat urb: status %d\n",
+				urb->status);
+		}
 		goto out;
 	}
 
@@ -347,7 +348,6 @@ static void uas_data_cmplt(struct urb *urb)
 	struct uas_dev_info *devinfo = (void *)cmnd->device->hostdata;
 	struct scsi_data_buffer *sdb = NULL;
 	unsigned long flags;
-	int status = urb->status;
 
 	spin_lock_irqsave(&devinfo->lock, flags);
 
@@ -374,9 +374,9 @@ static void uas_data_cmplt(struct urb *urb)
 		goto out;
 	}
 
-	if (status) {
-		if (status != -ENOENT && status != -ECONNRESET && status != -ESHUTDOWN)
-			uas_log_cmd_state(cmnd, "data cmplt err", status);
+	if (urb->status) {
+		if (urb->status != -ENOENT && urb->status != -ECONNRESET)
+			uas_log_cmd_state(cmnd, "data cmplt err", urb->status);
 		/* error: no data transfered */
 		sdb->resid = sdb->length;
 	} else {
@@ -757,17 +757,6 @@ static int uas_eh_bus_reset_handler(struct scsi_cmnd *cmnd)
 	return SUCCESS;
 }
 
-static int uas_target_alloc(struct scsi_target *starget)
-{
-	struct uas_dev_info *devinfo = (struct uas_dev_info *)
-			dev_to_shost(starget->dev.parent)->hostdata;
-
-	if (devinfo->flags & US_FL_NO_REPORT_LUNS)
-		starget->no_report_luns = 1;
-
-	return 0;
-}
-
 static int uas_slave_alloc(struct scsi_device *sdev)
 {
 	struct uas_dev_info *devinfo =
@@ -807,10 +796,6 @@ static int uas_slave_configure(struct scsi_device *sdev)
 	if (devinfo->flags & US_FL_NO_REPORT_OPCODES)
 		sdev->no_report_opcodes = 1;
 
-	/* A few buggy USB-ATA bridges don't understand FUA */
-	if (devinfo->flags & US_FL_BROKEN_FUA)
-		sdev->broken_fua = 1;
-
 	scsi_change_queue_depth(sdev, devinfo->qdepth - 2);
 	return 0;
 }
@@ -819,15 +804,15 @@ static struct scsi_host_template uas_host_template = {
 	.module = THIS_MODULE,
 	.name = "uas",
 	.queuecommand = uas_queuecommand,
-	.target_alloc = uas_target_alloc,
 	.slave_alloc = uas_slave_alloc,
 	.slave_configure = uas_slave_configure,
 	.eh_abort_handler = uas_eh_abort_handler,
 	.eh_bus_reset_handler = uas_eh_bus_reset_handler,
-	.can_queue = MAX_CMNDS,
+	.can_queue = 65536,	/* Is there a limit on the _host_ ? */
 	.this_id = -1,
 	.sg_tablesize = SG_NONE,
 	.skip_settle_delay = 1,
+	.use_blk_tags = 1,
 };
 
 #define UNUSUAL_DEV(id_vendor, id_product, bcdDeviceMin, bcdDeviceMax, \
@@ -849,14 +834,14 @@ MODULE_DEVICE_TABLE(usb, uas_usb_ids);
 static int uas_switch_interface(struct usb_device *udev,
 				struct usb_interface *intf)
 {
-	struct usb_host_interface *alt;
+	int alt;
 
 	alt = uas_find_uas_alt_setting(intf);
-	if (!alt)
-		return -ENODEV;
+	if (alt < 0)
+		return alt;
 
-	return usb_set_interface(udev, alt->desc.bInterfaceNumber,
-			alt->desc.bAlternateSetting);
+	return usb_set_interface(udev,
+			intf->altsetting[0].desc.bInterfaceNumber, alt);
 }
 
 static int uas_configure_endpoints(struct uas_dev_info *devinfo)
@@ -944,11 +929,9 @@ static int uas_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	if (result)
 		goto set_alt0;
 
-	/*
-	 * 1 tag is reserved for untagged commands +
-	 * 1 tag to avoid off by one errors in some bridge firmwares
-	 */
-	shost->can_queue = devinfo->qdepth - 2;
+	result = scsi_init_shared_tag_map(shost, devinfo->qdepth - 2);
+	if (result)
+		goto free_streams;
 
 	usb_set_intfdata(intf, shost);
 	result = scsi_add_host(shost, &intf->dev);
@@ -1052,19 +1035,20 @@ static int uas_post_reset(struct usb_interface *intf)
 		return 0;
 
 	err = uas_configure_endpoints(devinfo);
-	if (err && err != -ENODEV)
+	if (err) {
 		shost_printk(KERN_ERR, shost,
 			     "%s: alloc streams error %d after reset",
 			     __func__, err);
+		return 1;
+	}
 
-	/* we must unblock the host in every case lest we deadlock */
 	spin_lock_irqsave(shost->host_lock, flags);
 	scsi_report_bus_reset(shost, 0);
 	spin_unlock_irqrestore(shost->host_lock, flags);
 
 	scsi_unblock_requests(shost);
 
-	return err ? 1 : 0;
+	return 0;
 }
 
 static int uas_suspend(struct usb_interface *intf, pm_message_t message)

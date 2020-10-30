@@ -35,7 +35,6 @@
 #define ARC_REG_RTT_BCR		0xF2
 #define ARC_REG_IRQ_BCR		0xF3
 #define ARC_REG_SMART_BCR	0xFF
-#define ARC_REG_CLUSTER_BCR	0xcf
 
 /* status32 Bits Positions */
 #define STATUS_AE_BIT		5	/* Exception active */
@@ -82,6 +81,10 @@
 #define ECR_C_PROTV_MISALIG_DATA	0x04
 
 #define ECR_C_BIT_PROTV_MISALIG_DATA	10
+#define ECR_CODE_MASK			0x00ff00
+
+/* Privilege Violation Exception Actionpoint Hit Cause */
+#define ECR_C_BIT_PRIVV_AP_HIT		0x0200
 
 /* Machine Check Cause Code Values */
 #define ECR_C_MCHK_DUP_TLB		0x01
@@ -106,6 +109,17 @@
 #define ARC_AUX_DPFP_2H         0x304
 #define ARC_AUX_DPFP_STAT       0x305
 
+/* Timer related Aux registers */
+#define ARC_REG_TIMER0_LIMIT	0x23	/* timer 0 limit */
+#define ARC_REG_TIMER0_CTRL	0x22	/* timer 0 control */
+#define ARC_REG_TIMER0_CNT	0x21	/* timer 0 count */
+#define ARC_REG_TIMER1_LIMIT	0x102	/* timer 1 limit */
+#define ARC_REG_TIMER1_CTRL	0x101	/* timer 1 control */
+#define ARC_REG_TIMER1_CNT	0x100	/* timer 1 count */
+#define TIMER_CTRL_IE		(1 << 0) /* Interupt when Count reachs limit */
+#define TIMER_CTRL_NH		(1 << 1) /* Count only when CPU NOT halted */
+#define ARC_TIMER_MAX		0xFFFFFFFF
+
 #ifndef __ASSEMBLY__
 
 /*
@@ -120,7 +134,7 @@
 
 /* gcc builtin sr needs reg param to be long immediate */
 #define write_aux_reg(reg_immed, val)		\
-		__builtin_arc_sr((unsigned int)(val), reg_immed)
+		__builtin_arc_sr((unsigned int)val, reg_immed)
 
 #else
 
@@ -199,6 +213,14 @@
 #define PAGES_TO_KB(n_pages)	((n_pages) << (PAGE_SHIFT - 10))
 #define PAGES_TO_MB(n_pages)	(PAGES_TO_KB(n_pages) >> 10)
 
+
+#ifdef CONFIG_ARC_PLAT_EZNPS
+struct eznps_dp {
+	unsigned int dpc;
+	unsigned int eflags;
+	unsigned int gpa1;
+};
+#endif
 
 /*
  ***************************************************************
@@ -327,8 +349,8 @@ struct bcr_generic {
  */
 
 struct cpuinfo_arc_mmu {
-	unsigned int ver:4, pg_sz_k:8, s_pg_sz_m:8, pad:10, sasid:1, pae:1;
-	unsigned int sets:12, ways:4, u_dtlb:8, u_itlb:8;
+	unsigned int ver:4, pg_sz_k:8, s_pg_sz_m:8, u_dtlb:6, u_itlb:6;
+	unsigned int num_tlb:16, sets:12, ways:4;
 };
 
 struct cpuinfo_arc_cache {
@@ -373,6 +395,12 @@ static inline int is_isa_arcompact(void)
 {
 	return IS_ENABLED(CONFIG_ISA_ARCOMPACT);
 }
+
+#if defined(CONFIG_ISA_ARCOMPACT) && !defined(_CPU_DEFAULT_A7)
+#error "Toolchain not configured for ARCompact builds"
+#elif defined(CONFIG_ISA_ARCV2) && !defined(_CPU_DEFAULT_HS)
+#error "Toolchain not configured for ARCv2 builds"
+#endif
 
 #endif /* __ASEMBLY__ */
 

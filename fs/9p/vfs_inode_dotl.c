@@ -87,9 +87,6 @@ static int v9fs_test_inode_dotl(struct inode *inode, void *data)
 
 	if (v9inode->qid.type != st->qid.type)
 		return 0;
-
-	if (v9inode->qid.path != st->qid.path)
-		return 0;
 	return 1;
 }
 
@@ -831,6 +828,9 @@ v9fs_vfs_mknod_dotl(struct inode *dir, struct dentry *dentry, umode_t omode,
 	p9_debug(P9_DEBUG_VFS, " %lu,%pd mode: %hx MAJOR: %u MINOR: %u\n",
 		 dir->i_ino, dentry, omode,
 		 MAJOR(rdev), MINOR(rdev));
+
+	if (!new_valid_dev(rdev))
+		return -EINVAL;
 
 	v9ses = v9fs_inode2v9ses(dir);
 	dir_dentry = dentry->d_parent;

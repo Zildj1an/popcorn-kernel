@@ -15,6 +15,7 @@
  * this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/mfd/syscon.h>
 #include <linux/slab.h>
@@ -198,7 +199,7 @@ meson_clk_register_fixed_rate(const struct clk_conf *clk_conf,
 }
 
 void __init meson_clk_register_clks(const struct clk_conf *clk_confs,
-				    unsigned int nr_confs,
+				    size_t nr_confs,
 				    void __iomem *clk_base)
 {
 	unsigned int i;

@@ -140,10 +140,8 @@ static int tegra_wdt_set_timeout(struct watchdog_device *wdd,
 {
 	wdd->timeout = timeout;
 
-	if (watchdog_active(wdd)) {
-		tegra_wdt_stop(wdd);
+	if (watchdog_active(wdd))
 		return tegra_wdt_start(wdd);
-	}
 
 	return 0;
 }
@@ -220,7 +218,6 @@ static int tegra_wdt_probe(struct platform_device *pdev)
 	wdd->ops = &tegra_wdt_ops;
 	wdd->min_timeout = MIN_WDT_TIMEOUT;
 	wdd->max_timeout = MAX_WDT_TIMEOUT;
-	wdd->parent = &pdev->dev;
 
 	watchdog_set_drvdata(wdd, wdt);
 

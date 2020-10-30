@@ -8,7 +8,6 @@
 
 #include <linux/types.h>
 #include <linux/sched.h>
-#include <linux/cred.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
@@ -30,9 +29,10 @@ struct rpc_cred_cache {
 
 static unsigned int auth_hashbits = RPC_CREDCACHE_DEFAULT_HASHBITS;
 
-static const struct rpc_authops __rcu *auth_flavors[RPC_AUTH_MAXFLAVOR] = {
-	[RPC_AUTH_NULL] = (const struct rpc_authops __force __rcu *)&authnull_ops,
-	[RPC_AUTH_UNIX] = (const struct rpc_authops __force __rcu *)&authunix_ops,
+static DEFINE_SPINLOCK(rpc_authflavor_lock);
+static const struct rpc_authops *auth_flavors[RPC_AUTH_MAXFLAVOR] = {
+	&authnull_ops,		/* AUTH_NULL */
+	&authunix_ops,		/* AUTH_UNIX */
 	NULL,			/* others can be loadable modules */
 };
 
@@ -49,9 +49,11 @@ static int param_set_hashtbl_sz(const char *val, const struct kernel_param *kp)
 	if (!val)
 		goto out_inval;
 	ret = kstrtoul(val, 0, &num);
-	if (ret)
+	if (ret == -EINVAL)
 		goto out_inval;
-	nbits = fls(num - 1);
+	nbits = fls(num);
+	if (num > (1U << nbits))
+		nbits++;
 	if (nbits > MAX_HASHTABLE_BITS || nbits < 2)
 		goto out_inval;
 	*(unsigned int *)kp->arg = nbits;
@@ -92,64 +94,38 @@ pseudoflavor_to_flavor(u32 flavor) {
 int
 rpcauth_register(const struct rpc_authops *ops)
 {
-	const struct rpc_authops *old;
 	rpc_authflavor_t flavor;
+	int ret = -EPERM;
 
 	if ((flavor = ops->au_flavor) >= RPC_AUTH_MAXFLAVOR)
 		return -EINVAL;
-	old = cmpxchg((const struct rpc_authops ** __force)&auth_flavors[flavor], NULL, ops);
-	if (old == NULL || old == ops)
-		return 0;
-	return -EPERM;
+	spin_lock(&rpc_authflavor_lock);
+	if (auth_flavors[flavor] == NULL) {
+		auth_flavors[flavor] = ops;
+		ret = 0;
+	}
+	spin_unlock(&rpc_authflavor_lock);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(rpcauth_register);
 
 int
 rpcauth_unregister(const struct rpc_authops *ops)
 {
-	const struct rpc_authops *old;
 	rpc_authflavor_t flavor;
+	int ret = -EPERM;
 
 	if ((flavor = ops->au_flavor) >= RPC_AUTH_MAXFLAVOR)
 		return -EINVAL;
-
-	old = cmpxchg((const struct rpc_authops ** __force)&auth_flavors[flavor], ops, NULL);
-	if (old == ops || old == NULL)
-		return 0;
-	return -EPERM;
+	spin_lock(&rpc_authflavor_lock);
+	if (auth_flavors[flavor] == ops) {
+		auth_flavors[flavor] = NULL;
+		ret = 0;
+	}
+	spin_unlock(&rpc_authflavor_lock);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(rpcauth_unregister);
-
-static const struct rpc_authops *
-rpcauth_get_authops(rpc_authflavor_t flavor)
-{
-	const struct rpc_authops *ops;
-
-	if (flavor >= RPC_AUTH_MAXFLAVOR)
-		return NULL;
-
-	rcu_read_lock();
-	ops = rcu_dereference(auth_flavors[flavor]);
-	if (ops == NULL) {
-		rcu_read_unlock();
-		request_module("rpc-auth-%u", flavor);
-		rcu_read_lock();
-		ops = rcu_dereference(auth_flavors[flavor]);
-		if (ops == NULL)
-			goto out;
-	}
-	if (!try_module_get(ops->owner))
-		ops = NULL;
-out:
-	rcu_read_unlock();
-	return ops;
-}
-
-static void
-rpcauth_put_authops(const struct rpc_authops *ops)
-{
-	module_put(ops->owner);
-}
 
 /**
  * rpcauth_get_pseudoflavor - check if security flavor is supported
@@ -163,16 +139,25 @@ rpcauth_put_authops(const struct rpc_authops *ops)
 rpc_authflavor_t
 rpcauth_get_pseudoflavor(rpc_authflavor_t flavor, struct rpcsec_gss_info *info)
 {
-	const struct rpc_authops *ops = rpcauth_get_authops(flavor);
+	const struct rpc_authops *ops;
 	rpc_authflavor_t pseudoflavor;
 
-	if (!ops)
+	ops = auth_flavors[flavor];
+	if (ops == NULL)
+		request_module("rpc-auth-%u", flavor);
+	spin_lock(&rpc_authflavor_lock);
+	ops = auth_flavors[flavor];
+	if (ops == NULL || !try_module_get(ops->owner)) {
+		spin_unlock(&rpc_authflavor_lock);
 		return RPC_AUTH_MAXFLAVOR;
+	}
+	spin_unlock(&rpc_authflavor_lock);
+
 	pseudoflavor = flavor;
 	if (ops->info2flavor != NULL)
 		pseudoflavor = ops->info2flavor(info);
 
-	rpcauth_put_authops(ops);
+	module_put(ops->owner);
 	return pseudoflavor;
 }
 EXPORT_SYMBOL_GPL(rpcauth_get_pseudoflavor);
@@ -192,15 +177,25 @@ rpcauth_get_gssinfo(rpc_authflavor_t pseudoflavor, struct rpcsec_gss_info *info)
 	const struct rpc_authops *ops;
 	int result;
 
-	ops = rpcauth_get_authops(flavor);
+	if (flavor >= RPC_AUTH_MAXFLAVOR)
+		return -EINVAL;
+
+	ops = auth_flavors[flavor];
 	if (ops == NULL)
+		request_module("rpc-auth-%u", flavor);
+	spin_lock(&rpc_authflavor_lock);
+	ops = auth_flavors[flavor];
+	if (ops == NULL || !try_module_get(ops->owner)) {
+		spin_unlock(&rpc_authflavor_lock);
 		return -ENOENT;
+	}
+	spin_unlock(&rpc_authflavor_lock);
 
 	result = -ENOENT;
 	if (ops->flavor2info != NULL)
 		result = ops->flavor2info(pseudoflavor, info);
 
-	rpcauth_put_authops(ops);
+	module_put(ops->owner);
 	return result;
 }
 EXPORT_SYMBOL_GPL(rpcauth_get_gssinfo);
@@ -218,13 +213,15 @@ EXPORT_SYMBOL_GPL(rpcauth_get_gssinfo);
 int
 rpcauth_list_flavors(rpc_authflavor_t *array, int size)
 {
-	const struct rpc_authops *ops;
-	rpc_authflavor_t flavor, pseudos[4];
-	int i, len, result = 0;
+	rpc_authflavor_t flavor;
+	int result = 0;
 
-	rcu_read_lock();
+	spin_lock(&rpc_authflavor_lock);
 	for (flavor = 0; flavor < RPC_AUTH_MAXFLAVOR; flavor++) {
-		ops = rcu_dereference(auth_flavors[flavor]);
+		const struct rpc_authops *ops = auth_flavors[flavor];
+		rpc_authflavor_t pseudos[4];
+		int i, len;
+
 		if (result >= size) {
 			result = -ENOMEM;
 			break;
@@ -249,7 +246,7 @@ rpcauth_list_flavors(rpc_authflavor_t *array, int size)
 			array[result++] = pseudos[i];
 		}
 	}
-	rcu_read_unlock();
+	spin_unlock(&rpc_authflavor_lock);
 
 	dprintk("RPC:       %s returns %d\n", __func__, result);
 	return result;
@@ -257,19 +254,27 @@ rpcauth_list_flavors(rpc_authflavor_t *array, int size)
 EXPORT_SYMBOL_GPL(rpcauth_list_flavors);
 
 struct rpc_auth *
-rpcauth_create(const struct rpc_auth_create_args *args, struct rpc_clnt *clnt)
+rpcauth_create(struct rpc_auth_create_args *args, struct rpc_clnt *clnt)
 {
-	struct rpc_auth	*auth = ERR_PTR(-EINVAL);
+	struct rpc_auth		*auth;
 	const struct rpc_authops *ops;
-	u32 flavor = pseudoflavor_to_flavor(args->pseudoflavor);
+	u32			flavor = pseudoflavor_to_flavor(args->pseudoflavor);
 
-	ops = rpcauth_get_authops(flavor);
-	if (ops == NULL)
+	auth = ERR_PTR(-EINVAL);
+	if (flavor >= RPC_AUTH_MAXFLAVOR)
 		goto out;
 
+	if ((ops = auth_flavors[flavor]) == NULL)
+		request_module("rpc-auth-%u", flavor);
+	spin_lock(&rpc_authflavor_lock);
+	ops = auth_flavors[flavor];
+	if (ops == NULL || !try_module_get(ops->owner)) {
+		spin_unlock(&rpc_authflavor_lock);
+		goto out;
+	}
+	spin_unlock(&rpc_authflavor_lock);
 	auth = ops->create(args, clnt);
-
-	rpcauth_put_authops(ops);
+	module_put(ops->owner);
 	if (IS_ERR(auth))
 		return auth;
 	if (clnt->cl_auth)
@@ -284,37 +289,32 @@ EXPORT_SYMBOL_GPL(rpcauth_create);
 void
 rpcauth_release(struct rpc_auth *auth)
 {
-	if (!refcount_dec_and_test(&auth->au_count))
+	if (!atomic_dec_and_test(&auth->au_count))
 		return;
 	auth->au_ops->destroy(auth);
 }
 
 static DEFINE_SPINLOCK(rpc_credcache_lock);
 
-/*
- * On success, the caller is responsible for freeing the reference
- * held by the hashtable
- */
-static bool
+static void
 rpcauth_unhash_cred_locked(struct rpc_cred *cred)
 {
-	if (!test_and_clear_bit(RPCAUTH_CRED_HASHED, &cred->cr_flags))
-		return false;
 	hlist_del_rcu(&cred->cr_hash);
-	return true;
+	smp_mb__before_atomic();
+	clear_bit(RPCAUTH_CRED_HASHED, &cred->cr_flags);
 }
 
-static bool
+static int
 rpcauth_unhash_cred(struct rpc_cred *cred)
 {
 	spinlock_t *cache_lock;
-	bool ret;
+	int ret;
 
-	if (!test_bit(RPCAUTH_CRED_HASHED, &cred->cr_flags))
-		return false;
 	cache_lock = &cred->cr_auth->au_credcache->lock;
 	spin_lock(cache_lock);
-	ret = rpcauth_unhash_cred_locked(cred);
+	ret = atomic_read(&cred->cr_count) == 0;
+	if (ret)
+		rpcauth_unhash_cred_locked(cred);
 	spin_unlock(cache_lock);
 	return ret;
 }
@@ -359,10 +359,8 @@ rpcauth_key_timeout_notify(struct rpc_auth *auth, struct rpc_cred *cred)
 EXPORT_SYMBOL_GPL(rpcauth_key_timeout_notify);
 
 bool
-rpcauth_cred_key_to_expire(struct rpc_auth *auth, struct rpc_cred *cred)
+rpcauth_cred_key_to_expire(struct rpc_cred *cred)
 {
-	if (auth->au_flags & RPCAUTH_AUTH_NO_CRKEY_TIMEOUT)
-		return false;
 	if (!cred->cr_ops->crkey_to_expire)
 		return false;
 	return cred->cr_ops->crkey_to_expire(cred);
@@ -393,44 +391,6 @@ void rpcauth_destroy_credlist(struct list_head *head)
 	}
 }
 
-static void
-rpcauth_lru_add_locked(struct rpc_cred *cred)
-{
-	if (!list_empty(&cred->cr_lru))
-		return;
-	number_cred_unused++;
-	list_add_tail(&cred->cr_lru, &cred_unused);
-}
-
-static void
-rpcauth_lru_add(struct rpc_cred *cred)
-{
-	if (!list_empty(&cred->cr_lru))
-		return;
-	spin_lock(&rpc_credcache_lock);
-	rpcauth_lru_add_locked(cred);
-	spin_unlock(&rpc_credcache_lock);
-}
-
-static void
-rpcauth_lru_remove_locked(struct rpc_cred *cred)
-{
-	if (list_empty(&cred->cr_lru))
-		return;
-	number_cred_unused--;
-	list_del_init(&cred->cr_lru);
-}
-
-static void
-rpcauth_lru_remove(struct rpc_cred *cred)
-{
-	if (list_empty(&cred->cr_lru))
-		return;
-	spin_lock(&rpc_credcache_lock);
-	rpcauth_lru_remove_locked(cred);
-	spin_unlock(&rpc_credcache_lock);
-}
-
 /*
  * Clear the RPC credential cache, and delete those credentials
  * that are not referenced.
@@ -450,10 +410,13 @@ rpcauth_clear_credcache(struct rpc_cred_cache *cache)
 		head = &cache->hashtable[i];
 		while (!hlist_empty(head)) {
 			cred = hlist_entry(head->first, struct rpc_cred, cr_hash);
-			rpcauth_unhash_cred_locked(cred);
-			/* Note: We now hold a reference to cred */
-			rpcauth_lru_remove_locked(cred);
+			get_rpccred(cred);
+			if (!list_empty(&cred->cr_lru)) {
+				list_del(&cred->cr_lru);
+				number_cred_unused--;
+			}
 			list_add_tail(&cred->cr_lru, &free);
+			rpcauth_unhash_cred_locked(cred);
 		}
 	}
 	spin_unlock(&cache->lock);
@@ -487,6 +450,7 @@ EXPORT_SYMBOL_GPL(rpcauth_destroy_credcache);
 static long
 rpcauth_prune_expired(struct list_head *free, int nr_to_scan)
 {
+	spinlock_t *cache_lock;
 	struct rpc_cred *cred, *next;
 	unsigned long expired = jiffies - RPC_AUTH_EXPIRY_MORATORIUM;
 	long freed = 0;
@@ -495,24 +459,30 @@ rpcauth_prune_expired(struct list_head *free, int nr_to_scan)
 
 		if (nr_to_scan-- == 0)
 			break;
-		if (refcount_read(&cred->cr_count) > 1) {
-			rpcauth_lru_remove_locked(cred);
-			continue;
-		}
 		/*
 		 * Enforce a 60 second garbage collection moratorium
 		 * Note that the cred_unused list must be time-ordered.
 		 */
-		if (!time_in_range(cred->cr_expire, expired, jiffies))
-			continue;
-		if (!rpcauth_unhash_cred(cred))
+		if (time_in_range(cred->cr_expire, expired, jiffies) &&
+		    test_bit(RPCAUTH_CRED_HASHED, &cred->cr_flags) != 0)
+			break;
+
+		list_del_init(&cred->cr_lru);
+		number_cred_unused--;
+		freed++;
+		if (atomic_read(&cred->cr_count) != 0)
 			continue;
 
-		rpcauth_lru_remove_locked(cred);
-		freed++;
-		list_add_tail(&cred->cr_lru, free);
+		cache_lock = &cred->cr_auth->au_credcache->lock;
+		spin_lock(cache_lock);
+		if (atomic_read(&cred->cr_count) == 0) {
+			get_rpccred(cred);
+			list_add_tail(&cred->cr_lru, free);
+			rpcauth_unhash_cred_locked(cred);
+		}
+		spin_unlock(cache_lock);
 	}
-	return freed ? freed : SHRINK_STOP;
+	return freed;
 }
 
 static unsigned long
@@ -550,7 +520,7 @@ static unsigned long
 rpcauth_cache_shrink_count(struct shrinker *shrink, struct shrink_control *sc)
 
 {
-	return number_cred_unused * sysctl_vfs_cache_pressure / 100;
+	return (number_cred_unused / 100) * sysctl_vfs_cache_pressure;
 }
 
 static void
@@ -573,7 +543,7 @@ rpcauth_cache_enforce_limit(void)
  */
 struct rpc_cred *
 rpcauth_lookup_credcache(struct rpc_auth *auth, struct auth_cred * acred,
-		int flags, gfp_t gfp)
+		int flags)
 {
 	LIST_HEAD(free);
 	struct rpc_cred_cache *cache = auth->au_credcache;
@@ -581,22 +551,26 @@ rpcauth_lookup_credcache(struct rpc_auth *auth, struct auth_cred * acred,
 			*entry, *new;
 	unsigned int nr;
 
-	nr = auth->au_ops->hash_cred(acred, cache->hashbits);
+	nr = hash_long(from_kuid(&init_user_ns, acred->uid), cache->hashbits);
 
 	rcu_read_lock();
 	hlist_for_each_entry_rcu(entry, &cache->hashtable[nr], cr_hash) {
 		if (!entry->cr_ops->crmatch(acred, entry, flags))
 			continue;
 		if (flags & RPCAUTH_LOOKUP_RCU) {
-			if (test_bit(RPCAUTH_CRED_NEW, &entry->cr_flags) ||
-			    refcount_read(&entry->cr_count) == 0)
-				continue;
-			cred = entry;
+			if (test_bit(RPCAUTH_CRED_HASHED, &entry->cr_flags) &&
+			    !test_bit(RPCAUTH_CRED_NEW, &entry->cr_flags))
+				cred = entry;
 			break;
 		}
+		spin_lock(&cache->lock);
+		if (test_bit(RPCAUTH_CRED_HASHED, &entry->cr_flags) == 0) {
+			spin_unlock(&cache->lock);
+			continue;
+		}
 		cred = get_rpccred(entry);
-		if (cred)
-			break;
+		spin_unlock(&cache->lock);
+		break;
 	}
 	rcu_read_unlock();
 
@@ -606,7 +580,7 @@ rpcauth_lookup_credcache(struct rpc_auth *auth, struct auth_cred * acred,
 	if (flags & RPCAUTH_LOOKUP_RCU)
 		return ERR_PTR(-ECHILD);
 
-	new = auth->au_ops->crcreate(auth, acred, flags, gfp);
+	new = auth->au_ops->crcreate(auth, acred, flags);
 	if (IS_ERR(new)) {
 		cred = new;
 		goto out;
@@ -617,13 +591,11 @@ rpcauth_lookup_credcache(struct rpc_auth *auth, struct auth_cred * acred,
 		if (!entry->cr_ops->crmatch(acred, entry, flags))
 			continue;
 		cred = get_rpccred(entry);
-		if (cred)
-			break;
+		break;
 	}
 	if (cred == NULL) {
 		cred = new;
 		set_bit(RPCAUTH_CRED_HASHED, &cred->cr_flags);
-		refcount_inc(&cred->cr_count);
 		hlist_add_head_rcu(&cred->cr_hash, &cache->hashtable[nr]);
 	} else
 		list_add_tail(&new->cr_lru, &free);
@@ -670,10 +642,13 @@ rpcauth_init_cred(struct rpc_cred *cred, const struct auth_cred *acred,
 {
 	INIT_HLIST_NODE(&cred->cr_hash);
 	INIT_LIST_HEAD(&cred->cr_lru);
-	refcount_set(&cred->cr_count, 1);
+	atomic_set(&cred->cr_count, 1);
 	cred->cr_auth = auth;
 	cred->cr_ops = ops;
 	cred->cr_expire = jiffies;
+#if IS_ENABLED(CONFIG_SUNRPC_DEBUG)
+	cred->cr_magic = RPCAUTH_CRED_MAGIC;
+#endif
 	cred->cr_uid = acred->uid;
 }
 EXPORT_SYMBOL_GPL(rpcauth_init_cred);
@@ -728,7 +703,8 @@ rpcauth_bindcred(struct rpc_task *task, struct rpc_cred *cred, int flags)
 		new = rpcauth_bind_new_cred(task, lookupflags);
 	if (IS_ERR(new))
 		return PTR_ERR(new);
-	put_rpccred(req->rq_cred);
+	if (req->rq_cred != NULL)
+		put_rpccred(req->rq_cred);
 	req->rq_cred = new;
 	return 0;
 }
@@ -736,31 +712,36 @@ rpcauth_bindcred(struct rpc_task *task, struct rpc_cred *cred, int flags)
 void
 put_rpccred(struct rpc_cred *cred)
 {
-	if (cred == NULL)
+	/* Fast path for unhashed credentials */
+	if (test_bit(RPCAUTH_CRED_HASHED, &cred->cr_flags) == 0) {
+		if (atomic_dec_and_test(&cred->cr_count))
+			cred->cr_ops->crdestroy(cred);
 		return;
-	rcu_read_lock();
-	if (refcount_dec_and_test(&cred->cr_count))
-		goto destroy;
-	if (refcount_read(&cred->cr_count) != 1 ||
-	    !test_bit(RPCAUTH_CRED_HASHED, &cred->cr_flags))
-		goto out;
-	if (test_bit(RPCAUTH_CRED_UPTODATE, &cred->cr_flags) != 0) {
-		cred->cr_expire = jiffies;
-		rpcauth_lru_add(cred);
-		/* Race breaker */
-		if (unlikely(!test_bit(RPCAUTH_CRED_HASHED, &cred->cr_flags)))
-			rpcauth_lru_remove(cred);
-	} else if (rpcauth_unhash_cred(cred)) {
-		rpcauth_lru_remove(cred);
-		if (refcount_dec_and_test(&cred->cr_count))
-			goto destroy;
 	}
-out:
-	rcu_read_unlock();
-	return;
-destroy:
-	rcu_read_unlock();
+
+	if (!atomic_dec_and_lock(&cred->cr_count, &rpc_credcache_lock))
+		return;
+	if (!list_empty(&cred->cr_lru)) {
+		number_cred_unused--;
+		list_del_init(&cred->cr_lru);
+	}
+	if (test_bit(RPCAUTH_CRED_HASHED, &cred->cr_flags) != 0) {
+		if (test_bit(RPCAUTH_CRED_UPTODATE, &cred->cr_flags) != 0) {
+			cred->cr_expire = jiffies;
+			list_add_tail(&cred->cr_lru, &cred_unused);
+			number_cred_unused++;
+			goto out_nodestroy;
+		}
+		if (!rpcauth_unhash_cred(cred)) {
+			/* We were hashed and someone looked us up... */
+			goto out_nodestroy;
+		}
+	}
+	spin_unlock(&rpc_credcache_lock);
 	cred->cr_ops->crdestroy(cred);
+	return;
+out_nodestroy:
+	spin_unlock(&rpc_credcache_lock);
 }
 EXPORT_SYMBOL_GPL(put_rpccred);
 
@@ -835,16 +816,6 @@ rpcauth_unwrap_resp(struct rpc_task *task, kxdrdproc_t decode, void *rqstp,
 	return rpcauth_unwrap_req_decode(decode, rqstp, data, obj);
 }
 
-bool
-rpcauth_xmit_need_reencode(struct rpc_task *task)
-{
-	struct rpc_cred *cred = task->tk_rqstp->rq_cred;
-
-	if (!cred || !cred->cr_ops->crneed_reencode)
-		return false;
-	return cred->cr_ops->crneed_reencode(task);
-}
-
 int
 rpcauth_refreshcred(struct rpc_task *task)
 {
@@ -904,12 +875,8 @@ int __init rpcauth_init_module(void)
 	err = rpc_init_generic_auth();
 	if (err < 0)
 		goto out2;
-	err = register_shrinker(&rpc_cred_shrinker);
-	if (err < 0)
-		goto out3;
+	register_shrinker(&rpc_cred_shrinker);
 	return 0;
-out3:
-	rpc_destroy_generic_auth();
 out2:
 	rpc_destroy_authunix();
 out1:

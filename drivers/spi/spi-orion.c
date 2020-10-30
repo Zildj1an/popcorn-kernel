@@ -41,11 +41,6 @@
 #define ORION_SPI_DATA_OUT_REG		0x08
 #define ORION_SPI_DATA_IN_REG		0x0c
 #define ORION_SPI_INT_CAUSE_REG		0x10
-#define ORION_SPI_TIMING_PARAMS_REG	0x18
-
-#define ORION_SPI_TMISO_SAMPLE_MASK	(0x3 << 6)
-#define ORION_SPI_TMISO_SAMPLE_1	(1 << 6)
-#define ORION_SPI_TMISO_SAMPLE_2	(2 << 6)
 
 #define ORION_SPI_MODE_CPOL		(1 << 11)
 #define ORION_SPI_MODE_CPHA		(1 << 12)
@@ -75,7 +70,6 @@ struct orion_spi_dev {
 	unsigned int		min_divisor;
 	unsigned int		max_divisor;
 	u32			prescale_mask;
-	bool			is_errata_50mhz_ac;
 };
 
 struct orion_spi {
@@ -127,62 +121,37 @@ static int orion_spi_baudrate_set(struct spi_device *spi, unsigned int speed)
 	tclk_hz = clk_get_rate(orion_spi->clk);
 
 	if (devdata->typ == ARMADA_SPI) {
-		/*
-		 * Given the core_clk (tclk_hz) and the target rate (speed) we
-		 * determine the best values for SPR (in [0 .. 15]) and SPPR (in
-		 * [0..7]) such that
-		 *
-		 * 	core_clk / (SPR * 2 ** SPPR)
-		 *
-		 * is as big as possible but not bigger than speed.
-		 */
+		unsigned int clk, spr, sppr, sppr2, err;
+		unsigned int best_spr, best_sppr, best_err;
 
-		/* best integer divider: */
-		unsigned divider = DIV_ROUND_UP(tclk_hz, speed);
-		unsigned spr, sppr;
+		best_err = speed;
+		best_spr = 0;
+		best_sppr = 0;
 
-		if (divider < 16) {
-			/* This is the easy case, divider is less than 16 */
-			spr = divider;
-			sppr = 0;
+		/* Iterate over the valid range looking for best fit */
+		for (sppr = 0; sppr < 8; sppr++) {
+			sppr2 = 0x1 << sppr;
 
-		} else {
-			unsigned two_pow_sppr;
-			/*
-			 * Find the highest bit set in divider. This and the
-			 * three next bits define SPR (apart from rounding).
-			 * SPPR is then the number of zero bits that must be
-			 * appended:
-			 */
-			sppr = fls(divider) - 4;
+			spr = tclk_hz / sppr2;
+			spr = DIV_ROUND_UP(spr, speed);
+			if ((spr == 0) || (spr > 15))
+				continue;
 
-			/*
-			 * As SPR only has 4 bits, we have to round divider up
-			 * to the next multiple of 2 ** sppr.
-			 */
-			two_pow_sppr = 1 << sppr;
-			divider = (divider + two_pow_sppr - 1) & -two_pow_sppr;
+			clk = tclk_hz / (spr * sppr2);
+			err = speed - clk;
 
-			/*
-			 * recalculate sppr as rounding up divider might have
-			 * increased it enough to change the position of the
-			 * highest set bit. In this case the bit that now
-			 * doesn't make it into SPR is 0, so there is no need to
-			 * round again.
-			 */
-			sppr = fls(divider) - 4;
-			spr = divider >> sppr;
-
-			/*
-			 * Now do range checking. SPR is constructed to have a
-			 * width of 4 bits, so this is fine for sure. So we
-			 * still need to check for sppr to fit into 3 bits:
-			 */
-			if (sppr > 7)
-				return -EINVAL;
+			if (err < best_err) {
+				best_spr = spr;
+				best_sppr = sppr;
+				best_err = err;
+			}
 		}
 
-		prescale = ((sppr & 0x6) << 5) | ((sppr & 0x1) << 4) | spr;
+		if ((best_sppr == 0) && (best_spr == 0))
+			return -EINVAL;
+
+		prescale = ((best_sppr & 0x6) << 5) |
+			((best_sppr & 0x1) << 4) | best_spr;
 	} else {
 		/*
 		 * the supported rates are: 4,6,8...30
@@ -226,41 +195,6 @@ orion_spi_mode_set(struct spi_device *spi)
 	writel(reg, spi_reg(orion_spi, ORION_SPI_IF_CONFIG_REG));
 }
 
-static void
-orion_spi_50mhz_ac_timing_erratum(struct spi_device *spi, unsigned int speed)
-{
-	u32 reg;
-	struct orion_spi *orion_spi;
-
-	orion_spi = spi_master_get_devdata(spi->master);
-
-	/*
-	 * Erratum description: (Erratum NO. FE-9144572) The device
-	 * SPI interface supports frequencies of up to 50 MHz.
-	 * However, due to this erratum, when the device core clock is
-	 * 250 MHz and the SPI interfaces is configured for 50MHz SPI
-	 * clock and CPOL=CPHA=1 there might occur data corruption on
-	 * reads from the SPI device.
-	 * Erratum Workaround:
-	 * Work in one of the following configurations:
-	 * 1. Set CPOL=CPHA=0 in "SPI Interface Configuration
-	 * Register".
-	 * 2. Set TMISO_SAMPLE value to 0x2 in "SPI Timing Parameters 1
-	 * Register" before setting the interface.
-	 */
-	reg = readl(spi_reg(orion_spi, ORION_SPI_TIMING_PARAMS_REG));
-	reg &= ~ORION_SPI_TMISO_SAMPLE_MASK;
-
-	if (clk_get_rate(orion_spi->clk) == 250000000 &&
-			speed == 50000000 && spi->mode & SPI_CPOL &&
-			spi->mode & SPI_CPHA)
-		reg |= ORION_SPI_TMISO_SAMPLE_2;
-	else
-		reg |= ORION_SPI_TMISO_SAMPLE_1; /* This is the default value */
-
-	writel(reg, spi_reg(orion_spi, ORION_SPI_TIMING_PARAMS_REG));
-}
-
 /*
  * called only when no transfer is active on the bus
  */
@@ -281,9 +215,6 @@ orion_spi_setup_transfer(struct spi_device *spi, struct spi_transfer *t)
 		bits_per_word = t->bits_per_word;
 
 	orion_spi_mode_set(spi);
-
-	if (orion_spi->devdata->is_errata_50mhz_ac)
-		orion_spi_50mhz_ac_timing_erratum(spi, speed);
 
 	rc = orion_spi_baudrate_set(spi, speed);
 	if (rc)
@@ -482,14 +413,6 @@ static const struct orion_spi_dev armada_375_spi_dev_data = {
 	.prescale_mask = ARMADA_SPI_CLK_PRESCALE_MASK,
 };
 
-static const struct orion_spi_dev armada_380_spi_dev_data = {
-	.typ = ARMADA_SPI,
-	.max_hz = 50000000,
-	.max_divisor = 1920,
-	.prescale_mask = ARMADA_SPI_CLK_PRESCALE_MASK,
-	.is_errata_50mhz_ac = true,
-};
-
 static const struct of_device_id orion_spi_of_match_table[] = {
 	{
 		.compatible = "marvell,orion-spi",
@@ -505,7 +428,7 @@ static const struct of_device_id orion_spi_of_match_table[] = {
 	},
 	{
 		.compatible = "marvell,armada-380-spi",
-		.data = &armada_380_spi_dev_data,
+		.data = &armada_xp_spi_dev_data,
 	},
 	{
 		.compatible = "marvell,armada-390-spi",

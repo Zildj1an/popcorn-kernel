@@ -173,7 +173,8 @@ int vhost_poll_start(struct vhost_poll *poll, struct file *file)
 	if (mask)
 		vhost_poll_wakeup(&poll->wait, 0, 0, (void *)mask);
 	if (mask & POLLERR) {
-		vhost_poll_stop(poll);
+		if (poll->wqh)
+			remove_wait_queue(poll->wqh, &poll->wait);
 		ret = -EINVAL;
 	}
 
@@ -818,7 +819,7 @@ long vhost_vring_ioctl(struct vhost_dev *d, int ioctl, void __user *argp)
 		BUILD_BUG_ON(__alignof__ *vq->used > VRING_USED_ALIGN_SIZE);
 		if ((a.avail_user_addr & (VRING_AVAIL_ALIGN_SIZE - 1)) ||
 		    (a.used_user_addr & (VRING_USED_ALIGN_SIZE - 1)) ||
-		    (a.log_guest_addr & (VRING_USED_ALIGN_SIZE - 1))) {
+		    (a.log_guest_addr & (sizeof(u64) - 1))) {
 			r = -EINVAL;
 			break;
 		}
@@ -1368,7 +1369,7 @@ int vhost_get_vq_desc(struct vhost_virtqueue *vq,
 	/* Grab the next descriptor number they're advertising, and increment
 	 * the index we've seen. */
 	if (unlikely(__get_user(ring_head,
-				&vq->avail->ring[last_avail_idx & (vq->num - 1)]))) {
+				&vq->avail->ring[last_avail_idx % vq->num]))) {
 		vq_err(vq, "Failed to read head: idx %d address %p\n",
 		       last_avail_idx,
 		       &vq->avail->ring[last_avail_idx % vq->num]);
@@ -1488,7 +1489,7 @@ static int __vhost_add_used_n(struct vhost_virtqueue *vq,
 	u16 old, new;
 	int start;
 
-	start = vq->last_used_idx & (vq->num - 1);
+	start = vq->last_used_idx % vq->num;
 	used = vq->used->ring + start;
 	if (count == 1) {
 		if (__put_user(heads[0].id, &used->id)) {
@@ -1530,7 +1531,7 @@ int vhost_add_used_n(struct vhost_virtqueue *vq, struct vring_used_elem *heads,
 {
 	int start, n, r;
 
-	start = vq->last_used_idx & (vq->num - 1);
+	start = vq->last_used_idx % vq->num;
 	n = vq->num - start;
 	if (n < count) {
 		r = __vhost_add_used_n(vq, heads, n);

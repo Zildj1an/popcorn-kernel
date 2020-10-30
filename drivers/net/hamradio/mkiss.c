@@ -17,7 +17,7 @@
  */
 #include <linux/module.h>
 #include <linux/bitops.h>
-#include <linux/uaccess.h>
+#include <asm/uaccess.h>
 #include <linux/crc16.h>
 #include <linux/string.h>
 #include <linux/mm.h>
@@ -35,6 +35,7 @@
 #include <linux/skbuff.h>
 #include <linux/if_arp.h>
 #include <linux/jiffies.h>
+#include <linux/compat.h>
 
 #include <net/ax25.h>
 
@@ -216,7 +217,7 @@ static int kiss_esc_crc(unsigned char *s, unsigned char *d, unsigned short crc,
 			c = *s++;
 		else if (len > 1)
 			c = crc >> 8;
-		else
+		else if (len > 0)
 			c = crc & 0xff;
 
 		len--;
@@ -297,7 +298,7 @@ static void ax_bump(struct mkiss *ax)
 		return;
 	}
 
-	skb_put_data(skb, ax->rbuff, count);
+	memcpy(skb_put(skb,count), ax->rbuff, count);
 	skb->protocol = ax25_type_trans(skb, ax->dev);
 	netif_rx(skb);
 	ax->dev->stats.rx_packets++;
@@ -439,6 +440,7 @@ static void ax_encaps(struct net_device *dev, unsigned char *icp, int len)
 		ax_changedmtu(ax);
 
 	if (len > ax->mtu) {		/* Sigh, shouldn't occur BUT ... */
+		len = ax->mtu;
 		printk(KERN_ERR "mkiss: %s: truncating oversized transmit packet!\n", ax->dev->name);
 		dev->stats.tx_dropped++;
 		netif_start_queue(dev);
@@ -475,8 +477,7 @@ static void ax_encaps(struct net_device *dev, unsigned char *icp, int len)
 				  cmd = 0;
 				}
 				ax->crcauto = (cmd ? 0 : 1);
-				printk(KERN_INFO "mkiss: %s: crc mode set to %d\n",
-				       ax->dev->name, cmd);
+				printk(KERN_INFO "mkiss: %s: crc mode %s %d\n", ax->dev->name, (len) ? "set to" : "is", cmd);
 			}
 			spin_unlock_bh(&ax->buflock);
 			netif_start_queue(dev);
@@ -518,7 +519,7 @@ static void ax_encaps(struct net_device *dev, unsigned char *icp, int len)
 	dev->stats.tx_packets++;
 	dev->stats.tx_bytes += actual;
 
-	netif_trans_update(ax->dev);
+	ax->dev->trans_start = jiffies;
 	ax->xleft = count - actual;
 	ax->xhead = ax->xbuff + actual;
 }
@@ -541,7 +542,7 @@ static netdev_tx_t ax_xmit(struct sk_buff *skb, struct net_device *dev)
 		 * May be we must check transmitter timeout here ?
 		 *      14 Oct 1994 Dmitry Gorodchanin.
 		 */
-		if (time_before(jiffies, dev_trans_start(dev) + 20 * HZ)) {
+		if (time_before(jiffies, dev->trans_start + 20 * HZ)) {
 			/* 20 sec timeout not reached */
 			return NETDEV_TX_BUSY;
 		}
@@ -647,8 +648,8 @@ static void ax_setup(struct net_device *dev)
 {
 	/* Finish setting up the DEVICE info. */
 	dev->mtu             = AX_MTU;
-	dev->hard_header_len = AX25_MAX_HEADER_LEN;
-	dev->addr_len        = AX25_ADDR_LEN;
+	dev->hard_header_len = 0;
+	dev->addr_len        = 0;
 	dev->type            = ARPHRD_AX25;
 	dev->tx_queue_len    = 10;
 	dev->header_ops      = &ax25_header_ops;
@@ -796,19 +797,14 @@ static void mkiss_close(struct tty_struct *tty)
 	 */
 	if (!atomic_dec_and_test(&ax->refcnt))
 		down(&ax->dead_sem);
-	/*
-	 * Halt the transmit queue so that a new transmit cannot scribble
-	 * on our buffers
-	 */
-	netif_stop_queue(ax->dev);
+
+	unregister_netdev(ax->dev);
 
 	/* Free all AX25 frame buffers. */
 	kfree(ax->rbuff);
 	kfree(ax->xbuff);
 
 	ax->tty = NULL;
-
-	unregister_netdev(ax->dev);
 }
 
 /* Perform I/O control on an active ax25 channel. */
@@ -873,6 +869,23 @@ static int mkiss_ioctl(struct tty_struct *tty, struct file *file,
 
 	return err;
 }
+
+#ifdef CONFIG_COMPAT
+static long mkiss_compat_ioctl(struct tty_struct *tty, struct file *file,
+	unsigned int cmd, unsigned long arg)
+{
+	switch (cmd) {
+	case SIOCGIFNAME:
+	case SIOCGIFENCAP:
+	case SIOCSIFENCAP:
+	case SIOCSIFHWADDR:
+		return mkiss_ioctl(tty, file, cmd,
+				   (unsigned long)compat_ptr(arg));
+	}
+
+	return -ENOIOCTLCMD;
+}
+#endif
 
 /*
  * Handle the 'receiver data ready' interrupt.
@@ -948,6 +961,9 @@ static struct tty_ldisc_ops ax_ldisc = {
 	.open		= mkiss_open,
 	.close		= mkiss_close,
 	.ioctl		= mkiss_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl	= mkiss_compat_ioctl,
+#endif
 	.receive_buf	= mkiss_receive_buf,
 	.write_wakeup	= mkiss_write_wakeup
 };

@@ -55,7 +55,6 @@
  * Default timeout
  */
 #define SCSI_TIMEOUT (2*HZ)
-#define SCSI_REPORT_LUNS_TIMEOUT (30*HZ)
 
 /*
  * Prefix values for the SCSI id's (stored in sysfs name field)
@@ -275,7 +274,8 @@ static struct scsi_device *scsi_alloc_sdev(struct scsi_target *starget,
 	WARN_ON_ONCE(!blk_get_queue(sdev->request_queue));
 	sdev->request_queue->queuedata = sdev;
 
-	if (!shost_use_blk_mq(sdev->host)) {
+	if (!shost_use_blk_mq(sdev->host) &&
+	    (shost->bqt || shost->hostt->use_blk_tags)) {
 		blk_queue_init_tags(sdev->request_queue,
 				    sdev->host->cmd_per_lun, shost->bqt,
 				    shost->hostt->tag_alloc_policy);
@@ -314,7 +314,6 @@ static void scsi_target_destroy(struct scsi_target *starget)
 	struct Scsi_Host *shost = dev_to_shost(dev->parent);
 	unsigned long flags;
 
-	BUG_ON(starget->state == STARGET_DEL);
 	starget->state = STARGET_DEL;
 	transport_destroy_device(dev);
 	spin_lock_irqsave(shost->host_lock, flags);
@@ -702,12 +701,9 @@ static int scsi_probe_lun(struct scsi_device *sdev, unsigned char *inq_result,
 	 * strings.
 	 */
 	if (sdev->inquiry_len < 36) {
-		if (!sdev->host->short_inquiry) {
-			shost_printk(KERN_INFO, sdev->host,
-				    "scsi scan: INQUIRY result too short (%d),"
-				    " using 36\n", sdev->inquiry_len);
-			sdev->host->short_inquiry = 1;
-		}
+		sdev_printk(KERN_INFO, sdev,
+			    "scsi scan: INQUIRY result too short (%d),"
+			    " using 36\n", sdev->inquiry_len);
 		sdev->inquiry_len = 36;
 	}
 
@@ -1387,7 +1383,7 @@ retry:
 
 		result = scsi_execute_req(sdev, scsi_cmd, DMA_FROM_DEVICE,
 					  lun_data, length, &sshdr,
-					  SCSI_REPORT_LUNS_TIMEOUT, 3, NULL);
+					  SCSI_TIMEOUT + 4 * HZ, 3, NULL);
 
 		SCSI_LOG_SCAN_BUS(3, sdev_printk (KERN_INFO, sdev,
 				"scsi scan: REPORT LUNS"
@@ -1459,12 +1455,12 @@ retry:
  out_err:
 	kfree(lun_data);
  out:
+	scsi_device_put(sdev);
 	if (scsi_device_created(sdev))
 		/*
 		 * the sdev we used didn't appear in the report luns scan
 		 */
 		__scsi_remove_device(sdev);
-	scsi_device_put(sdev);
 	return ret;
 }
 
@@ -1716,7 +1712,8 @@ static struct async_scan_data *scsi_prep_async_scan(struct Scsi_Host *shost)
 		return NULL;
 
 	if (shost->async_scan) {
-		shost_printk(KERN_DEBUG, shost, "%s called twice\n", __func__);
+		shost_printk(KERN_INFO, shost, "%s called twice\n", __func__);
+		dump_stack();
 		return NULL;
 	}
 

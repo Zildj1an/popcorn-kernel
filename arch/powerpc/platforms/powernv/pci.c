@@ -61,7 +61,7 @@ int pnv_setup_msi_irqs(struct pci_dev *pdev, int nvec, int type)
 	if (pdev->no_64bit_msi && !phb->msi32_support)
 		return -ENODEV;
 
-	for_each_pci_msi_entry(entry, pdev) {
+	list_for_each_entry(entry, &pdev->msi_list, list) {
 		if (!entry->msi_attrib.is_64 && !phb->msi32_support) {
 			pr_warn("%s: Supports only 64-bit MSIs\n",
 				pci_name(pdev));
@@ -99,18 +99,17 @@ void pnv_teardown_msi_irqs(struct pci_dev *pdev)
 	struct pci_controller *hose = pci_bus_to_host(pdev->bus);
 	struct pnv_phb *phb = hose->private_data;
 	struct msi_desc *entry;
-	irq_hw_number_t hwirq;
 
 	if (WARN_ON(!phb))
 		return;
 
-	for_each_pci_msi_entry(entry, pdev) {
+	list_for_each_entry(entry, &pdev->msi_list, list) {
 		if (entry->irq == NO_IRQ)
 			continue;
-		hwirq = virq_to_hw(entry->irq);
 		irq_set_msi_desc(entry->irq, NULL);
+		msi_bitmap_free_hwirqs(&phb->msi_bmp,
+			virq_to_hw(entry->irq) - phb->msi_base, 1);
 		irq_dispose_mapping(entry->irq);
-		msi_bitmap_free_hwirqs(&phb->msi_bmp, hwirq - phb->msi_base, 1);
 	}
 }
 #endif /* CONFIG_PCI_MSI */
@@ -197,8 +196,8 @@ static void pnv_pci_dump_p7ioc_diag_data(struct pci_controller *hose,
 			be64_to_cpu(data->dma1ErrorLog1));
 
 	for (i = 0; i < OPAL_P7IOC_NUM_PEST_REGS; i++) {
-		if ((be64_to_cpu(data->pestA[i]) >> 63) == 0 &&
-		    (be64_to_cpu(data->pestB[i]) >> 63) == 0)
+		if ((data->pestA[i] >> 63) == 0 &&
+		    (data->pestB[i] >> 63) == 0)
 			continue;
 
 		pr_info("PE[%3d] A/B: %016llx %016llx\n",
@@ -601,9 +600,6 @@ int pnv_tce_build(struct iommu_table *tbl, long index, long npages,
 	u64 rpn = __pa(uaddr) >> tbl->it_page_shift;
 	long i;
 
-	if (proto_tce & TCE_PCI_WRITE)
-		proto_tce |= TCE_PCI_READ;
-
 	for (i = 0; i < npages; i++) {
 		unsigned long newtce = proto_tce |
 			((rpn + i) << tbl->it_page_shift);
@@ -624,9 +620,6 @@ int pnv_tce_xchg(struct iommu_table *tbl, long index,
 	unsigned long idx = index - tbl->it_offset;
 
 	BUG_ON(*hpa & ~IOMMU_PAGE_MASK(tbl));
-
-	if (newtce & TCE_PCI_WRITE)
-		newtce |= TCE_PCI_READ;
 
 	oldtce = xchg(pnv_tce(tbl, idx), cpu_to_be64(newtce));
 	*hpa = be64_to_cpu(oldtce) & ~(TCE_PCI_READ | TCE_PCI_WRITE);
@@ -768,24 +761,15 @@ void pnv_pci_dma_dev_setup(struct pci_dev *pdev)
 		phb->dma_dev_setup(phb, pdev);
 }
 
-void pnv_pci_dma_bus_setup(struct pci_bus *bus)
+u64 pnv_pci_dma_get_required_mask(struct pci_dev *pdev)
 {
-	struct pci_controller *hose = bus->sysdata;
+	struct pci_controller *hose = pci_bus_to_host(pdev->bus);
 	struct pnv_phb *phb = hose->private_data;
-	struct pnv_ioda_pe *pe;
 
-	list_for_each_entry(pe, &phb->ioda.pe_list, list) {
-		if (!(pe->flags & (PNV_IODA_PE_BUS | PNV_IODA_PE_BUS_ALL)))
-			continue;
+	if (phb && phb->dma_get_required_mask)
+		return phb->dma_get_required_mask(phb, pdev);
 
-		if (!pe->pbus)
-			continue;
-
-		if (bus->number == ((pe->rid >> 8) & 0xFF)) {
-			pe->pbus = bus;
-			break;
-		}
-	}
+	return __dma_get_required_mask(&pdev->dev);
 }
 
 void pnv_pci_shutdown(void)

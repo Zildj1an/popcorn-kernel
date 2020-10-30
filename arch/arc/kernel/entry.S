@@ -32,7 +32,7 @@ ENTRY(sys_clone_wrapper)
 	DISCARD_CALLEE_SAVED_USER
 
 	GET_CURR_THR_INFO_FLAGS   r10
-	btst r10, TIF_SYSCALL_TRACE
+	and.f 0, r10, (_TIF_SYSCALL_TRACE|_TIF_NOHZ)
 	bnz  tracesys_exit
 
 	b ret_from_system_call
@@ -42,7 +42,7 @@ ENTRY(ret_from_fork)
 	; when the forked child comes here from the __switch_to function
 	; r0 has the last task pointer.
 	; put last task in scheduler queue
-	jl   @schedule_tail
+	bl   @schedule_tail
 
 	ld   r9, [sp, PT_status32]
 	brne r9, 0, 1f
@@ -93,6 +93,23 @@ ENTRY(instr_service)
 END(instr_service)
 
 ; ---------------------------------------------
+; Memory Error Exception Handler
+; ---------------------------------------------
+
+ENTRY(mem_service)
+
+	EXCEPTION_PROLOGUE
+
+	lr  r0, [efa]
+	mov r1, sp
+
+	FAKE_RET_FROM_EXCPN
+
+	bl  do_memory_error
+	b   ret_from_exception
+END(mem_service)
+
+; ---------------------------------------------
 ; Machine Check Exception Handler
 ; ---------------------------------------------
 
@@ -103,12 +120,6 @@ ENTRY(EV_MachineCheck)
 	lr  r2, [ecr]
 	lr  r0, [efa]
 	mov r1, sp
-
-	; hardware auto-disables MMU, re-enable it to allow kernel vaddr
-	; access for say stack unwinding of modules for crash dumps
-	lr	r3, [ARC_REG_PID]
-	or	r3, r3, MMU_ENABLE
-	sr	r3, [ARC_REG_PID]
 
 	lsr  	r3, r2, 8
 	bmsk 	r3, r3, 7
@@ -135,13 +146,25 @@ ENTRY(EV_PrivilegeV)
 
 	EXCEPTION_PROLOGUE
 
+	lr  r2, [ecr]
 	lr  r0, [efa]
 	mov r1, sp
 
 	FAKE_RET_FROM_EXCPN
 
+#ifdef CONFIG_HAVE_HW_BREAKPOINT
+	and r2, r2, ECR_CODE_MASK
+	cmp r2, ECR_C_BIT_PRIVV_AP_HIT
+	bnz 4f
+
+	bl  do_actionpoint_hit
+	b   ret_from_exception
+4:
+#endif /* CONFIG_HAVE_HW_BREAKPOINT */
+
 	bl  do_privilege_fault
 	b   ret_from_exception
+
 END(EV_PrivilegeV)
 
 ; ---------------------------------------------
@@ -244,7 +267,18 @@ trap_with_param:
 
 ENTRY(EV_Trap)
 
+	; Before doing anything, check if this trap was made by
+	; ret_from_exception in order to revert the fake rtie and
+	; switch back to CPU Exception context
+	TRY_COMPLETE_FAKE_REVERT
+
 	EXCEPTION_PROLOGUE
+
+#ifdef CONFIG_CONTEXT_TRACKING
+	SAVE_R0_TO_R12
+	bl context_tracking_user_exit
+	RESTORE_R12_TO_R0
+#endif
 
 	;============ TRAP 1   :breakpoints
 	; Check ECR for trap with arg (PROLOGUE ensures r9 has ECR)
@@ -258,7 +292,7 @@ ENTRY(EV_Trap)
 
 	; If syscall tracing ongoing, invoke pre-post-hooks
 	GET_CURR_THR_INFO_FLAGS   r10
-	btst r10, TIF_SYSCALL_TRACE
+	and.f 0, r10, (_TIF_SYSCALL_TRACE|_TIF_NOHZ)
 	bnz tracesys  ; this never comes back
 
 	;============ Normal syscall case
@@ -301,24 +335,8 @@ resume_user_mode_begin:
 	; interim IRQ).
 	IRQ_DISABLE	r10
 
-	; Fast Path return to user mode if no pending work
-	GET_CURR_THR_INFO_FLAGS   r9
-	and.f  0,  r9, _TIF_WORK_MASK
-	bz     .Lrestore_regs
-
-	; --- (Slow Path #1) task preemption ---
-	bbit0  r9, TIF_NEED_RESCHED, .Lchk_pend_signals
-	mov    blink, resume_user_mode_begin  ; tail-call to U mode ret chks
-	j      @schedule 	; BTST+Bnz causes relo error in link
-
-.Lchk_pend_signals:
-	IRQ_ENABLE	r10
-
-	; --- (Slow Path #2) pending signal  ---
-	mov r0, sp	; pt_regs for arg to do_signal()/do_notify_resume()
-
-	GET_CURR_THR_INFO_FLAGS   r9
-	bbit0  r9, TIF_SIGPENDING, .Lchk_notify_resume
+	mov  r0, sp
+	GET_CURR_THR_INFO_FLAGS   r1
 
 	; Normal Trap/IRQ entry only saves Scratch (caller-saved) regs
 	; in pt_reg since the "C" ABI (kernel code) will automatically
@@ -336,20 +354,13 @@ resume_user_mode_begin:
 	GET_CURR_TASK_FIELD_PTR   TASK_THREAD, r10
 	st  sp, [r10, THREAD_CALLEE_REG]
 
-	bl  @do_signal
+	bl     @prepare_exit_to_usermode
 
 	; Ideally we want to discard the Callee reg above, however if this was
 	; a tracing signal, tracer could have done a POKEUSR(CALLEE reg)
 	RESTORE_CALLEE_SAVED_USER
 
-	b      resume_user_mode_begin	; loop back to start of U mode ret
-
-	; --- (Slow Path #3) notify_resume ---
-.Lchk_notify_resume:
-	btst   r9, TIF_NOTIFY_RESUME
-	blnz   @do_notify_resume
-	b      resume_user_mode_begin	; unconditionally back to U mode ret chks
-					; for single exit point from this block
+	b      .Lrestore_regs
 
 resume_kernel_mode:
 
@@ -370,7 +381,7 @@ resume_kernel_mode:
 	bbit0  r9, TIF_NEED_RESCHED, .Lrestore_regs
 
 	; Invoke PREEMPTION
-	jl      preempt_schedule_irq
+	bl      preempt_schedule_irq
 
 	; preempt_schedule_irq() always returns with IRQ disabled
 #endif

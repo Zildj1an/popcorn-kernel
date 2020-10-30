@@ -65,7 +65,6 @@ static int vfio_platform_probe(struct platform_device *pdev)
 	vdev->flags = VFIO_DEVICE_FLAGS_PLATFORM;
 	vdev->get_resource = get_platform_resource;
 	vdev->get_irq = get_platform_irq;
-	vdev->parent_module = THIS_MODULE;
 
 	ret = vfio_platform_probe_common(vdev, &pdev->dev);
 	if (ret)
@@ -92,6 +91,7 @@ static struct platform_driver vfio_platform_driver = {
 	.remove		= vfio_platform_remove,
 	.driver	= {
 		.name	= "vfio-platform",
+		.owner	= THIS_MODULE,
 	},
 };
 

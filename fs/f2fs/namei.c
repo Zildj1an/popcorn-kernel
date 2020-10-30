@@ -53,7 +53,7 @@ static struct inode *f2fs_new_inode(struct inode *dir, umode_t mode)
 	if (err) {
 		err = -EINVAL;
 		nid_free = true;
-		goto fail;
+		goto out;
 	}
 
 	/* If the directory encrypted, then we should encrypt the inode. */
@@ -65,9 +65,6 @@ static struct inode *f2fs_new_inode(struct inode *dir, umode_t mode)
 	if (f2fs_may_inline_dentry(inode))
 		set_inode_flag(F2FS_I(inode), FI_INLINE_DENTRY);
 
-	f2fs_init_extent_tree(inode, NULL);
-
-	stat_inc_inline_xattr(inode);
 	stat_inc_inline_inode(inode);
 	stat_inc_inline_dir(inode);
 
@@ -75,12 +72,15 @@ static struct inode *f2fs_new_inode(struct inode *dir, umode_t mode)
 	mark_inode_dirty(inode);
 	return inode;
 
+out:
+	clear_nlink(inode);
+	unlock_new_inode(inode);
 fail:
 	trace_f2fs_new_inode(inode, err);
 	make_bad_inode(inode);
-	if (nid_free)
-		set_inode_flag(F2FS_I(inode), FI_FREE_NID);
 	iput(inode);
+	if (nid_free)
+		alloc_nid_failed(sbi, ino);
 	return ERR_PTR(err);
 }
 
@@ -89,14 +89,7 @@ static int is_multimedia_file(const unsigned char *s, const char *sub)
 	size_t slen = strlen(s);
 	size_t sublen = strlen(sub);
 
-	/*
-	 * filename format of multimedia file should be defined as:
-	 * "filename + '.' + extension".
-	 */
-	if (slen < sublen + 2)
-		return 0;
-
-	if (s[slen - sublen - 1] != '.')
+	if (sublen > slen)
 		return 0;
 
 	return !strncasecmp(s + slen - sublen, sub, sublen);
@@ -150,7 +143,8 @@ static int f2fs_create(struct inode *dir, struct dentry *dentry, umode_t mode,
 
 	alloc_nid_done(sbi, ino);
 
-	d_instantiate_new(dentry, inode);
+	d_instantiate(dentry, inode);
+	unlock_new_inode(inode);
 
 	if (IS_DIRSYNC(dir))
 		f2fs_sync_fs(sbi->sb, 1);
@@ -350,7 +344,6 @@ static int f2fs_symlink(struct inode *dir, struct dentry *dentry,
 		inode->i_op = &f2fs_encrypted_symlink_inode_operations;
 	else
 		inode->i_op = &f2fs_symlink_inode_operations;
-	inode_nohighmem(inode);
 	inode->i_mapping->a_ops = &f2fs_dblock_aops;
 
 	f2fs_lock_op(sbi);
@@ -398,7 +391,8 @@ static int f2fs_symlink(struct inode *dir, struct dentry *dentry,
 	err = page_symlink(inode, p_str, p_len);
 
 err_out:
-	d_instantiate_new(dentry, inode);
+	d_instantiate(dentry, inode);
+	unlock_new_inode(inode);
 
 	/*
 	 * Let's flush symlink data in order to avoid broken symlink as much as
@@ -409,14 +403,11 @@ err_out:
 	 * If the symlink path is stored into inline_data, there is no
 	 * performance regression.
 	 */
-	if (!err) {
+	if (!err)
 		filemap_write_and_wait_range(inode->i_mapping, 0, p_len - 1);
 
-		if (IS_DIRSYNC(dir))
-			f2fs_sync_fs(sbi->sb, 1);
-	} else {
-		f2fs_unlink(dir, dentry);
-	}
+	if (IS_DIRSYNC(dir))
+		f2fs_sync_fs(sbi->sb, 1);
 
 	kfree(sd);
 	f2fs_fname_crypto_free_buffer(&disk_link);
@@ -452,7 +443,8 @@ static int f2fs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 
 	alloc_nid_done(sbi, inode->i_ino);
 
-	d_instantiate_new(dentry, inode);
+	d_instantiate(dentry, inode);
+	unlock_new_inode(inode);
 
 	if (IS_DIRSYNC(dir))
 		f2fs_sync_fs(sbi->sb, 1);
@@ -479,6 +471,9 @@ static int f2fs_mknod(struct inode *dir, struct dentry *dentry,
 	struct inode *inode;
 	int err = 0;
 
+	if (!new_valid_dev(rdev))
+		return -EINVAL;
+
 	f2fs_balance_fs(sbi);
 
 	inode = f2fs_new_inode(dir, mode);
@@ -496,7 +491,8 @@ static int f2fs_mknod(struct inode *dir, struct dentry *dentry,
 
 	alloc_nid_done(sbi, inode->i_ino);
 
-	d_instantiate_new(dentry, inode);
+	d_instantiate(dentry, inode);
+	unlock_new_inode(inode);
 
 	if (IS_DIRSYNC(dir))
 		f2fs_sync_fs(sbi->sb, 1);
@@ -939,18 +935,13 @@ static const char *f2fs_encrypted_follow_link(struct dentry *dentry, void **cook
 	cpage = read_mapping_page(inode->i_mapping, 0, NULL);
 	if (IS_ERR(cpage))
 		return ERR_CAST(cpage);
-	caddr = page_address(cpage);
+	caddr = kmap(cpage);
 	caddr[size] = 0;
 
 	/* Symlink is encrypted */
 	sd = (struct f2fs_encrypted_symlink_data *)caddr;
+	cstr.name = sd->encrypted_path;
 	cstr.len = le16_to_cpu(sd->len);
-	cstr.name = kmalloc(cstr.len, GFP_NOFS);
-	if (!cstr.name) {
-		res = -ENOMEM;
-		goto errout;
-	}
-	memcpy(cstr.name, sd->encrypted_path, cstr.len);
 
 	/* this is broken symlink case */
 	if (cstr.name[0] == 0 && cstr.len == 0) {
@@ -972,18 +963,17 @@ static const char *f2fs_encrypted_follow_link(struct dentry *dentry, void **cook
 	if (res < 0)
 		goto errout;
 
-	kfree(cstr.name);
-
 	paddr = pstr.name;
 
 	/* Null-terminate the name */
 	paddr[res] = '\0';
 
+	kunmap(cpage);
 	page_cache_release(cpage);
 	return *cookie = paddr;
 errout:
-	kfree(cstr.name);
 	f2fs_fname_crypto_free_buffer(&pstr);
+	kunmap(cpage);
 	page_cache_release(cpage);
 	return ERR_PTR(res);
 }

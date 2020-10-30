@@ -61,8 +61,7 @@
 #define _PAGE_EXECUTE       (1<<3)	/* Page has user execute perm (H) */
 #define _PAGE_WRITE         (1<<4)	/* Page has user write perm (H) */
 #define _PAGE_READ          (1<<5)	/* Page has user read perm (H) */
-#define _PAGE_DIRTY         (1<<6)	/* Page modified (dirty) (S) */
-#define _PAGE_SPECIAL       (1<<7)
+#define _PAGE_MODIFIED      (1<<6)	/* Page modified (dirty) (S) */
 #define _PAGE_GLOBAL        (1<<8)	/* Page is global (H) */
 #define _PAGE_PRESENT       (1<<10)	/* TLB entry is valid (H) */
 
@@ -73,8 +72,7 @@
 #define _PAGE_WRITE         (1<<2)	/* Page has user write perm (H) */
 #define _PAGE_READ          (1<<3)	/* Page has user read perm (H) */
 #define _PAGE_ACCESSED      (1<<4)	/* Page is accessed (S) */
-#define _PAGE_DIRTY         (1<<5)	/* Page modified (dirty) (S) */
-#define _PAGE_SPECIAL       (1<<6)
+#define _PAGE_MODIFIED      (1<<5)	/* Page modified (dirty) (S) */
 
 #if (CONFIG_ARC_MMU_VER >= 4)
 #define _PAGE_WTHRU         (1<<7)	/* Page cache mode write-thru (H) */
@@ -84,33 +82,32 @@
 #define _PAGE_PRESENT       (1<<9)	/* TLB entry is valid (H) */
 
 #if (CONFIG_ARC_MMU_VER >= 4)
-#define _PAGE_HW_SZ         (1<<10)	/* Page Size indicator (H): 0 normal, 1 super */
+#define _PAGE_SZ            (1<<10)	/* Page Size indicator (H) */
 #endif
 
 #define _PAGE_SHARED_CODE   (1<<11)	/* Shared Code page with cmn vaddr
 					   usable for shared TLB entries (H) */
-
-#define _PAGE_UNUSED_BIT    (1<<12)
 #endif
 
 /* vmalloc permissions */
 #define _K_PAGE_PERMS  (_PAGE_EXECUTE | _PAGE_WRITE | _PAGE_READ | \
 			_PAGE_GLOBAL | _PAGE_PRESENT)
 
-#ifndef CONFIG_ARC_CACHE_PAGES
-#undef _PAGE_CACHEABLE
-#define _PAGE_CACHEABLE 0
+#ifdef CONFIG_ARC_CACHE_PAGES
+#define _PAGE_DEF_CACHEABLE _PAGE_CACHEABLE
+#else
+#define _PAGE_DEF_CACHEABLE (0)
 #endif
 
-#ifndef _PAGE_HW_SZ
-#define _PAGE_HW_SZ	0
-#endif
-
-/* Defaults for every user page */
-#define ___DEF (_PAGE_PRESENT | _PAGE_CACHEABLE)
+/* Helper for every "user" page
+ * -kernel can R/W/X
+ * -by default cached, unless config otherwise
+ * -present in memory
+ */
+#define ___DEF (_PAGE_PRESENT | _PAGE_DEF_CACHEABLE)
 
 /* Set of bits not changed in pte_modify */
-#define _PAGE_CHG_MASK	(PAGE_MASK | _PAGE_ACCESSED | _PAGE_DIRTY | _PAGE_SPECIAL)
+#define _PAGE_CHG_MASK	(PAGE_MASK | _PAGE_ACCESSED | _PAGE_MODIFIED)
 
 /* More Abbrevaited helpers */
 #define PAGE_U_NONE     __pgprot(___DEF)
@@ -126,20 +123,15 @@
  * user vaddr space - visible in all addr spaces, but kernel mode only
  * Thus Global, all-kernel-access, no-user-access, cached
  */
-#define PAGE_KERNEL          __pgprot(_K_PAGE_PERMS | _PAGE_CACHEABLE)
+#define PAGE_KERNEL          __pgprot(_K_PAGE_PERMS | _PAGE_DEF_CACHEABLE)
 
 /* ioremap */
 #define PAGE_KERNEL_NO_CACHE __pgprot(_K_PAGE_PERMS)
 
 /* Masks for actual TLB "PD"s */
-#define PTE_BITS_IN_PD0		(_PAGE_GLOBAL | _PAGE_PRESENT | _PAGE_HW_SZ)
+#define PTE_BITS_IN_PD0		(_PAGE_GLOBAL | _PAGE_PRESENT)
 #define PTE_BITS_RWX		(_PAGE_EXECUTE | _PAGE_WRITE | _PAGE_READ)
-
-#ifdef CONFIG_ARC_HAS_PAE40
-#define PTE_BITS_NON_RWX_IN_PD1	(0xff00000000 | PAGE_MASK | _PAGE_CACHEABLE)
-#else
 #define PTE_BITS_NON_RWX_IN_PD1	(PAGE_MASK | _PAGE_CACHEABLE)
-#endif
 
 /**************************************************************************
  * Mapping of vm_flags (Generic VM) to PTE flags (arch specific)
@@ -200,22 +192,32 @@
 
 /* Optimal Sizing of Pg Tbl - based on MMU page size */
 #if defined(CONFIG_ARC_PAGE_SIZE_8K)
-#define BITS_FOR_PTE	8		/* 11:8:13 */
+#define BITS_FOR_PTE	8
 #elif defined(CONFIG_ARC_PAGE_SIZE_16K)
-#define BITS_FOR_PTE	8		/* 10:8:14 */
+#define BITS_FOR_PTE	8
 #elif defined(CONFIG_ARC_PAGE_SIZE_4K)
-#define BITS_FOR_PTE	9		/* 11:9:12 */
+#define BITS_FOR_PTE	9
 #endif
 
 #define BITS_FOR_PGD	(32 - BITS_FOR_PTE - BITS_IN_PAGE)
 
-#define PGDIR_SHIFT	(32 - BITS_FOR_PGD)
+#define PGDIR_SHIFT	(BITS_FOR_PTE + BITS_IN_PAGE)
+#ifdef __ASSEMBLY__
+#define PGDIR_SIZE	_BITUL(PGDIR_SHIFT)	/* vaddr span, not PDG sz */
+#else
 #define PGDIR_SIZE	(1UL << PGDIR_SHIFT)	/* vaddr span, not PDG sz */
+#endif
 #define PGDIR_MASK	(~(PGDIR_SIZE-1))
 
-#define	PTRS_PER_PTE	_BITUL(BITS_FOR_PTE)
-#define	PTRS_PER_PGD	_BITUL(BITS_FOR_PGD)
-
+#ifdef __ASSEMBLY__
+#define	PTRS_PER_PTE		_BITUL(BITS_FOR_PTE)
+#define PTRS_HIGHMEM_PTE	_BITUL(13)
+#define	PTRS_PER_PGD		_BITUL(BITS_FOR_PGD)
+#else
+#define	PTRS_PER_PTE		(1UL << BITS_FOR_PTE)
+#define	PTRS_HIGHMEM_PTE	(1UL << 13)
+#define	PTRS_PER_PGD		(1UL << BITS_FOR_PGD)
+#endif
 /*
  * Number of entries a user land program use.
  * TASK_SIZE is the maximum vaddr that can be used by a userland program.
@@ -271,15 +273,16 @@ static inline void pmd_set(pmd_t *pmdp, pte_t *ptep)
 #define pmd_present(x)			(pmd_val(x))
 #define pmd_clear(xp)			do { pmd_val(*(xp)) = 0; } while (0)
 
-#define pte_page(x) (mem_map + \
-		(unsigned long)(((pte_val(x) - CONFIG_LINUX_LINK_BASE) >> \
-				PAGE_SHIFT)))
+#define pte_page(pte)  pfn_to_page(pte_pfn(pte))
 
 #define mk_pte(page, prot)	pfn_pte(page_to_pfn(page), prot)
 #define pte_pfn(pte)		(pte_val(pte) >> PAGE_SHIFT)
 #define pfn_pte(pfn, prot)	(__pte(((pfn) << PAGE_SHIFT) | pgprot_val(prot)))
+#ifdef CONFIG_HIGHMEM
+#define __pte_index(addr)	((addr >= VMALLOC_END) ? (((addr) >> PAGE_SHIFT) & (PTRS_HIGHMEM_PTE - 1)) : (((addr) >> PAGE_SHIFT) & (PTRS_PER_PTE - 1)))
+#else
 #define __pte_index(addr)	(((addr) >> PAGE_SHIFT) & (PTRS_PER_PTE - 1))
-
+#endif
 /*
  * pte_offset gets a @ptr to PMD entry (PGD in our 2-tier paging system)
  * and returns ptr to PTE entry corresponding to @addr
@@ -294,26 +297,23 @@ static inline void pmd_set(pmd_t *pmdp, pte_t *ptep)
 /* Zoo of pte_xxx function */
 #define pte_read(pte)		(pte_val(pte) & _PAGE_READ)
 #define pte_write(pte)		(pte_val(pte) & _PAGE_WRITE)
-#define pte_dirty(pte)		(pte_val(pte) & _PAGE_DIRTY)
+#define pte_dirty(pte)		(pte_val(pte) & _PAGE_MODIFIED)
 #define pte_young(pte)		(pte_val(pte) & _PAGE_ACCESSED)
-#define pte_special(pte)	(pte_val(pte) & _PAGE_SPECIAL)
+#define pte_special(pte)	(0)
 
 #define PTE_BIT_FUNC(fn, op) \
 	static inline pte_t pte_##fn(pte_t pte) { pte_val(pte) op; return pte; }
 
-PTE_BIT_FUNC(mknotpresent,	&= ~(_PAGE_PRESENT));
 PTE_BIT_FUNC(wrprotect,	&= ~(_PAGE_WRITE));
 PTE_BIT_FUNC(mkwrite,	|= (_PAGE_WRITE));
-PTE_BIT_FUNC(mkclean,	&= ~(_PAGE_DIRTY));
-PTE_BIT_FUNC(mkdirty,	|= (_PAGE_DIRTY));
+PTE_BIT_FUNC(mkclean,	&= ~(_PAGE_MODIFIED));
+PTE_BIT_FUNC(mkdirty,	|= (_PAGE_MODIFIED));
 PTE_BIT_FUNC(mkold,	&= ~(_PAGE_ACCESSED));
 PTE_BIT_FUNC(mkyoung,	|= (_PAGE_ACCESSED));
 PTE_BIT_FUNC(exprotect,	&= ~(_PAGE_EXECUTE));
 PTE_BIT_FUNC(mkexec,	|= (_PAGE_EXECUTE));
-PTE_BIT_FUNC(mkspecial,	|= (_PAGE_SPECIAL));
-PTE_BIT_FUNC(mkhuge,	|= (_PAGE_HW_SZ));
 
-#define __HAVE_ARCH_PTE_SPECIAL
+static inline pte_t pte_mkspecial(pte_t pte) { return pte; }
 
 static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 {
@@ -384,10 +384,6 @@ void update_mmu_cache(struct vm_area_struct *vma, unsigned long address,
  * remap a physical page `pfn' of size `size' with page protection `prot'
  * into virtual address `from'
  */
-#ifdef CONFIG_TRANSPARENT_HUGEPAGE
-#include <asm/hugepage.h>
-#endif
-
 #include <asm-generic/pgtable.h>
 
 /* to cope with aliasing VIPT cache */

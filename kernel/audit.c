@@ -64,6 +64,7 @@
 #include <linux/security.h>
 #endif
 #include <linux/freezer.h>
+#include <linux/tty.h>
 #include <linux/pid_namespace.h>
 #include <net/netns/generic.h>
 
@@ -79,13 +80,13 @@ static int	audit_initialized;
 #define AUDIT_OFF	0
 #define AUDIT_ON	1
 #define AUDIT_LOCKED	2
-u32		audit_enabled = AUDIT_OFF;
-u32		audit_ever_enabled = !!AUDIT_OFF;
+u32		audit_enabled;
+u32		audit_ever_enabled;
 
 EXPORT_SYMBOL_GPL(audit_enabled);
 
 /* Default state when kernel boots without any parameters. */
-static u32	audit_default = AUDIT_OFF;
+static u32	audit_default;
 
 /* If auditing cannot proceed, audit_failure selects what happens. */
 static u32	audit_failure = AUDIT_FAIL_PRINTK;
@@ -406,33 +407,16 @@ static void audit_printk_skb(struct sk_buff *skb)
 static void kauditd_send_skb(struct sk_buff *skb)
 {
 	int err;
-	int attempts = 0;
-#define AUDITD_RETRIES 5
-
-restart:
 	/* take a reference in case we can't send it and we want to hold it */
 	skb_get(skb);
 	err = netlink_unicast(audit_sock, skb, audit_nlk_portid, 0);
 	if (err < 0) {
-		pr_err("netlink_unicast sending to audit_pid=%d returned error: %d\n",
-		       audit_pid, err);
+		BUG_ON(err != -ECONNREFUSED); /* Shouldn't happen */
 		if (audit_pid) {
-			if (err == -ECONNREFUSED || err == -EPERM
-			    || ++attempts >= AUDITD_RETRIES) {
-				char s[32];
-
-				snprintf(s, sizeof(s), "audit_pid=%d reset", audit_pid);
-				audit_log_lost(s);
-				audit_pid = 0;
-				audit_sock = NULL;
-			} else {
-				pr_warn("re-scheduling(#%d) write to audit_pid=%d\n",
-					attempts, audit_pid);
-				set_current_state(TASK_INTERRUPTIBLE);
-				schedule();
-				__set_current_state(TASK_RUNNING);
-				goto restart;
-			}
+			pr_err("*NO* daemon at audit_pid=%d\n", audit_pid);
+			audit_log_lost("auditd disappeared");
+			audit_pid = 0;
+			audit_sock = NULL;
 		}
 		/* we might get lucky and get this in the next auditd */
 		audit_hold_skb(skb);
@@ -700,22 +684,25 @@ static int audit_netlink_ok(struct sk_buff *skb, u16 msg_type)
 	return err;
 }
 
-static void audit_log_common_recv_msg(struct audit_buffer **ab, u16 msg_type)
+static int audit_log_common_recv_msg(struct audit_buffer **ab, u16 msg_type)
 {
+	int rc = 0;
 	uid_t uid = from_kuid(&init_user_ns, current_uid());
 	pid_t pid = task_tgid_nr(current);
 
 	if (!audit_enabled && msg_type != AUDIT_USER_AVC) {
 		*ab = NULL;
-		return;
+		return rc;
 	}
 
 	*ab = audit_log_start(NULL, GFP_KERNEL, msg_type);
 	if (unlikely(!*ab))
-		return;
+		return rc;
 	audit_log_format(*ab, "pid=%d uid=%u", pid, uid);
 	audit_log_session_info(*ab);
 	audit_log_task_context(*ab);
+
+	return rc;
 }
 
 int is_audit_feature_set(int i)
@@ -744,8 +731,6 @@ static void audit_log_feature_change(int which, u32 old_feature, u32 new_feature
 		return;
 
 	ab = audit_log_start(NULL, GFP_KERNEL, AUDIT_FEATURE_CHANGE);
-	if (!ab)
-		return;
 	audit_log_task_info(ab, current);
 	audit_log_format(ab, " feature=%s old=%u new=%u old_lock=%u new_lock=%u res=%d",
 			 audit_feature_names[which], !!old_feature, !!new_feature,
@@ -1180,6 +1165,8 @@ static int __init audit_init(void)
 	skb_queue_head_init(&audit_skb_queue);
 	skb_queue_head_init(&audit_skb_hold_queue);
 	audit_initialized = AUDIT_INITIALIZED;
+	audit_enabled = audit_default;
+	audit_ever_enabled |= !!audit_default;
 
 	audit_log(NULL, GFP_KERNEL, AUDIT_KERNEL, "initialized");
 
@@ -1196,8 +1183,6 @@ static int __init audit_enable(char *str)
 	audit_default = !!simple_strtol(str, NULL, 0);
 	if (!audit_default)
 		audit_initialized = AUDIT_DISABLED;
-	audit_enabled = audit_default;
-	audit_ever_enabled = !!audit_enabled;
 
 	pr_info("%s\n", audit_default ?
 		"enabled (after initialization)" : "disabled (until reboot)");
@@ -1372,16 +1357,16 @@ struct audit_buffer *audit_log_start(struct audit_context *ctx, gfp_t gfp_mask,
 	if (unlikely(audit_filter_type(type)))
 		return NULL;
 
-	if (gfp_mask & __GFP_DIRECT_RECLAIM) {
+	if (gfp_mask & __GFP_WAIT) {
 		if (audit_pid && audit_pid == current->pid)
-			gfp_mask &= ~__GFP_DIRECT_RECLAIM;
+			gfp_mask &= ~__GFP_WAIT;
 		else
 			reserve = 0;
 	}
 
 	while (audit_backlog_limit
 	       && skb_queue_len(&audit_skb_queue) > audit_backlog_limit + reserve) {
-		if (gfp_mask & __GFP_DIRECT_RECLAIM && audit_backlog_wait_time) {
+		if (gfp_mask & __GFP_WAIT && audit_backlog_wait_time) {
 			long sleep_time;
 
 			sleep_time = timeout_start + audit_backlog_wait_time - jiffies;
@@ -1581,14 +1566,14 @@ void audit_log_n_string(struct audit_buffer *ab, const char *string,
  * @string: string to be checked
  * @len: max length of the string to check
  */
-bool audit_string_contains_control(const char *string, size_t len)
+int audit_string_contains_control(const char *string, size_t len)
 {
 	const unsigned char *p;
 	for (p = string; p < (const unsigned char *)string + len; p++) {
 		if (*p == '"' || *p < 0x21 || *p > 0x7e)
-			return true;
+			return 1;
 	}
-	return false;
+	return 0;
 }
 
 /**
@@ -1776,7 +1761,7 @@ void audit_log_name(struct audit_context *context, struct audit_names *n,
 	} else
 		audit_log_format(ab, " name=(null)");
 
-	if (n->ino != AUDIT_INO_UNSET)
+	if (n->ino != (unsigned long)-1)
 		audit_log_format(ab, " inode=%lu"
 				 " dev=%02x:%02x mode=%#ho"
 				 " ouid=%u ogid=%u rdev=%02x:%02x",
@@ -1877,14 +1862,21 @@ void audit_log_task_info(struct audit_buffer *ab, struct task_struct *tsk)
 {
 	const struct cred *cred;
 	char comm[sizeof(tsk->comm)];
-	struct tty_struct *tty;
+	char *tty;
 
 	if (!ab)
 		return;
 
 	/* tsk == current */
 	cred = current_cred();
-	tty = audit_get_tty(tsk);
+
+	spin_lock_irq(&tsk->sighand->siglock);
+	if (tsk->signal && tsk->signal->tty && tsk->signal->tty->name)
+		tty = tsk->signal->tty->name;
+	else
+		tty = "(none)";
+	spin_unlock_irq(&tsk->sighand->siglock);
+
 	audit_log_format(ab,
 			 " ppid=%d pid=%d auid=%u uid=%u gid=%u"
 			 " euid=%u suid=%u fsuid=%u"
@@ -1900,11 +1892,11 @@ void audit_log_task_info(struct audit_buffer *ab, struct task_struct *tsk)
 			 from_kgid(&init_user_ns, cred->egid),
 			 from_kgid(&init_user_ns, cred->sgid),
 			 from_kgid(&init_user_ns, cred->fsgid),
-			 tty ? tty_name(tty) : "(none)",
-			 audit_get_sessionid(tsk));
-	audit_put_tty(tty);
+			 tty, audit_get_sessionid(tsk));
+
 	audit_log_format(ab, " comm=");
 	audit_log_untrustedstring(ab, get_task_comm(comm, tsk));
+
 	audit_log_d_path_exe(ab, tsk->mm);
 	audit_log_task_context(ab);
 }

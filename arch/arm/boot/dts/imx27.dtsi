@@ -144,15 +144,6 @@
 				clock-names = "ipg", "per";
 			};
 
-			rtc: rtc@10007000 {
-				compatible = "fsl,imx21-rtc";
-				reg = <0x10007000 0x1000>;
-				interrupts = <22>;
-				clocks = <&clks IMX27_CLK_CKIL>,
-					 <&clks IMX27_CLK_RTC_IPG_GATE>;
-				clock-names = "ref", "ipg";
-			};
-
 			kpp: kpp@10008000 {
 				compatible = "fsl,imx27-kpp", "fsl,imx21-kpp";
 				reg = <0x10008000 0x1000>;
@@ -486,10 +477,7 @@
 				compatible = "fsl,imx27-usb";
 				reg = <0x10024000 0x200>;
 				interrupts = <56>;
-				clocks = <&clks IMX27_CLK_USB_IPG_GATE>,
-					<&clks IMX27_CLK_USB_AHB_GATE>,
-					<&clks IMX27_CLK_USB_DIV>;
-				clock-names = "ipg", "ahb", "per";
+				clocks = <&clks IMX27_CLK_USB_IPG_GATE>;
 				fsl,usbmisc = <&usbmisc 0>;
 				status = "disabled";
 			};
@@ -498,10 +486,7 @@
 				compatible = "fsl,imx27-usb";
 				reg = <0x10024200 0x200>;
 				interrupts = <54>;
-				clocks = <&clks IMX27_CLK_USB_IPG_GATE>,
-					<&clks IMX27_CLK_USB_AHB_GATE>,
-					<&clks IMX27_CLK_USB_DIV>;
-				clock-names = "ipg", "ahb", "per";
+				clocks = <&clks IMX27_CLK_USB_IPG_GATE>;
 				fsl,usbmisc = <&usbmisc 1>;
 				dr_mode = "host";
 				status = "disabled";
@@ -511,10 +496,7 @@
 				compatible = "fsl,imx27-usb";
 				reg = <0x10024400 0x200>;
 				interrupts = <55>;
-				clocks = <&clks IMX27_CLK_USB_IPG_GATE>,
-					<&clks IMX27_CLK_USB_AHB_GATE>,
-					<&clks IMX27_CLK_USB_DIV>;
-				clock-names = "ipg", "ahb", "per";
+				clocks = <&clks IMX27_CLK_USB_IPG_GATE>;
 				fsl,usbmisc = <&usbmisc 2>;
 				dr_mode = "host";
 				status = "disabled";
@@ -524,6 +506,7 @@
 				#index-cells = <1>;
 				compatible = "fsl,imx27-usbmisc";
 				reg = <0x10024600 0x200>;
+				clocks = <&clks IMX27_CLK_USB_AHB_GATE>;
 			};
 
 			sahara2: sahara@10025000 {

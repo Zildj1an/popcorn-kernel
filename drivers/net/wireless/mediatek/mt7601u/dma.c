@@ -52,7 +52,7 @@ mt7601u_rx_skb_from_seg(struct mt7601u_dev *dev, struct mt7601u_rxwi *rxwi,
 		goto bad_frame;
 
 	if (rxwi->rxinfo & cpu_to_le32(MT_RXINFO_L2PAD)) {
-		skb_put_data(skb, data, hdr_len);
+		memcpy(skb_put(skb, hdr_len), data, hdr_len);
 
 		data += hdr_len + 2;
 		true_len -= hdr_len;
@@ -63,7 +63,7 @@ mt7601u_rx_skb_from_seg(struct mt7601u_dev *dev, struct mt7601u_rxwi *rxwi,
 	copy = (true_len <= skb_tailroom(skb)) ? true_len : hdr_len + 8;
 	frag = true_len - copy;
 
-	skb_put_data(skb, data, copy);
+	memcpy(skb_put(skb, copy), data, copy);
 	data += copy;
 
 	if (frag) {
@@ -103,7 +103,7 @@ static void mt7601u_rx_process_seg(struct mt7601u_dev *dev, u8 *data,
 
 	if (unlikely(rxwi->zero[0] || rxwi->zero[1] || rxwi->zero[2]))
 		dev_err_once(dev->dev, "Error: RXWI zero fields are set\n");
-	if (unlikely(FIELD_GET(MT_RXD_INFO_TYPE, fce_info)))
+	if (unlikely(MT76_GET(MT_RXD_INFO_TYPE, fce_info)))
 		dev_err_once(dev->dev, "Error: RX path seen a non-pkt urb\n");
 
 	trace_mt_rx(dev, rxwi, fce_info);
@@ -112,9 +112,7 @@ static void mt7601u_rx_process_seg(struct mt7601u_dev *dev, u8 *data,
 	if (!skb)
 		return;
 
-	spin_lock(&dev->mac_lock);
-	ieee80211_rx(dev->hw, skb);
-	spin_unlock(&dev->mac_lock);
+	ieee80211_rx_ni(dev->hw, skb);
 }
 
 static u16 mt7601u_rx_next_seg_len(u8 *data, u32 data_len)
@@ -238,42 +236,23 @@ static void mt7601u_complete_tx(struct urb *urb)
 	skb = q->e[q->start].skb;
 	trace_mt_tx_dma_done(dev, skb);
 
-	__skb_queue_tail(&dev->tx_skb_done, skb);
-	tasklet_schedule(&dev->tx_tasklet);
+	mt7601u_tx_status(dev, skb);
 
 	if (q->used == q->entries - q->entries / 8)
 		ieee80211_wake_queue(dev->hw, skb_get_queue_mapping(skb));
 
 	q->start = (q->start + 1) % q->entries;
 	q->used--;
-out:
-	spin_unlock_irqrestore(&dev->tx_lock, flags);
-}
 
-static void mt7601u_tx_tasklet(unsigned long data)
-{
-	struct mt7601u_dev *dev = (struct mt7601u_dev *) data;
-	struct sk_buff_head skbs;
-	unsigned long flags;
-
-	__skb_queue_head_init(&skbs);
-
-	spin_lock_irqsave(&dev->tx_lock, flags);
+	if (urb->status)
+		goto out;
 
 	set_bit(MT7601U_STATE_MORE_STATS, &dev->state);
 	if (!test_and_set_bit(MT7601U_STATE_READING_STATS, &dev->state))
 		queue_delayed_work(dev->stat_wq, &dev->stat_work,
 				   msecs_to_jiffies(10));
-
-	skb_queue_splice_init(&dev->tx_skb_done, &skbs);
-
+out:
 	spin_unlock_irqrestore(&dev->tx_lock, flags);
-
-	while (!skb_queue_empty(&skbs)) {
-		struct sk_buff *skb = __skb_dequeue(&skbs);
-
-		mt7601u_tx_status(dev, skb);
-	}
 }
 
 static int mt7601u_dma_submit_tx(struct mt7601u_dev *dev,
@@ -457,9 +436,6 @@ static void mt7601u_free_tx(struct mt7601u_dev *dev)
 {
 	int i;
 
-	if (!dev->tx_q)
-		return;
-
 	for (i = 0; i < __MT_EP_OUT_MAX; i++)
 		mt7601u_free_tx_queue(&dev->tx_q[i]);
 }
@@ -487,8 +463,6 @@ static int mt7601u_alloc_tx(struct mt7601u_dev *dev)
 
 	dev->tx_q = devm_kcalloc(dev->dev, __MT_EP_OUT_MAX,
 				 sizeof(*dev->tx_q), GFP_KERNEL);
-	if (!dev->tx_q)
-		return -ENOMEM;
 
 	for (i = 0; i < __MT_EP_OUT_MAX; i++)
 		if (mt7601u_alloc_tx_queue(dev, &dev->tx_q[i]))
@@ -501,7 +475,6 @@ int mt7601u_dma_init(struct mt7601u_dev *dev)
 {
 	int ret = -ENOMEM;
 
-	tasklet_init(&dev->tx_tasklet, mt7601u_tx_tasklet, (unsigned long) dev);
 	tasklet_init(&dev->rx_tasklet, mt7601u_rx_tasklet, (unsigned long) dev);
 
 	ret = mt7601u_alloc_tx(dev);
@@ -529,6 +502,4 @@ void mt7601u_dma_cleanup(struct mt7601u_dev *dev)
 
 	mt7601u_free_rx(dev);
 	mt7601u_free_tx(dev);
-
-	tasklet_kill(&dev->tx_tasklet);
 }

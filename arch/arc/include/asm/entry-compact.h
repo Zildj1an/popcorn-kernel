@@ -35,6 +35,9 @@
 #include <asm/asm-offsets.h>
 #include <asm/irqflags-compact.h>
 #include <asm/thread_info.h>	/* For THREAD_SIZE */
+#ifdef CONFIG_ARC_PLAT_EZNPS
+#include <plat/ctop.h>
+#endif
 
 /*--------------------------------------------------------------
  * Switch to Kernel Mode stack if SP points to User Mode stack
@@ -110,14 +113,45 @@
 
 .macro FAKE_RET_FROM_EXCPN
 
-	lr	r9, [status32]
-	bclr	r9, r9, STATUS_AE_BIT
-	or	r9, r9, (STATUS_E1_MASK|STATUS_E2_MASK)
-	sr	r9, [erstatus]
-	mov	r9, 55f
-	sr	r9, [eret]
+	ld  r9, [sp, PT_status32]
+	bic r9, r9, (STATUS_U_MASK|STATUS_DE_MASK)
+	bset  r9, r9, STATUS_L_BIT
+	sr  r9, [erstatus]
+	mov r9, 55f
+	sr  r9, [eret]
+
 	rtie
 55:
+.endm
+
+#define ECR_P_TRAP_FAKE_REVERT 8
+/*--------------------------------------------------------------
+ * Used by the Trap handler for a unique case where trap was
+ * made by an exception who faked rtie in order to switch
+ * back to CPU Exception context before restoring regs
+ *-------------------------------------------------------------*/
+.macro TRY_COMPLETE_FAKE_REVERT
+	/* Need at least 1 reg to code the early exception prologue */
+	PROLOG_FREEUP_REG r9, @ex_saved_reg1
+
+	/* Check if trap param indicates to revert fake */
+	lr    r9, [ecr]
+	bmsk  r9, r9, 7
+	cmp   r9, ECR_P_TRAP_FAKE_REVERT
+	bnz   66f
+
+	/* User Mode when this happened ? Yes: return to trap */
+	lr  r9, [erstatus]
+	bbit1   r9, STATUS_U_BIT, 66f
+
+	/* Restore r9 used to code the early prologue */
+	PROLOG_RESTORE_REG  r9, @ex_saved_reg1
+
+	/* Return to faking exception */
+	b ret_as_exception
+66:
+	/* Restore r9 used to code the early prologue */
+	PROLOG_RESTORE_REG  r9, @ex_saved_reg1
 .endm
 
 /*--------------------------------------------------------------
@@ -188,6 +222,13 @@
 	PUSHAX	lp_start
 	PUSHAX	erbta
 
+#ifdef CONFIG_ARC_PLAT_EZNPS
+	nop
+	.word CTOP_INST_SCHD_RW
+	PUSHAX  CTOP_AUX_GPA1
+	PUSHAX  CTOP_AUX_EFLAGS
+#endif
+
 	lr	r9, [ecr]
 	st      r9, [sp, PT_event]    /* EV_Trap expects r9 to have ECR */
 .endm
@@ -204,6 +245,13 @@
  * by hardware and that is not good.
  *-------------------------------------------------------------*/
 .macro EXCEPTION_EPILOGUE
+#ifdef CONFIG_ARC_PLAT_EZNPS
+	nop
+	.word CTOP_INST_SCHD_RW
+	POPAX   CTOP_AUX_EFLAGS
+	POPAX   CTOP_AUX_GPA1
+#endif
+
 	POPAX	erbta
 	POPAX	lp_start
 	POPAX	lp_end
@@ -217,6 +265,9 @@
 	POP	fp
 	POP	gp
 	RESTORE_R12_TO_R0
+#ifdef CONFIG_ARC_CURR_IN_REG
+	ld	r25, [sp, 12]
+#endif
 
 	ld  sp, [sp] /* restore original sp */
 	/* orig_r0, ECR, user_r25 skipped automatically */
@@ -261,6 +312,13 @@
 	PUSHAX	lp_end
 	PUSHAX	lp_start
 	PUSHAX	bta_l\LVL\()
+
+#ifdef CONFIG_ARC_PLAT_EZNPS
+	nop
+	.word CTOP_INST_SCHD_RW
+	PUSHAX  CTOP_AUX_GPA1
+	PUSHAX  CTOP_AUX_EFLAGS
+#endif
 .endm
 
 /*--------------------------------------------------------------
@@ -273,6 +331,13 @@
  * by hardware and that is not good.
  *-------------------------------------------------------------*/
 .macro INTERRUPT_EPILOGUE  LVL
+#ifdef CONFIG_ARC_PLAT_EZNPS
+	nop
+	.word CTOP_INST_SCHD_RW
+	POPAX   CTOP_AUX_EFLAGS
+	POPAX   CTOP_AUX_GPA1
+#endif
+
 	POPAX	bta_l\LVL\()
 	POPAX	lp_start
 	POPAX	lp_end
@@ -286,6 +351,9 @@
 	POP	fp
 	POP	gp
 	RESTORE_R12_TO_R0
+#ifdef CONFIG_ARC_CURR_IN_REG
+	ld	r25, [sp, 12]
+#endif
 
 	ld  sp, [sp] /* restore original sp */
 	/* orig_r0, ECR, user_r25 skipped automatically */
@@ -298,9 +366,16 @@
 
 /* Get CPU-ID of this core */
 .macro  GET_CPU_ID  reg
+#ifdef CONFIG_ARC_PLAT_EZNPS
+	lr  \reg, [CTOP_AUX_LOGIC_GLOBAL_ID]
+#ifndef CONFIG_EZNPS_MTM_EXT
+	lsr \reg, \reg, 4
+#endif
+#else
 	lr  \reg, [identity]
 	lsr \reg, \reg, 8
 	bmsk \reg, \reg, 7
+#endif
 .endm
 
 #endif  /* __ASM_ARC_ENTRY_COMPACT_H */

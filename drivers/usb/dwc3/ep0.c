@@ -55,40 +55,13 @@ static const char *dwc3_ep0_state_string(enum dwc3_ep0_state state)
 	}
 }
 
-static void dwc3_ep0_prepare_one_trb(struct dwc3 *dwc, u8 epnum,
-		dma_addr_t buf_dma, u32 len, u32 type, bool chain)
+static int dwc3_ep0_start_trans(struct dwc3 *dwc, u8 epnum, dma_addr_t buf_dma,
+		u32 len, u32 type)
 {
+	struct dwc3_gadget_ep_cmd_params params;
 	struct dwc3_trb			*trb;
 	struct dwc3_ep			*dep;
 
-	dep = dwc->eps[epnum];
-
-	trb = &dwc->ep0_trb[dep->free_slot];
-
-	if (chain)
-		dep->free_slot++;
-
-	trb->bpl = lower_32_bits(buf_dma);
-	trb->bph = upper_32_bits(buf_dma);
-	trb->size = len;
-	trb->ctrl = type;
-
-	trb->ctrl |= (DWC3_TRB_CTRL_HWO
-			| DWC3_TRB_CTRL_ISP_IMI);
-
-	if (chain)
-		trb->ctrl |= DWC3_TRB_CTRL_CHN;
-	else
-		trb->ctrl |= (DWC3_TRB_CTRL_IOC
-				| DWC3_TRB_CTRL_LST);
-
-	trace_dwc3_prepare_trb(dep, trb);
-}
-
-static int dwc3_ep0_start_trans(struct dwc3 *dwc, u8 epnum)
-{
-	struct dwc3_gadget_ep_cmd_params params;
-	struct dwc3_ep			*dep;
 	int				ret;
 
 	dep = dwc->eps[epnum];
@@ -97,9 +70,23 @@ static int dwc3_ep0_start_trans(struct dwc3 *dwc, u8 epnum)
 		return 0;
 	}
 
+	trb = dwc->ep0_trb;
+
+	trb->bpl = lower_32_bits(buf_dma);
+	trb->bph = upper_32_bits(buf_dma);
+	trb->size = len;
+	trb->ctrl = type;
+
+	trb->ctrl |= (DWC3_TRB_CTRL_HWO
+			| DWC3_TRB_CTRL_LST
+			| DWC3_TRB_CTRL_IOC
+			| DWC3_TRB_CTRL_ISP_IMI);
+
 	memset(&params, 0, sizeof(params));
 	params.param0 = upper_32_bits(dwc->ep0_trb_addr);
 	params.param1 = lower_32_bits(dwc->ep0_trb_addr);
+
+	trace_dwc3_prepare_trb(dep, trb);
 
 	ret = dwc3_send_gadget_ep_cmd(dwc, dep->number,
 			DWC3_DEPCMD_STARTTRANSFER, &params);
@@ -314,9 +301,8 @@ void dwc3_ep0_out_start(struct dwc3 *dwc)
 {
 	int				ret;
 
-	dwc3_ep0_prepare_one_trb(dwc, 0, dwc->ctrl_req_addr, 8,
-			DWC3_TRBCTL_CONTROL_SETUP, false);
-	ret = dwc3_ep0_start_trans(dwc, 0);
+	ret = dwc3_ep0_start_trans(dwc, 0, dwc->ctrl_req_addr, 8,
+			DWC3_TRBCTL_CONTROL_SETUP);
 	WARN_ON(ret < 0);
 }
 
@@ -559,6 +545,7 @@ static int dwc3_ep0_set_config(struct dwc3 *dwc, struct usb_ctrlrequest *ctrl)
 	int ret;
 	u32 reg;
 
+	dwc->start_config_issued = false;
 	cfg = le16_to_cpu(ctrl->wValue);
 
 	switch (state) {
@@ -740,6 +727,10 @@ static int dwc3_ep0_std_request(struct dwc3 *dwc, struct usb_ctrlrequest *ctrl)
 		dwc3_trace(trace_dwc3_ep0, "USB_REQ_SET_ISOCH_DELAY");
 		ret = dwc3_ep0_set_isoch_delay(dwc, ctrl);
 		break;
+	case USB_REQ_SET_INTERFACE:
+		dwc3_trace(trace_dwc3_ep0, "USB_REQ_SET_INTERFACE");
+		dwc->start_config_issued = false;
+		/* Fall through */
 	default:
 		dwc3_trace(trace_dwc3_ep0, "Forwarding to gadget driver");
 		ret = dwc3_ep0_delegate_req(dwc, ctrl);
@@ -792,11 +783,7 @@ static void dwc3_ep0_complete_data(struct dwc3 *dwc,
 	struct usb_request	*ur;
 	struct dwc3_trb		*trb;
 	struct dwc3_ep		*ep0;
-	unsigned		transfer_size = 0;
-	unsigned		maxp;
-	unsigned		remaining_ur_length;
-	void			*buf;
-	u32			transferred = 0;
+	u32			transferred;
 	u32			status;
 	u32			length;
 	u8			epnum;
@@ -825,37 +812,17 @@ static void dwc3_ep0_complete_data(struct dwc3 *dwc,
 	}
 
 	ur = &r->request;
-	buf = ur->buf;
-	remaining_ur_length = ur->length;
 
 	length = trb->size & DWC3_TRB_SIZE_MASK;
 
-	maxp = ep0->endpoint.maxpacket;
-
 	if (dwc->ep0_bounced) {
-		/*
-		 * Handle the first TRB before handling the bounce buffer if
-		 * the request length is greater than the bounce buffer size
-		 */
-		if (ur->length > DWC3_EP0_BOUNCE_SIZE) {
-			transfer_size = ALIGN(ur->length - maxp, maxp);
-			transferred = transfer_size - length;
-			buf = (u8 *)buf + transferred;
-			ur->actual += transferred;
-			remaining_ur_length -= transferred;
+		unsigned transfer_size = ur->length;
+		unsigned maxp = ep0->endpoint.maxpacket;
 
-			trb++;
-			length = trb->size & DWC3_TRB_SIZE_MASK;
-
-			ep0->free_slot = 0;
-		}
-
-		transfer_size = roundup((ur->length - transfer_size),
-					maxp);
-
-		transferred = min_t(u32, remaining_ur_length,
-				    transfer_size - length);
-		memcpy(buf, dwc->ep0_bounce, transferred);
+		transfer_size += (maxp - (transfer_size % maxp));
+		transferred = min_t(u32, ur->length,
+				transfer_size - length);
+		memcpy(ur->buf, dwc->ep0_bounce, transferred);
 	} else {
 		transferred = ur->length - length;
 	}
@@ -875,9 +842,9 @@ static void dwc3_ep0_complete_data(struct dwc3 *dwc,
 
 			dwc->ep0_next_event = DWC3_EP0_COMPLETE;
 
-			dwc3_ep0_prepare_one_trb(dwc, epnum, dwc->ctrl_req_addr,
-					0, DWC3_TRBCTL_CONTROL_DATA, false);
-			ret = dwc3_ep0_start_trans(dwc, epnum);
+			ret = dwc3_ep0_start_trans(dwc, epnum,
+					dwc->ctrl_req_addr, 0,
+					DWC3_TRBCTL_CONTROL_DATA);
 			WARN_ON(ret < 0);
 		}
 	}
@@ -959,13 +926,12 @@ static void __dwc3_ep0_do_control_data(struct dwc3 *dwc,
 	req->direction = !!dep->number;
 
 	if (req->request.length == 0) {
-		dwc3_ep0_prepare_one_trb(dwc, dep->number,
+		ret = dwc3_ep0_start_trans(dwc, dep->number,
 				dwc->ctrl_req_addr, 0,
-				DWC3_TRBCTL_CONTROL_DATA, false);
-		ret = dwc3_ep0_start_trans(dwc, dep->number);
+				DWC3_TRBCTL_CONTROL_DATA);
 	} else if (!IS_ALIGNED(req->request.length, dep->endpoint.maxpacket)
 			&& (dep->number == 0)) {
-		u32	transfer_size = 0;
+		u32	transfer_size;
 		u32	maxpacket;
 
 		ret = usb_gadget_map_request(&dwc->gadget, &req->request,
@@ -975,27 +941,21 @@ static void __dwc3_ep0_do_control_data(struct dwc3 *dwc,
 			return;
 		}
 
+		WARN_ON(req->request.length > DWC3_EP0_BOUNCE_SIZE);
+
 		maxpacket = dep->endpoint.maxpacket;
-
-		if (req->request.length > DWC3_EP0_BOUNCE_SIZE) {
-			transfer_size = ALIGN(req->request.length - maxpacket,
-					      maxpacket);
-			dwc3_ep0_prepare_one_trb(dwc, dep->number,
-						   req->request.dma,
-						   transfer_size,
-						   DWC3_TRBCTL_CONTROL_DATA,
-						   true);
-		}
-
-		transfer_size = roundup((req->request.length - transfer_size),
-					maxpacket);
+		transfer_size = roundup(req->request.length, maxpacket);
 
 		dwc->ep0_bounced = true;
 
-		dwc3_ep0_prepare_one_trb(dwc, dep->number,
+		/*
+		 * REVISIT in case request length is bigger than
+		 * DWC3_EP0_BOUNCE_SIZE we will need two chained
+		 * TRBs to handle the transfer.
+		 */
+		ret = dwc3_ep0_start_trans(dwc, dep->number,
 				dwc->ep0_bounce_addr, transfer_size,
-				DWC3_TRBCTL_CONTROL_DATA, false);
-		ret = dwc3_ep0_start_trans(dwc, dep->number);
+				DWC3_TRBCTL_CONTROL_DATA);
 	} else {
 		ret = usb_gadget_map_request(&dwc->gadget, &req->request,
 				dep->number);
@@ -1004,10 +964,8 @@ static void __dwc3_ep0_do_control_data(struct dwc3 *dwc,
 			return;
 		}
 
-		dwc3_ep0_prepare_one_trb(dwc, dep->number, req->request.dma,
-				req->request.length, DWC3_TRBCTL_CONTROL_DATA,
-				false);
-		ret = dwc3_ep0_start_trans(dwc, dep->number);
+		ret = dwc3_ep0_start_trans(dwc, dep->number, req->request.dma,
+				req->request.length, DWC3_TRBCTL_CONTROL_DATA);
 	}
 
 	WARN_ON(ret < 0);
@@ -1021,9 +979,8 @@ static int dwc3_ep0_start_control_status(struct dwc3_ep *dep)
 	type = dwc->three_stage_setup ? DWC3_TRBCTL_CONTROL_STATUS3
 		: DWC3_TRBCTL_CONTROL_STATUS2;
 
-	dwc3_ep0_prepare_one_trb(dwc, dep->number,
-			dwc->ctrl_req_addr, 0, type, false);
-	return dwc3_ep0_start_trans(dwc, dep->number);
+	return dwc3_ep0_start_trans(dwc, dep->number,
+			dwc->ctrl_req_addr, 0, type);
 }
 
 static void __dwc3_ep0_do_control_status(struct dwc3 *dwc, struct dwc3_ep *dep)

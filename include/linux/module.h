@@ -302,12 +302,6 @@ struct mod_tree_node {
 	struct latch_tree_node node;
 };
 
-struct mod_kallsyms {
-	Elf_Sym *symtab;
-	unsigned int num_symtab;
-	char *strtab;
-};
-
 struct module {
 	enum module_state state;
 
@@ -417,9 +411,14 @@ struct module {
 #endif
 
 #ifdef CONFIG_KALLSYMS
-	/* Protected by RCU and/or module_mutex: use rcu_dereference() */
-	struct mod_kallsyms *kallsyms;
-	struct mod_kallsyms core_kallsyms;
+	/*
+	 * We keep the symbol and string tables for kallsyms.
+	 * The core_* fields below are temporary, loader-only (they
+	 * could really be discarded after module init).
+	 */
+	Elf_Sym *symtab, *core_symtab;
+	unsigned int num_symtab, core_num_syms;
+	char *strtab, *core_strtab;
 
 	/* Section attributes */
 	struct module_sect_attrs *sect_attrs;
@@ -788,15 +787,6 @@ static inline void module_bug_finalize(const Elf_Ehdr *hdr,
 }
 static inline void module_bug_cleanup(struct module *mod) {}
 #endif	/* CONFIG_GENERIC_BUG */
-
-#ifdef RETPOLINE
-extern bool retpoline_module_ok(bool has_retpoline);
-#else
-static inline bool retpoline_module_ok(bool has_retpoline)
-{
-	return true;
-}
-#endif
 
 #ifdef CONFIG_MODULE_SIG
 static inline bool module_sig_ok(struct module *module)

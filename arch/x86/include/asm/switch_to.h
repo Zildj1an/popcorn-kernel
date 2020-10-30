@@ -1,8 +1,6 @@
 #ifndef _ASM_X86_SWITCH_TO_H
 #define _ASM_X86_SWITCH_TO_H
 
-#include <asm/nospec-branch.h>
-
 struct task_struct; /* one of the stranger aspects of C forward declarations */
 __visible struct task_struct *__switch_to(struct task_struct *prev,
 					   struct task_struct *next);
@@ -26,23 +24,6 @@ void __switch_to_xtra(struct task_struct *prev_p, struct task_struct *next_p,
 #define __switch_canary_iparam
 #endif	/* CC_STACKPROTECTOR */
 
-#ifdef CONFIG_RETPOLINE
-	/*
-	 * When switching from a shallower to a deeper call stack
-	 * the RSB may either underflow or use entries populated
-	 * with userspace addresses. On CPUs where those concerns
-	 * exist, overwrite the RSB with entries which capture
-	 * speculative execution to prevent attack.
-	 */
-#define __retpoline_fill_return_buffer					\
-	ALTERNATIVE("jmp 910f",						\
-		__stringify(__FILL_RETURN_BUFFER(%%ebx, RSB_CLEAR_LOOPS, %%esp)),\
-		X86_FEATURE_RSB_CTXSW)					\
-	"910:\n\t"
-#else
-#define __retpoline_fill_return_buffer
-#endif
-
 /*
  * Saving eflags is important. It switches not only IOPL between tasks,
  * it also protects other tasks from NT leaking through sysenter etc.
@@ -65,7 +46,6 @@ do {									\
 		     "movl $1f,%[prev_ip]\n\t"	/* save    EIP   */	\
 		     "pushl %[next_ip]\n\t"	/* restore EIP   */	\
 		     __switch_canary					\
-		     __retpoline_fill_return_buffer			\
 		     "jmp __switch_to\n"	/* regparm call  */	\
 		     "1:\t"						\
 		     "popl %%ebp\n\t"		/* restore EBP   */	\
@@ -99,12 +79,12 @@ do {									\
 #else /* CONFIG_X86_32 */
 
 /* frame pointer must be last for get_wchan */
-#define SAVE_CONTEXT    "pushq %%rbp ; movq %%rsi,%%rbp\n\t"
-#define RESTORE_CONTEXT "movq %%rbp,%%rsi ; popq %%rbp\t"
+#define SAVE_CONTEXT    "pushf ; pushq %%rbp ; movq %%rsi,%%rbp\n\t"
+#define RESTORE_CONTEXT "movq %%rbp,%%rsi ; popq %%rbp ; popf\t"
 
 #define __EXTRA_CLOBBER  \
 	, "rcx", "rbx", "rdx", "r8", "r9", "r10", "r11", \
-	  "r12", "r13", "r14", "r15", "flags"
+	  "r12", "r13", "r14", "r15"
 
 #ifdef CONFIG_CC_STACKPROTECTOR
 #define __switch_canary							  \
@@ -120,28 +100,7 @@ do {									\
 #define __switch_canary_iparam
 #endif	/* CC_STACKPROTECTOR */
 
-#ifdef CONFIG_RETPOLINE
-	/*
-	 * When switching from a shallower to a deeper call stack
-	 * the RSB may either underflow or use entries populated
-	 * with userspace addresses. On CPUs where those concerns
-	 * exist, overwrite the RSB with entries which capture
-	 * speculative execution to prevent attack.
-	 */
-#define __retpoline_fill_return_buffer					\
-	ALTERNATIVE("jmp 910f",						\
-		__stringify(__FILL_RETURN_BUFFER(%%r12, RSB_CLEAR_LOOPS, %%rsp)),\
-		X86_FEATURE_RSB_CTXSW)					\
-	"910:\n\t"
-#else
-#define __retpoline_fill_return_buffer
-#endif
-
-/*
- * There is no need to save or restore flags, because flags are always
- * clean in kernel mode, with the possible exception of IOPL.  Kernel IOPL
- * has no effect.
- */
+/* Save restore flags to clear handle leaking NT */
 #define switch_to(prev, next, last) \
 	asm volatile(SAVE_CONTEXT					  \
 	     "movq %%rsp,%P[threadrsp](%[prev])\n\t" /* save RSP */	  \
@@ -149,7 +108,6 @@ do {									\
 	     "call __switch_to\n\t"					  \
 	     "movq "__percpu_arg([current_task])",%%rsi\n\t"		  \
 	     __switch_canary						  \
-	     __retpoline_fill_return_buffer				  \
 	     "movq %P[thread_info](%%rsi),%%r8\n\t"			  \
 	     "movq %%rax,%%rdi\n\t" 					  \
 	     "testl  %[_tif_fork],%P[ti_flags](%%r8)\n\t"		  \

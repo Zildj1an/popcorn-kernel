@@ -186,6 +186,4 @@ static inline void spin_lock_prefetch(const void *x)
 
 #endif
 
-int cpu_enable_pan(void *__unused);
-
 #endif /* __ASM_PROCESSOR_H */

@@ -43,6 +43,8 @@
 #include <asm/cache.h>
 #include <asm/processor.h>
 #include <asm/tlb-mmu1.h>
+#include <asm/mtm.h>
+#include <asm/highmem.h>
 
 #ifdef CONFIG_ISA_ARCOMPACT
 ;-----------------------------------------------------------------
@@ -88,7 +90,7 @@ ex_saved_reg1:
 #ifdef CONFIG_SMP
 	sr  r0, [ARC_REG_SCRATCH_DATA0]	; freeup r0 to code with
 	GET_CPU_ID  r0			; get to per cpu scratch mem,
-	asl r0, r0, L1_CACHE_SHIFT	; cache line wide per cpu
+	lsl r0, r0, L1_CACHE_SHIFT	; cache line wide per cpu
 	add r0, @ex_saved_reg1, r0
 #else
 	st    r0, [@ex_saved_reg1]
@@ -97,6 +99,7 @@ ex_saved_reg1:
 	st_s  r1, [r0, 4]
 	st_s  r2, [r0, 8]
 	st_s  r3, [r0, 12]
+	HW_SCHD_OFF_R4 r0,16
 
 	; VERIFY if the ASID in MMU-PID Reg is same as
 	; one in Linux data structures
@@ -107,8 +110,9 @@ ex_saved_reg1:
 .macro TLBMISS_RESTORE_REGS
 #ifdef CONFIG_SMP
 	GET_CPU_ID  r0			; get to per cpu scratch mem
-	asl r0, r0, L1_CACHE_SHIFT	; each is cache line wide
+	lsl r0, r0, L1_CACHE_SHIFT	; each is cache line wide
 	add r0, @ex_saved_reg1, r0
+	HW_SCHD_RESTORE_R4 r0,16
 	ld_s  r3, [r0,12]
 	ld_s  r2, [r0, 8]
 	ld_s  r1, [r0, 4]
@@ -204,39 +208,51 @@ ex_saved_reg1:
 	ld  r1, [r1, MM_PGD]
 #endif
 
-	lsr     r0, r2, PGDIR_SHIFT     ; Bits for indexing into PGD
-	ld.as   r3, [r1, r0]            ; PGD entry corresp to faulting addr
-	tst	r3, r3
-	bz	do_slow_path_pf         ; if no Page Table, do page fault
-
-#ifdef CONFIG_TRANSPARENT_HUGEPAGE
-	and.f	0, r3, _PAGE_HW_SZ	; Is this Huge PMD (thp)
-	add2.nz	r1, r1, r0
-	bnz.d	2f		; YES: PGD == PMD has THP PTE: stop pgd walk
-	mov.nz	r0, r3
-
+#ifdef CONFIG_HIGHMEM
+	; handle pkmap/fixmap with more then on pte table
+	cmp_s   r2, VMALLOC_END
+	b.hs    4f
 #endif
-	and	r1, r3, PAGE_MASK
+
+	lsr     r0, r2, PGDIR_SHIFT     ; Bits for indexing into PGD
+	ld.as   r1, [r1, r0]            ; PGD entry corresp to faulting addr
+	and.f   r1, r1, PAGE_MASK       ; Ignoring protection and other flags
+	;   contains Ptr to Page Table
+	bz      do_slow_path_pf         ; if no Page Table, do page fault
 
 	; Get the PTE entry: The idea is
 	; (1) x = addr >> PAGE_SHIFT 	-> masks page-off bits from @fault-addr
 	; (2) y = x & (PTRS_PER_PTE - 1) -> to get index
-	; (3) z = (pgtbl + y * 4)
+	; (3) z = pgtbl[y]
+	; To avoid the multiply by in end, we do the -2, <<2 below
 
-#ifdef CONFIG_ARC_HAS_PAE40
-#define PTE_SIZE_LOG	3	/* 8 == 2 ^ 3 */
-#else
-#define PTE_SIZE_LOG	2	/* 4 == 2 ^ 2 */
-#endif
+	lsr     r0, r2, (PAGE_SHIFT - 2)
+	and     r0, r0, ( (PTRS_PER_PTE - 1) << 2)
+	ld.aw   r0, [r1, r0]            ; get PTE and PTE ptr for fault addr
+#ifdef CONFIG_HIGHMEM
+	b       2f
 
-	; multiply in step (3) above avoided by shifting lesser in step (1)
-	lsr     r0, r2, ( PAGE_SHIFT - PTE_SIZE_LOG )
-	and     r0, r0, ( (PTRS_PER_PTE - 1) << PTE_SIZE_LOG )
-	ld.aw   r0, [r1, r0]            ; r0: PTE (lower word only for PAE40)
-					; r1: PTE ptr
+4:
+	lsr     r0, r2, (PGDIR_SHIFT + 5)   ; Bits for indexing into KMAP_PGD
+	lsl     r0, r0, 5
+	ld.as   r1, [r1, r0]                ; PGD entry corresp to faulting addr
+	tst     r1, r1
+	bz      do_slow_path_pf             ; if no Page Table, do page fault
+	and     r1, r1, PAGE_MASK
 
+	cmp_s   r2, PKMAP_BASE
+	mov.hs  r0, ( PKMAP_BASE >> PAGE_SHIFT )
+	b.hs    3f
+	mov     r0, ( FIXMAP_BASE >> PAGE_SHIFT )
+
+3:
+	#define PTE_SIZE_LOG    2       /* 4 == 2 ^ 2 */
+	lsr     r3, r2, PAGE_SHIFT
+	sub     r0, r3, r0
+	lsl     r0, r0, PTE_SIZE_LOG
+	ld.aw   r0, [r1, r0]
 2:
-
+#endif
 #ifdef CONFIG_ARC_DBG_TLB_MISS_COUNT
 	and.f 0, r0, _PAGE_PRESENT
 	bz   1f
@@ -245,29 +261,23 @@ ex_saved_reg1:
 	st   r3, [num_pte_not_present]
 1:
 #endif
-
 .endm
 
 ;-----------------------------------------------------------------
 ; Convert Linux PTE entry into TLB entry
 ; A one-word PTE entry is programmed as two-word TLB Entry [PD0:PD1] in mmu
-;    (for PAE40, two-words PTE, while three-word TLB Entry [PD0:PD1:PD1HI])
 ; IN: r0 = PTE, r1 = ptr to PTE
 
 .macro CONV_PTE_TO_TLB
-	and    r3, r0, PTE_BITS_RWX	;          r  w  x
-	asl    r2, r3, 3		; Kr Kw Kx 0  0  0 (GLOBAL, kernel only)
+	and    r3, r0, PTE_BITS_RWX	;       r w x
+	lsl    r2, r3, 3		; r w x 0 0 0 (GLOBAL, kernel only)
 	and.f  0,  r0, _PAGE_GLOBAL
-	or.z   r2, r2, r3		; Kr Kw Kx Ur Uw Ux (!GLOBAL, user page)
+	or.z   r2, r2, r3		; r w x r w x (!GLOBAL, user page)
 
 	and r3, r0, PTE_BITS_NON_RWX_IN_PD1 ; Extract PFN+cache bits from PTE
 	or  r3, r3, r2
 
-	sr  r3, [ARC_REG_TLBPD1]    	; paddr[31..13] | Kr Kw Kx Ur Uw Ux | C
-#ifdef	CONFIG_ARC_HAS_PAE40
-	ld	r3, [r1, 4]		; paddr[39..32]
-	sr	r3, [ARC_REG_TLBPD1HI]
-#endif
+	sr  r3, [ARC_REG_TLBPD1]    	; these go in PD1
 
 	and r2, r0, PTE_BITS_IN_PD0 ; Extract other PTE flags: (V)alid, (G)lb
 
@@ -282,7 +292,12 @@ ex_saved_reg1:
 
 .macro COMMIT_ENTRY_TO_MMU
 #if (CONFIG_ARC_MMU_VER < 4)
-
+#ifdef CONFIG_EZNPS_MTM_EXT
+	; verify if entry for this vaddr+ASID already exists
+	sr    TLBProbe, [ARC_REG_TLBCOMMAND]
+	lr    r0, [ARC_REG_TLBINDEX]
+	bbit0 r0, 31, 88f
+#endif
 	/* Get free TLB slot: Set = computed from vaddr, way = random */
 	sr  TLBGetIndex, [ARC_REG_TLBCOMMAND]
 
@@ -296,6 +311,7 @@ ex_saved_reg1:
 #else
 	sr TLBInsertEntry, [ARC_REG_TLBCOMMAND]
 #endif
+88:
 .endm
 
 
@@ -388,7 +404,7 @@ ENTRY(EV_TLBMissD)
 	lr      r3, [ecr]
 	or      r0, r0, _PAGE_ACCESSED        ; Accessed bit always
 	btst_s  r3,  ECR_C_BIT_DTLB_ST_MISS   ; See if it was a Write Access ?
-	or.nz   r0, r0, _PAGE_DIRTY           ; if Write, set Dirty bit as well
+	or.nz   r0, r0, _PAGE_MODIFIED        ; if Write, set Dirty bit as well
 	st_s    r0, [r1]                      ; Write back PTE
 
 	CONV_PTE_TO_TLB

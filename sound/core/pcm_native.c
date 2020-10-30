@@ -74,18 +74,6 @@ static int snd_pcm_open(struct file *file, struct snd_pcm *pcm, int stream);
 static DEFINE_RWLOCK(snd_pcm_link_rwlock);
 static DECLARE_RWSEM(snd_pcm_link_rwsem);
 
-/* Writer in rwsem may block readers even during its waiting in queue,
- * and this may lead to a deadlock when the code path takes read sem
- * twice (e.g. one in snd_pcm_action_nonatomic() and another in
- * snd_pcm_stream_lock()).  As a (suboptimal) workaround, let writer to
- * spin until it gets the lock.
- */
-static inline void down_write_nonblock(struct rw_semaphore *lock)
-{
-	while (!down_write_trylock(lock))
-		cond_resched();
-}
-
 /**
  * snd_pcm_stream_lock - Lock the PCM stream
  * @substream: PCM substream
@@ -498,16 +486,6 @@ static void snd_pcm_set_state(struct snd_pcm_substream *substream, int state)
 	snd_pcm_stream_unlock_irq(substream);
 }
 
-static inline void snd_pcm_timer_notify(struct snd_pcm_substream *substream,
-					int event)
-{
-#ifdef CONFIG_SND_PCM_TIMER
-	if (substream->timer)
-		snd_timer_notify(substream->timer, event,
-					&substream->runtime->trigger_tstamp);
-#endif
-}
-
 static int snd_pcm_hw_params(struct snd_pcm_substream *substream,
 			     struct snd_pcm_hw_params *params)
 {
@@ -672,8 +650,7 @@ static int snd_pcm_sw_params(struct snd_pcm_substream *substream,
 	}
 	snd_pcm_stream_unlock_irq(substream);
 
-	if (params->tstamp_mode < 0 ||
-	    params->tstamp_mode > SNDRV_PCM_TSTAMP_LAST)
+	if (params->tstamp_mode > SNDRV_PCM_TSTAMP_LAST)
 		return -EINVAL;
 	if (params->proto >= SNDRV_PROTOCOL_VERSION(2, 0, 12) &&
 	    params->tstamp_type > SNDRV_PCM_TSTAMP_TYPE_LAST)
@@ -1065,7 +1042,9 @@ static void snd_pcm_post_start(struct snd_pcm_substream *substream, int state)
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK &&
 	    runtime->silence_size > 0)
 		snd_pcm_playback_silence(substream, ULONG_MAX);
-	snd_pcm_timer_notify(substream, SNDRV_TIMER_EVENT_MSTART);
+	if (substream->timer)
+		snd_timer_notify(substream->timer, SNDRV_TIMER_EVENT_MSTART,
+				 &runtime->trigger_tstamp);
 }
 
 static struct action_ops snd_pcm_action_start = {
@@ -1113,7 +1092,9 @@ static void snd_pcm_post_stop(struct snd_pcm_substream *substream, int state)
 	if (runtime->status->state != state) {
 		snd_pcm_trigger_tstamp(substream);
 		runtime->status->state = state;
-		snd_pcm_timer_notify(substream, SNDRV_TIMER_EVENT_MSTOP);
+		if (substream->timer)
+			snd_timer_notify(substream->timer, SNDRV_TIMER_EVENT_MSTOP,
+					 &runtime->trigger_tstamp);
 	}
 	wake_up(&runtime->sleep);
 	wake_up(&runtime->tsleep);
@@ -1227,12 +1208,18 @@ static void snd_pcm_post_pause(struct snd_pcm_substream *substream, int push)
 	snd_pcm_trigger_tstamp(substream);
 	if (push) {
 		runtime->status->state = SNDRV_PCM_STATE_PAUSED;
-		snd_pcm_timer_notify(substream, SNDRV_TIMER_EVENT_MPAUSE);
+		if (substream->timer)
+			snd_timer_notify(substream->timer,
+					 SNDRV_TIMER_EVENT_MPAUSE,
+					 &runtime->trigger_tstamp);
 		wake_up(&runtime->sleep);
 		wake_up(&runtime->tsleep);
 	} else {
 		runtime->status->state = SNDRV_PCM_STATE_RUNNING;
-		snd_pcm_timer_notify(substream, SNDRV_TIMER_EVENT_MCONTINUE);
+		if (substream->timer)
+			snd_timer_notify(substream->timer,
+					 SNDRV_TIMER_EVENT_MCONTINUE,
+					 &runtime->trigger_tstamp);
 	}
 }
 
@@ -1280,7 +1267,9 @@ static void snd_pcm_post_suspend(struct snd_pcm_substream *substream, int state)
 	snd_pcm_trigger_tstamp(substream);
 	runtime->status->suspended_state = runtime->status->state;
 	runtime->status->state = SNDRV_PCM_STATE_SUSPENDED;
-	snd_pcm_timer_notify(substream, SNDRV_TIMER_EVENT_MSUSPEND);
+	if (substream->timer)
+		snd_timer_notify(substream->timer, SNDRV_TIMER_EVENT_MSUSPEND,
+				 &runtime->trigger_tstamp);
 	wake_up(&runtime->sleep);
 	wake_up(&runtime->tsleep);
 }
@@ -1384,7 +1373,9 @@ static void snd_pcm_post_resume(struct snd_pcm_substream *substream, int state)
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	snd_pcm_trigger_tstamp(substream);
 	runtime->status->state = runtime->status->suspended_state;
-	snd_pcm_timer_notify(substream, SNDRV_TIMER_EVENT_MRESUME);
+	if (substream->timer)
+		snd_timer_notify(substream->timer, SNDRV_TIMER_EVENT_MRESUME,
+				 &runtime->trigger_tstamp);
 }
 
 static struct action_ops snd_pcm_action_resume = {
@@ -1825,7 +1816,7 @@ static int snd_pcm_link(struct snd_pcm_substream *substream, int fd)
 		res = -ENOMEM;
 		goto _nolock;
 	}
-	down_write_nonblock(&snd_pcm_link_rwsem);
+	down_write(&snd_pcm_link_rwsem);
 	write_lock_irq(&snd_pcm_link_rwlock);
 	if (substream->runtime->status->state == SNDRV_PCM_STATE_OPEN ||
 	    substream->runtime->status->state != substream1->runtime->status->state ||
@@ -1872,7 +1863,7 @@ static int snd_pcm_unlink(struct snd_pcm_substream *substream)
 	struct snd_pcm_substream *s;
 	int res = 0;
 
-	down_write_nonblock(&snd_pcm_link_rwsem);
+	down_write(&snd_pcm_link_rwsem);
 	write_lock_irq(&snd_pcm_link_rwlock);
 	if (!snd_pcm_stream_linked(substream)) {
 		res = -EALREADY;
@@ -2235,8 +2226,7 @@ void snd_pcm_release_substream(struct snd_pcm_substream *substream)
 
 	snd_pcm_drop(substream);
 	if (substream->hw_opened) {
-		if (substream->ops->hw_free &&
-		    substream->runtime->status->state != SNDRV_PCM_STATE_OPEN)
+		if (substream->ops->hw_free != NULL)
 			substream->ops->hw_free(substream);
 		substream->ops->close(substream);
 		substream->hw_opened = 0;
@@ -2727,7 +2717,6 @@ static int snd_pcm_sync_ptr(struct snd_pcm_substream *substream,
 	sync_ptr.s.status.hw_ptr = status->hw_ptr;
 	sync_ptr.s.status.tstamp = status->tstamp;
 	sync_ptr.s.status.suspended_state = status->suspended_state;
-	sync_ptr.s.status.audio_tstamp = status->audio_tstamp;
 	snd_pcm_stream_unlock_irq(substream);
 	if (copy_to_user(_sync_ptr, &sync_ptr, sizeof(sync_ptr)))
 		return -EFAULT;
@@ -3409,7 +3398,7 @@ int snd_pcm_lib_default_mmap(struct snd_pcm_substream *substream,
 					 area,
 					 substream->runtime->dma_area,
 					 substream->runtime->dma_addr,
-					 substream->runtime->dma_bytes);
+					 area->vm_end - area->vm_start);
 #endif /* CONFIG_X86 */
 	/* mmap with fault handler */
 	area->vm_ops = &snd_pcm_vm_ops_data_fault;

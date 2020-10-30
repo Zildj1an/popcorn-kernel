@@ -367,8 +367,7 @@ int __bitmap_parse(const char *buf, unsigned int buflen,
 
 	nchunks = nbits = totaldigits = c = 0;
 	do {
-		chunk = 0;
-		ndigits = totaldigits;
+		chunk = ndigits = 0;
 
 		/* Get the next chunk of the bitmap */
 		while (buflen) {
@@ -407,9 +406,9 @@ int __bitmap_parse(const char *buf, unsigned int buflen,
 				return -EOVERFLOW;
 
 			chunk = (chunk << 4) | hex_to_bin(c);
-			totaldigits++;
+			ndigits++; totaldigits++;
 		}
-		if (ndigits == totaldigits)
+		if (ndigits == 0)
 			return -EINVAL;
 		if (nchunks == 0 && chunk == 0)
 			continue;
@@ -505,18 +504,20 @@ static int __bitmap_parselist(const char *buf, unsigned int buflen,
 		int is_user, unsigned long *maskp,
 		int nmaskbits)
 {
-	unsigned a, b;
-	int c, old_c, totaldigits, ndigits;
+	unsigned a, b, old_a, old_b, mod_val, mod_a, mod_b;
+	int c, old_c, totaldigits;
 	const char __user __force *ubuf = (const char __user __force *)buf;
 	int at_start, in_range;
 
 	totaldigits = c = 0;
+        old_a = old_b = 0;
+        mod_val = mod_a = mod_b = 0;
+
 	bitmap_zero(maskp, nmaskbits);
 	do {
 		at_start = 1;
 		in_range = 0;
 		a = b = 0;
-		ndigits = totaldigits;
 
 		/* Get the next cpu# or a range of cpu#'s */
 		while (buflen) {
@@ -530,27 +531,40 @@ static int __bitmap_parselist(const char *buf, unsigned int buflen,
 			if (isspace(c))
 				continue;
 
+			/*
+			 * If the last character was a space and the current
+			 * character isn't '\0', we've got embedded whitespace.
+			 * This is a no-no, so throw an error.
+			 */
+			if (totaldigits && c && isspace(old_c))
+				return -EINVAL;
+
 			/* A '\0' or a ',' signal the end of a cpu# or range */
 			if (c == '\0' || c == ',')
 				break;
-			/*
-			* whitespaces between digits are not allowed,
-			* but it's ok if whitespaces are on head or tail.
-			* when old_c is whilespace,
-			* if totaldigits == ndigits, whitespace is on head.
-			* if whitespace is on tail, it should not run here.
-			* as c was ',' or '\0',
-			* the last code line has broken the current loop.
-			*/
-			if ((totaldigits != ndigits) && isspace(old_c))
-				return -EINVAL;
+
+                        if (c == '=') {
+                               mod_val = a;
+                               at_start = 1;
+                               in_range = 0;
+                               a = b = 0;
+                               continue;
+                        }
+
+                        if (c == '%') {
+                               old_a = a;
+                               old_b = b;
+                               at_start = 1;
+                               in_range = 0;
+                               a = b = 0;
+                               continue;
+                        }
 
 			if (c == '-') {
 				if (at_start || in_range)
 					return -EINVAL;
 				b = 0;
 				in_range = 1;
-				at_start = 1;
 				continue;
 			}
 
@@ -563,18 +577,31 @@ static int __bitmap_parselist(const char *buf, unsigned int buflen,
 			at_start = 0;
 			totaldigits++;
 		}
-		if (ndigits == totaldigits)
-			continue;
-		/* if no digit is after '-', it's wrong*/
-		if (at_start && in_range)
+
+                if (mod_val) {
+                       mod_a = a;
+                       mod_b = b;
+                       a = old_a;
+                       b = old_b;
+                       old_a = old_b = 0;
+                }
+
+                if (!(a <= b) || !(mod_a <= mod_b))
 			return -EINVAL;
-		if (!(a <= b))
-			return -EINVAL;
-		if (b >= nmaskbits)
+		if (b >= nmaskbits || (mod_val && (mod_b >= mod_val)))	
 			return -ERANGE;
-		while (a <= b) {
-			set_bit(a, maskp);
-			a++;
+		if (!at_start) {
+			while (a <= b) {
+                        	if (mod_val) {
+                                	unsigned rem = a % mod_val;
+                                       	if (rem >= mod_a && rem <= mod_b)
+                                        	set_bit(a, maskp);
+                               	}
+                               	else
+				set_bit(a, maskp);
+				a++;
+			}
+			mod_val = mod_a = mod_b = 0;
 		}
 	} while (buflen && c == ',');
 	return 0;

@@ -145,7 +145,8 @@ static long swap_inode_boot_loader(struct super_block *sb,
 		inode_bl->i_version = 1;
 		i_size_write(inode_bl, 0);
 		inode_bl->i_mode = S_IFREG;
-		if (ext4_has_feature_extents(sb)) {
+		if (EXT4_HAS_INCOMPAT_FEATURE(sb,
+					      EXT4_FEATURE_INCOMPAT_EXTENTS)) {
 			ext4_set_inode_flag(inode_bl, EXT4_INODE_EXTENTS);
 			ext4_ext_tree_init(handle, inode_bl);
 		} else
@@ -382,7 +383,8 @@ setversion_out:
 			goto group_extend_out;
 		}
 
-		if (ext4_has_feature_bigalloc(sb)) {
+		if (EXT4_HAS_RO_COMPAT_FEATURE(sb,
+			       EXT4_FEATURE_RO_COMPAT_BIGALLOC)) {
 			ext4_msg(sb, KERN_ERR,
 				 "Online resizing not supported with bigalloc");
 			err = -EOPNOTSUPP;
@@ -430,7 +432,8 @@ group_extend_out:
 			goto mext_out;
 		}
 
-		if (ext4_has_feature_bigalloc(sb)) {
+		if (EXT4_HAS_RO_COMPAT_FEATURE(sb,
+			       EXT4_FEATURE_RO_COMPAT_BIGALLOC)) {
 			ext4_msg(sb, KERN_ERR,
 				 "Online defrag not supported with bigalloc");
 			err = -EOPNOTSUPP;
@@ -467,7 +470,8 @@ mext_out:
 			goto group_add_out;
 		}
 
-		if (ext4_has_feature_bigalloc(sb)) {
+		if (EXT4_HAS_RO_COMPAT_FEATURE(sb,
+			       EXT4_FEATURE_RO_COMPAT_BIGALLOC)) {
 			ext4_msg(sb, KERN_ERR,
 				 "Online resizing not supported with bigalloc");
 			err = -EOPNOTSUPP;
@@ -549,7 +553,8 @@ group_add_out:
 		int err = 0, err2 = 0;
 		ext4_group_t o_group = EXT4_SB(sb)->s_groups_count;
 
-		if (ext4_has_feature_bigalloc(sb)) {
+		if (EXT4_HAS_RO_COMPAT_FEATURE(sb,
+			       EXT4_FEATURE_RO_COMPAT_BIGALLOC)) {
 			ext4_msg(sb, KERN_ERR,
 				 "Online resizing not (yet) supported with bigalloc");
 			return -EOPNOTSUPP;
@@ -622,9 +627,6 @@ resizefs_out:
 		struct ext4_encryption_policy policy;
 		int err = 0;
 
-		if (!ext4_has_feature_encrypt(sb))
-			return -EOPNOTSUPP;
-
 		if (copy_from_user(&policy,
 				   (struct ext4_encryption_policy __user *)arg,
 				   sizeof(policy))) {
@@ -632,17 +634,7 @@ resizefs_out:
 			goto encryption_policy_out;
 		}
 
-		err = mnt_want_write_file(filp);
-		if (err)
-			goto encryption_policy_out;
-
-		mutex_lock(&inode->i_mutex);
-
 		err = ext4_process_policy(&policy, inode);
-
-		mutex_unlock(&inode->i_mutex);
-
-		mnt_drop_write_file(filp);
 encryption_policy_out:
 		return err;
 #else

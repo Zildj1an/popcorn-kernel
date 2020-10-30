@@ -1362,7 +1362,7 @@ static struct spi_driver ifx_spi_driver = {
 	.driver = {
 		.name = DRVNAME,
 		.pm = &ifx_spi_pm,
-	},
+		.owner = THIS_MODULE},
 	.probe = ifx_spi_spi_probe,
 	.shutdown = ifx_spi_spi_shutdown,
 	.remove = ifx_spi_spi_remove,
@@ -1378,9 +1378,9 @@ static struct spi_driver ifx_spi_driver = {
 static void __exit ifx_spi_exit(void)
 {
 	/* unregister */
-	spi_unregister_driver(&ifx_spi_driver);
 	tty_unregister_driver(tty_drv);
 	put_tty_driver(tty_drv);
+	spi_unregister_driver(&ifx_spi_driver);
 	unregister_reboot_notifier(&ifx_modem_reboot_notifier_block);
 }
 

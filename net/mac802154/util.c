@@ -14,7 +14,6 @@
  */
 
 #include "ieee802154_i.h"
-#include "driver-ops.h"
 
 /* privid for wpan_phys to determine whether they belong to us or not */
 const void *const mac802154_wpan_phy_privid = &mac802154_wpan_phy_privid;
@@ -80,11 +79,11 @@ void ieee802154_xmit_complete(struct ieee802154_hw *hw, struct sk_buff *skb,
 
 		if (skb->len > max_sifs_size)
 			hrtimer_start(&local->ifs_timer,
-				      hw->phy->lifs_period * NSEC_PER_USEC,
+				      ktime_set(0, hw->phy->lifs_period * NSEC_PER_USEC),
 				      HRTIMER_MODE_REL);
 		else
 			hrtimer_start(&local->ifs_timer,
-				      hw->phy->sifs_period * NSEC_PER_USEC,
+				      ktime_set(0, hw->phy->sifs_period * NSEC_PER_USEC),
 				      HRTIMER_MODE_REL);
 	} else {
 		ieee802154_wake_queue(hw);
@@ -93,10 +92,3 @@ void ieee802154_xmit_complete(struct ieee802154_hw *hw, struct sk_buff *skb,
 	dev_consume_skb_any(skb);
 }
 EXPORT_SYMBOL(ieee802154_xmit_complete);
-
-void ieee802154_stop_device(struct ieee802154_local *local)
-{
-	flush_workqueue(local->workqueue);
-	hrtimer_cancel(&local->ifs_timer);
-	drv_stop(local);
-}

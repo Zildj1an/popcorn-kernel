@@ -1,5 +1,28 @@
-// SPDX-License-Identifier: GPL-2.0
-/* Copyright(c) 2013 - 2018 Intel Corporation. */
+/*******************************************************************************
+ *
+ * Intel Ethernet Controller XL710 Family Linux Driver
+ * Copyright(c) 2013 - 2014 Intel Corporation.
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms and conditions of the GNU General Public License,
+ * version 2, as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ * more details.
+ *
+ * You should have received a copy of the GNU General Public License along
+ * with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * The full GNU General Public License is included in this distribution in
+ * the file called "COPYING".
+ *
+ * Contact Information:
+ * e1000-devel Mailing List <e1000-devel@lists.sourceforge.net>
+ * Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
+ *
+ ******************************************************************************/
 
 #ifdef CONFIG_I40E_DCB
 #include "i40e.h"
@@ -23,7 +46,7 @@ static void i40e_get_pfc_delay(struct i40e_hw *hw, u16 *delay)
 
 /**
  * i40e_dcbnl_ieee_getets - retrieve local IEEE ETS configuration
- * @dev: the corresponding netdev
+ * @netdev: the corresponding netdev
  * @ets: structure to hold the ETS information
  *
  * Returns local IEEE ETS configuration
@@ -62,8 +85,8 @@ static int i40e_dcbnl_ieee_getets(struct net_device *dev,
 
 /**
  * i40e_dcbnl_ieee_getpfc - retrieve local IEEE PFC configuration
- * @dev: the corresponding netdev
- * @pfc: structure to hold the PFC information
+ * @netdev: the corresponding netdev
+ * @ets: structure to hold the PFC information
  *
  * Returns local IEEE PFC configuration
  **/
@@ -95,7 +118,7 @@ static int i40e_dcbnl_ieee_getpfc(struct net_device *dev,
 
 /**
  * i40e_dcbnl_getdcbx - retrieve current DCBx capability
- * @dev: the corresponding netdev
+ * @netdev: the corresponding netdev
  *
  * Returns DCBx capability features
  **/
@@ -108,8 +131,7 @@ static u8 i40e_dcbnl_getdcbx(struct net_device *dev)
 
 /**
  * i40e_dcbnl_get_perm_hw_addr - MAC address used by DCBx
- * @dev: the corresponding netdev
- * @perm_addr: buffer to store the MAC address
+ * @netdev: the corresponding netdev
  *
  * Returns the SAN MAC address used for LLDP exchange
  **/
@@ -165,7 +187,7 @@ void i40e_dcbnl_set_all(struct i40e_vsi *vsi)
 	/* Set up all the App TLVs if DCBx is negotiated */
 	for (i = 0; i < dcbxcfg->numapps; i++) {
 		prio = dcbxcfg->app[i].priority;
-		tc_map = BIT(dcbxcfg->etscfg.prioritytable[prio]);
+		tc_map = (1 << dcbxcfg->etscfg.prioritytable[prio]);
 
 		/* Add APP only if the TC is enabled for this VSI */
 		if (tc_map & vsi->tc_config.enabled_tc) {
@@ -214,13 +236,14 @@ static void i40e_dcbnl_del_app(struct i40e_pf *pf,
 			       struct i40e_dcb_app_priority_table *app)
 {
 	int v, err;
-
 	for (v = 0; v < pf->num_alloc_vsi; v++) {
 		if (pf->vsi[v] && pf->vsi[v]->netdev) {
 			err = i40e_dcbnl_vsi_del_app(pf->vsi[v], app);
-			dev_dbg(&pf->pdev->dev, "Deleting app for VSI seid=%d err=%d sel=%d proto=0x%x prio=%d\n",
-				pf->vsi[v]->seid, err, app->selector,
-				app->protocolid, app->priority);
+			if (err)
+				dev_info(&pf->pdev->dev, "%s: Failed deleting app for VSI seid=%d err=%d sel=%d proto=0x%x prio=%d\n",
+					 __func__, pf->vsi[v]->seid,
+					 err, app->selector,
+					 app->protocolid, app->priority);
 		}
 	}
 }

@@ -78,8 +78,6 @@ int __init ima_init_crypto(void)
 		       hash_algo_name[ima_hash_algo], rc);
 		return rc;
 	}
-	pr_info("Allocated hash algorithm: %s\n",
-		hash_algo_name[ima_hash_algo]);
 	return 0;
 }
 
@@ -128,7 +126,7 @@ static void *ima_alloc_pages(loff_t max_size, size_t *allocated_size,
 {
 	void *ptr;
 	int order = ima_maxorder;
-	gfp_t gfp_mask = __GFP_RECLAIM | __GFP_NOWARN | __GFP_NORETRY;
+	gfp_t gfp_mask = __GFP_WAIT | __GFP_NOWARN | __GFP_NORETRY;
 
 	if (order)
 		order = min(get_order(max_size), order);

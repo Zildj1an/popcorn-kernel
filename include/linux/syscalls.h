@@ -524,7 +524,7 @@ asmlinkage long sys_chown(const char __user *filename,
 asmlinkage long sys_lchown(const char __user *filename,
 				uid_t user, gid_t group);
 asmlinkage long sys_fchown(unsigned int fd, uid_t user, gid_t group);
-#ifdef CONFIG_HAVE_UID16
+#ifdef CONFIG_UID16
 asmlinkage long sys_chown16(const char __user *filename,
 				old_uid_t user, old_gid_t group);
 asmlinkage long sys_lchown16(const char __user *filename,
@@ -810,7 +810,6 @@ asmlinkage long sys_timerfd_gettime(int ufd, struct itimerspec __user *otmr);
 asmlinkage long sys_eventfd(unsigned int count);
 asmlinkage long sys_eventfd2(unsigned int count, int flags);
 asmlinkage long sys_memfd_create(const char __user *uname_ptr, unsigned int flags);
-asmlinkage long sys_userfaultfd(int flags);
 asmlinkage long sys_fallocate(int fd, int mode, loff_t offset, loff_t len);
 asmlinkage long sys_old_readdir(unsigned int, struct old_linux_dirent __user *, unsigned int);
 asmlinkage long sys_pselect6(int, fd_set __user *, fd_set __user *,
@@ -884,16 +883,5 @@ asmlinkage long sys_bpf(int cmd, union bpf_attr *attr, unsigned int size);
 asmlinkage long sys_execveat(int dfd, const char __user *filename,
 			const char __user *const __user *argv,
 			const char __user *const __user *envp, int flags);
-
-asmlinkage long sys_membarrier(int cmd, int flags);
-
-asmlinkage long sys_mlock2(unsigned long start, size_t len, int flags);
-
-struct popcorn_thread_status;
-struct popcorn_node_info;
-asmlinkage long sys_popcorn_migrate(int nid, void __user *uregs);
-asmlinkage long sys_popcorn_propose_migration(pid_t pid, int nid);
-asmlinkage long sys_popcorn_get_thread_status(struct popcorn_thread_status __user *status);
-asmlinkage long sys_popcorn_get_node_info(int * __user _my_nid, struct popcorn_node_info __user *info);
 
 #endif

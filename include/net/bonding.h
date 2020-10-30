@@ -214,7 +214,6 @@ struct bonding {
 	 * ALB mode (6) - to sync the use and modifications of its hash table
 	 */
 	spinlock_t mode_lock;
-	spinlock_t stats_lock;
 	u8	 send_peer_notif;
 	u8       igmp_retrans;
 #ifdef CONFIG_PROC_FS
@@ -309,13 +308,6 @@ static inline bool bond_mode_uses_primary(int mode)
 static inline bool bond_uses_primary(struct bonding *bond)
 {
 	return bond_mode_uses_primary(BOND_MODE(bond));
-}
-
-static inline struct net_device *bond_option_active_slave_get_rcu(struct bonding *bond)
-{
-	struct slave *slave = rcu_dereference(bond->curr_active_slave);
-
-	return bond_uses_primary(bond) && slave ? slave->dev : NULL;
 }
 
 static inline bool bond_slave_is_up(struct slave *slave)

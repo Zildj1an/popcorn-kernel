@@ -149,8 +149,7 @@ static inline int gred_use_harddrop(struct gred_sched *t)
 	return t->red_flags & TC_RED_HARDDROP;
 }
 
-static int gred_enqueue(struct sk_buff *skb, struct Qdisc *sch,
-			struct sk_buff **to_free)
+static int gred_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 {
 	struct gred_sched_data *q = NULL;
 	struct gred_sched *t = qdisc_priv(sch);
@@ -238,10 +237,10 @@ static int gred_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 
 	q->stats.pdrop++;
 drop:
-	return qdisc_drop(skb, sch, to_free);
+	return qdisc_drop(skb, sch);
 
 congestion_drop:
-	qdisc_drop(skb, sch, to_free);
+	qdisc_drop(skb, sch);
 	return NET_XMIT_CN;
 }
 
@@ -277,6 +276,40 @@ static struct sk_buff *gred_dequeue(struct Qdisc *sch)
 	return NULL;
 }
 
+static unsigned int gred_drop(struct Qdisc *sch)
+{
+	struct sk_buff *skb;
+	struct gred_sched *t = qdisc_priv(sch);
+
+	skb = qdisc_dequeue_tail(sch);
+	if (skb) {
+		unsigned int len = qdisc_pkt_len(skb);
+		struct gred_sched_data *q;
+		u16 dp = tc_index_to_dp(skb);
+
+		if (dp >= t->DPs || (q = t->tab[dp]) == NULL) {
+			net_warn_ratelimited("GRED: Unable to relocate VQ 0x%x while dropping, screwing up backlog\n",
+					     tc_index_to_dp(skb));
+		} else {
+			q->backlog -= len;
+			q->stats.other++;
+
+			if (gred_wred_mode(t)) {
+				if (!sch->qstats.backlog)
+					red_start_of_idle_period(&t->wred_set);
+			} else {
+				if (!q->backlog)
+					red_start_of_idle_period(&q->vars);
+			}
+		}
+
+		qdisc_drop(skb, sch);
+		return len;
+	}
+
+	return 0;
+}
+
 static void gred_reset(struct Qdisc *sch)
 {
 	int i;
@@ -306,13 +339,12 @@ static inline int gred_change_table_def(struct Qdisc *sch, struct nlattr *dps)
 	struct tc_gred_sopt *sopt;
 	int i;
 
-	if (!dps)
+	if (dps == NULL)
 		return -EINVAL;
 
 	sopt = nla_data(dps);
 
-	if (sopt->DPs > MAX_DPs || sopt->DPs == 0 ||
-	    sopt->def_DP >= sopt->DPs)
+	if (sopt->DPs > MAX_DPs || sopt->DPs == 0 || sopt->def_DP >= sopt->DPs)
 		return -EINVAL;
 
 	sch_tree_lock(sch);
@@ -357,9 +389,6 @@ static inline int gred_change_vq(struct Qdisc *sch, int dp,
 	struct gred_sched *table = qdisc_priv(sch);
 	struct gred_sched_data *q = table->tab[dp];
 
-	if (!red_check_params(ctl->qth_min, ctl->qth_max, ctl->Wlog))
-		return -EINVAL;
-
 	if (!q) {
 		table->tab[dp] = q = *prealloc;
 		*prealloc = NULL;
@@ -392,8 +421,7 @@ static const struct nla_policy gred_policy[TCA_GRED_MAX + 1] = {
 	[TCA_GRED_LIMIT]	= { .type = NLA_U32 },
 };
 
-static int gred_change(struct Qdisc *sch, struct nlattr *opt,
-		       struct netlink_ext_ack *extack)
+static int gred_change(struct Qdisc *sch, struct nlattr *opt)
 {
 	struct gred_sched *table = qdisc_priv(sch);
 	struct tc_gred_qopt *ctl;
@@ -406,14 +434,14 @@ static int gred_change(struct Qdisc *sch, struct nlattr *opt,
 	if (opt == NULL)
 		return -EINVAL;
 
-	err = nla_parse_nested(tb, TCA_GRED_MAX, opt, gred_policy, NULL);
+	err = nla_parse_nested(tb, TCA_GRED_MAX, opt, gred_policy);
 	if (err < 0)
 		return err;
 
 	if (tb[TCA_GRED_PARMS] == NULL && tb[TCA_GRED_STAB] == NULL) {
 		if (tb[TCA_GRED_LIMIT] != NULL)
 			sch->limit = nla_get_u32(tb[TCA_GRED_LIMIT]);
-		return gred_change_table_def(sch, tb[TCA_GRED_DPS]);
+		return gred_change_table_def(sch, opt);
 	}
 
 	if (tb[TCA_GRED_PARMS] == NULL ||
@@ -467,16 +495,15 @@ errout:
 	return err;
 }
 
-static int gred_init(struct Qdisc *sch, struct nlattr *opt,
-		     struct netlink_ext_ack *extack)
+static int gred_init(struct Qdisc *sch, struct nlattr *opt)
 {
 	struct nlattr *tb[TCA_GRED_MAX + 1];
 	int err;
 
-	if (!opt)
+	if (opt == NULL)
 		return -EINVAL;
 
-	err = nla_parse_nested(tb, TCA_GRED_MAX, opt, gred_policy, NULL);
+	err = nla_parse_nested(tb, TCA_GRED_MAX, opt, gred_policy);
 	if (err < 0)
 		return err;
 
@@ -485,9 +512,11 @@ static int gred_init(struct Qdisc *sch, struct nlattr *opt,
 
 	if (tb[TCA_GRED_LIMIT])
 		sch->limit = nla_get_u32(tb[TCA_GRED_LIMIT]);
-	else
-		sch->limit = qdisc_dev(sch)->tx_queue_len
-		             * psched_mtu(qdisc_dev(sch));
+	else {
+		u32 qlen = qdisc_dev(sch)->tx_queue_len ? : 1;
+
+		sch->limit = qlen * psched_mtu(qdisc_dev(sch));
+	}
 
 	return gred_change_table_def(sch, tb[TCA_GRED_DPS]);
 }
@@ -596,6 +625,7 @@ static struct Qdisc_ops gred_qdisc_ops __read_mostly = {
 	.enqueue	=	gred_enqueue,
 	.dequeue	=	gred_dequeue,
 	.peek		=	qdisc_peek_head,
+	.drop		=	gred_drop,
 	.init		=	gred_init,
 	.reset		=	gred_reset,
 	.destroy	=	gred_destroy,

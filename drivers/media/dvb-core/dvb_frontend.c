@@ -81,6 +81,7 @@ MODULE_PARM_DESC(dvb_mfe_wait_time, "Wait up to <mfe_wait_time> seconds on open(
 #define FESTATE_SEARCHING_SLOW (FESTATE_TUNING_SLOW | FESTATE_ZIGZAG_SLOW)
 #define FESTATE_LOSTLOCK (FESTATE_ZIGZAG_FAST | FESTATE_ZIGZAG_SLOW)
 
+#define FE_ALGO_HW		1
 /*
  * FESTATE_IDLE. No tuning parameters have been supplied and the loop is idling.
  * FESTATE_RETUNE. Parameters have been supplied, but we have not yet performed the first tune.
@@ -2313,9 +2314,9 @@ static int dvb_frontend_ioctl_legacy(struct file *file,
 		dev_dbg(fe->dvb->device, "%s: current delivery system on cache: %d, V3 type: %d\n",
 				 __func__, c->delivery_system, fe->ops.info.type);
 
-		/* Set CAN_INVERSION_AUTO bit on in other than oneshot mode */
-		if (!(fepriv->tune_mode_flags & FE_TUNE_MODE_ONESHOT))
-			info->caps |= FE_CAN_INVERSION_AUTO;
+		/* Force the CAN_INVERSION_AUTO bit on. If the frontend doesn't
+		 * do it, it is done for it. */
+		info->caps |= FE_CAN_INVERSION_AUTO;
 		err = 0;
 		break;
 	}

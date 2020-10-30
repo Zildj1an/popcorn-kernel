@@ -35,7 +35,6 @@
 #include <linux/utsname.h>
 #include <linux/coredump.h>
 #include <linux/sched.h>
-#include <linux/dax.h>
 #include <asm/uaccess.h>
 #include <asm/param.h>
 #include <asm/page.h>
@@ -488,7 +487,7 @@ static inline int arch_elf_pt_proc(struct elfhdr *ehdr,
 }
 
 /**
- * arch_check_elf() - check an ELF executable
+ * arch_check_elf() - check a PT_LOPROC..PT_HIPROC ELF program header
  * @ehdr:	The main ELF header
  * @has_interp:	True if the ELF has an interpreter, else false.
  * @state:	Architecture-specific state preserved throughout the process
@@ -683,11 +682,6 @@ static int load_elf_binary(struct linux_binprm *bprm)
 		struct elfhdr interp_elf_ex;
 	} *loc;
 	struct arch_elf_state arch_state = INIT_ARCH_ELF_STATE;
-#if 0
-	char *string_table = NULL;
-	long string_table_length = 0;
-	struct elf_shdr *shdr = NULL;
-#endif
 
 	loc = kmalloc(sizeof(*loc), GFP_KERNEL);
 	if (!loc) {
@@ -722,43 +716,6 @@ static int load_elf_binary(struct linux_binprm *bprm)
 	end_code = 0;
 	start_data = 0;
 	end_data = 0;
-
-#if 0
-	/* Ajith- allocate and populate the elf section header */
-	i = loc->elf_ex.e_shnum * sizeof(struct elf_shdr);
-
-	shdr = kmalloc(i, GFP_KERNEL);
-	if (shdr == NULL) {
-		printk("%s:%d - Failed to allocate memory\n", __func__, __LINE__);
-		retval = -ENOMEM;
-		goto out;
-	}
-
-	retval = kernel_read(bprm->file, loc->elf_ex.e_shoff, (char *)shdr, i);
-	if (retval != i) {
-		printk("Error loading section header\n"); //goto exit_read; //TODO
-	}
-
-	/* Ajith - Creating string table for elf sections */
-	if (loc->elf_ex.e_shstrndx < loc->elf_ex.e_shnum) {
-		struct elf_shdr *espnt = shdr + loc->elf_ex.e_shstrndx;
-		i = espnt->sh_size;
-
-		string_table = kmalloc(i, GFP_KERNEL);
-		if(string_table == NULL) {
-			printk("%s:%d - Failed to allocate memory\n", __func__, __LINE__);
-			kfree(shdr);
-			retval = -ENOMEM;
-			goto out;
-		}
-
-		retval = kernel_read(bprm->file, espnt->sh_offset, string_table, i);
-		if (retval != i) {
-			printk("Error loading string table\n");//goto exit_read;//TODO
-		}    
-		string_table_length = string_table != NULL ? i : 0;
-	}
-#endif
 
 	for (i = 0; i < loc->elf_ex.e_phnum; i++) {
 		if (elf_ppnt->p_type == PT_INTERP) {
@@ -802,16 +759,16 @@ static int load_elf_binary(struct linux_binprm *bprm)
 			 */
 			would_dump(bprm, interpreter);
 
-			/* Get the exec headers */
-			retval = kernel_read(interpreter, 0,
-					     (void *)&loc->interp_elf_ex,
-					     sizeof(loc->interp_elf_ex));
-			if (retval != sizeof(loc->interp_elf_ex)) {
+			retval = kernel_read(interpreter, 0, bprm->buf,
+					     BINPRM_BUF_SIZE);
+			if (retval != BINPRM_BUF_SIZE) {
 				if (retval >= 0)
 					retval = -EIO;
 				goto out_free_dentry;
 			}
 
+			/* Get the exec headers */
+			loc->interp_elf_ex = *((struct elfhdr *)bprm->buf);
 			break;
 		}
 		elf_ppnt++;
@@ -907,9 +864,6 @@ static int load_elf_binary(struct linux_binprm *bprm)
 		int elf_prot = 0, elf_flags;
 		unsigned long k, vaddr;
 		unsigned long total_size = 0;
-#if 0
-		int j;
-#endif
 
 		if (elf_ppnt->p_type != PT_LOAD)
 			continue;
@@ -950,60 +904,17 @@ static int load_elf_binary(struct linux_binprm *bprm)
 		elf_flags = MAP_PRIVATE | MAP_DENYWRITE | MAP_EXECUTABLE;
 
 		vaddr = elf_ppnt->p_vaddr;
-		/*
-		 * If we are loading ET_EXEC or we have already performed
-		 * the ET_DYN load_addr calculations, proceed normally.
-		 */
 		if (loc->elf_ex.e_type == ET_EXEC || load_addr_set) {
 			elf_flags |= MAP_FIXED;
 		} else if (loc->elf_ex.e_type == ET_DYN) {
-			/*
-			 * This logic is run once for the first LOAD Program
-			 * Header for ET_DYN binaries to calculate the
-			 * randomization (load_bias) for all the LOAD
-			 * Program Headers, and to calculate the entire
-			 * size of the ELF mapping (total_size). (Note that
-			 * load_addr_set is set to true later once the
-			 * initial mapping is performed.)
-			 *
-			 * There are effectively two types of ET_DYN
-			 * binaries: programs (i.e. PIE: ET_DYN with INTERP)
-			 * and loaders (ET_DYN without INTERP, since they
-			 * _are_ the ELF interpreter). The loaders must
-			 * be loaded away from programs since the program
-			 * may otherwise collide with the loader (especially
-			 * for ET_EXEC which does not have a randomized
-			 * position). For example to handle invocations of
-			 * "./ld.so someprog" to test out a new version of
-			 * the loader, the subsequent program that the
-			 * loader loads must avoid the loader itself, so
-			 * they cannot share the same load range. Sufficient
-			 * room for the brk must be allocated with the
-			 * loader as well, since brk must be available with
-			 * the loader.
-			 *
-			 * Therefore, programs are loaded offset from
-			 * ELF_ET_DYN_BASE and loaders are loaded into the
-			 * independently randomized mmap region (0 load_bias
-			 * without MAP_FIXED).
-			 */
-			if (elf_interpreter) {
-				load_bias = ELF_ET_DYN_BASE;
-				if (current->flags & PF_RANDOMIZE)
-					load_bias += arch_mmap_rnd();
-				elf_flags |= MAP_FIXED;
-			} else
-				load_bias = 0;
-
-			/*
-			 * Since load_bias is used for all subsequent loading
-			 * calculations, we must lower it by the first vaddr
-			 * so that the remaining calculations based on the
-			 * ELF vaddrs will be correctly offset. The result
-			 * is then page aligned.
-			 */
-			load_bias = ELF_PAGESTART(load_bias - vaddr);
-
+			/* Try and get dynamic programs out of the way of the
+			 * default mmap base, as well as whatever program they
+			 * might try to exec.  This is because the brk will
+			 * follow the loader, and is not movable.  */
+			load_bias = ELF_ET_DYN_BASE - vaddr;
+			if (current->flags & PF_RANDOMIZE)
+				load_bias += arch_mmap_rnd();
+			load_bias = ELF_PAGESTART(load_bias);
 			total_size = total_mapping_size(elf_phdata,
 							loc->elf_ex.e_phnum);
 			if (!total_size) {
@@ -1019,42 +930,6 @@ static int load_elf_binary(struct linux_binprm *bprm)
 				PTR_ERR((void*)error) : -EINVAL;
 			goto out_free_dentry;
 		}
-
-#if 0
-		/* Ajith - Read the elf sections */
-
-		for (j = 1; j < loc->elf_ex.e_shnum; j++) {
-			struct elf_shdr *espnt = shdr + j;
-			struct vm_area_struct *vma;
-			if (espnt->sh_size <= 0)
-				continue;
-
-			for (vma = current->mm->mmap; vma != NULL; vma = vma->vm_next) {
-				/* Compare allocated sections by VMA, unallocated
-				 * sections by file offset.
-				 */
-			   if ((espnt->sh_flags & SHF_ALLOC) == 0)
-				   continue;
-
-				if (espnt->sh_addr < vma->vm_start ||
-						espnt->sh_addr + espnt->sh_size > vma->vm_end)
-					continue;
-				 /*
-				 printk ("In %s:%d: [%s %d 0x%lx:0x%lx]\n",
-					 __func__, __LINE__,
-					 string_table ? & string_table[espnt->sh_name]
-								  : "?", espnt->sh_type,
-					 (unsigned long)espnt->sh_addr,
-					 (unsigned long)espnt->sh_addr + espnt->sh_size);
-				 */
-
-				 if(!strcmp(".text", &string_table[espnt->sh_name]) || 
-					!strcmp(".got", &string_table[espnt->sh_name]) ||
-					!strcmp(".got.plt", &string_table[espnt->sh_name]))
-						vma->vm_flags |= VM_FETCH_LOCAL;
-			}
-		}
-#endif
 
 		if (!load_addr_set) {
 			load_addr_set = 1;
@@ -1087,6 +962,9 @@ static int load_elf_binary(struct linux_binprm *bprm)
 
 		k = elf_ppnt->p_vaddr + elf_ppnt->p_filesz;
 
+		if (k >= STACK_TOP)
+			continue;
+
 		if (k > elf_bss)
 			elf_bss = k;
 		if ((elf_ppnt->p_flags & PF_X) && end_code < k)
@@ -1105,15 +983,6 @@ static int load_elf_binary(struct linux_binprm *bprm)
 	end_code += load_bias;
 	start_data += load_bias;
 	end_data += load_bias;
-
-#if 0
-	/*Freeup allocated memory*/
-	if(shdr != NULL)
-		kfree(shdr);
-
-	if(string_table != NULL)
-		kfree(string_table);
-#endif
 
 	/* Calling set_brk effectively mmaps the pages that we need
 	 * for the bss and break sections.  We must do this before
@@ -1369,15 +1238,6 @@ static unsigned long vma_dump_size(struct vm_area_struct *vma,
 
 	if (vma->vm_flags & VM_DONTDUMP)
 		return 0;
-
-	/* support for DAX */
-	if (vma_is_dax(vma)) {
-		if ((vma->vm_flags & VM_SHARED) && FILTER(DAX_SHARED))
-			goto whole;
-		if (!(vma->vm_flags & VM_SHARED) && FILTER(DAX_PRIVATE))
-			goto whole;
-		return 0;
-	}
 
 	/* Hugetlb memory check */
 	if (vma->vm_flags & VM_HUGETLB) {
@@ -2428,7 +2288,6 @@ static int elf_core_dump(struct coredump_params *cprm)
 				goto end_coredump;
 		}
 	}
-	dump_truncate(cprm);
 
 	if (!elf_core_write_extra_data(cprm))
 		goto end_coredump;

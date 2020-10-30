@@ -141,22 +141,23 @@ static int valid_ecryptfs_desc(const char *ecryptfs_desc)
  */
 static int valid_master_desc(const char *new_desc, const char *orig_desc)
 {
-	int prefix_len;
-
-	if (!strncmp(new_desc, KEY_TRUSTED_PREFIX, KEY_TRUSTED_PREFIX_LEN))
-		prefix_len = KEY_TRUSTED_PREFIX_LEN;
-	else if (!strncmp(new_desc, KEY_USER_PREFIX, KEY_USER_PREFIX_LEN))
-		prefix_len = KEY_USER_PREFIX_LEN;
-	else
-		return -EINVAL;
-
-	if (!new_desc[prefix_len])
-		return -EINVAL;
-
-	if (orig_desc && strncmp(new_desc, orig_desc, prefix_len))
-		return -EINVAL;
-
+	if (!memcmp(new_desc, KEY_TRUSTED_PREFIX, KEY_TRUSTED_PREFIX_LEN)) {
+		if (strlen(new_desc) == KEY_TRUSTED_PREFIX_LEN)
+			goto out;
+		if (orig_desc)
+			if (memcmp(new_desc, orig_desc, KEY_TRUSTED_PREFIX_LEN))
+				goto out;
+	} else if (!memcmp(new_desc, KEY_USER_PREFIX, KEY_USER_PREFIX_LEN)) {
+		if (strlen(new_desc) == KEY_USER_PREFIX_LEN)
+			goto out;
+		if (orig_desc)
+			if (memcmp(new_desc, orig_desc, KEY_USER_PREFIX_LEN))
+				goto out;
+	} else
+		goto out;
 	return 0;
+out:
+	return -EINVAL;
 }
 
 /*
@@ -302,10 +303,10 @@ out:
  *
  * Use a user provided key to encrypt/decrypt an encrypted-key.
  */
-static struct key *request_user_key(const char *master_desc, const u8 **master_key,
+static struct key *request_user_key(const char *master_desc, u8 **master_key,
 				    size_t *master_keylen)
 {
-	const struct user_key_payload *upayload;
+	struct user_key_payload *upayload;
 	struct key *ukey;
 
 	ukey = request_key(&key_type_user, master_desc, NULL);
@@ -313,14 +314,7 @@ static struct key *request_user_key(const char *master_desc, const u8 **master_k
 		goto error;
 
 	down_read(&ukey->sem);
-	upayload = user_key_payload(ukey);
-	if (!upayload) {
-		/* key was revoked before we acquired its semaphore */
-		up_read(&ukey->sem);
-		key_put(ukey);
-		ukey = ERR_PTR(-EKEYREVOKED);
-		goto error;
-	}
+	upayload = ukey->payload.data;
 	*master_key = upayload->data;
 	*master_keylen = upayload->datalen;
 error:
@@ -432,9 +426,9 @@ static int init_blkcipher_desc(struct blkcipher_desc *desc, const u8 *key,
 }
 
 static struct key *request_master_key(struct encrypted_key_payload *epayload,
-				      const u8 **master_key, size_t *master_keylen)
+				      u8 **master_key, size_t *master_keylen)
 {
-	struct key *mkey = ERR_PTR(-EINVAL);
+	struct key *mkey = NULL;
 
 	if (!strncmp(epayload->master_desc, KEY_TRUSTED_PREFIX,
 		     KEY_TRUSTED_PREFIX_LEN)) {
@@ -659,7 +653,7 @@ static int encrypted_key_decrypt(struct encrypted_key_payload *epayload,
 {
 	struct key *mkey;
 	u8 derived_key[HASH_SIZE];
-	const u8 *master_key;
+	u8 *master_key;
 	u8 *hmac;
 	const char *hex_encoded_data;
 	unsigned int encrypted_datalen;
@@ -843,7 +837,7 @@ static void encrypted_rcu_free(struct rcu_head *rcu)
  */
 static int encrypted_update(struct key *key, struct key_preparsed_payload *prep)
 {
-	struct encrypted_key_payload *epayload = key->payload.data[0];
+	struct encrypted_key_payload *epayload = key->payload.data;
 	struct encrypted_key_payload *new_epayload;
 	char *buf;
 	char *new_master_desc = NULL;
@@ -851,8 +845,6 @@ static int encrypted_update(struct key *key, struct key_preparsed_payload *prep)
 	size_t datalen = prep->datalen;
 	int ret = 0;
 
-	if (key_is_negative(key))
-		return -ENOKEY;
 	if (datalen <= 0 || datalen > 32767 || !prep->data)
 		return -EINVAL;
 
@@ -904,7 +896,7 @@ static long encrypted_read(const struct key *key, char __user *buffer,
 {
 	struct encrypted_key_payload *epayload;
 	struct key *mkey;
-	const u8 *master_key;
+	u8 *master_key;
 	size_t master_keylen;
 	char derived_key[HASH_SIZE];
 	char *ascii_buf;
@@ -965,13 +957,13 @@ out:
  */
 static void encrypted_destroy(struct key *key)
 {
-	struct encrypted_key_payload *epayload = key->payload.data[0];
+	struct encrypted_key_payload *epayload = key->payload.data;
 
 	if (!epayload)
 		return;
 
 	memset(epayload->decrypted_data, 0, epayload->decrypted_datalen);
-	kfree(key->payload.data[0]);
+	kfree(key->payload.data);
 }
 
 struct key_type key_type_encrypted = {

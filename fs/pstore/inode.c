@@ -287,7 +287,7 @@ static const struct super_operations pstore_ops = {
 
 static struct super_block *pstore_sb;
 
-bool pstore_is_mounted(void)
+int pstore_is_mounted(void)
 {
 	return pstore_sb != NULL;
 }
@@ -456,7 +456,6 @@ static void pstore_kill_sb(struct super_block *sb)
 }
 
 static struct file_system_type pstore_fs_type = {
-	.owner          = THIS_MODULE,
 	.name		= "pstore",
 	.mount		= pstore_mount,
 	.kill_sb	= pstore_kill_sb,
@@ -479,13 +478,6 @@ out:
 	return err;
 }
 module_init(init_pstore_fs)
-
-static void __exit exit_pstore_fs(void)
-{
-	unregister_filesystem(&pstore_fs_type);
-	sysfs_remove_mount_point(fs_kobj, "pstore");
-}
-module_exit(exit_pstore_fs)
 
 MODULE_AUTHOR("Tony Luck <tony.luck@intel.com>");
 MODULE_LICENSE("GPL");

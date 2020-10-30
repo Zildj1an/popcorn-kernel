@@ -448,6 +448,7 @@ int mtrr_add(unsigned long base, unsigned long size, unsigned int type,
 	return mtrr_add_page(base >> PAGE_SHIFT, size >> PAGE_SHIFT, type,
 			     increment);
 }
+EXPORT_SYMBOL(mtrr_add);
 
 /**
  * mtrr_del_page - delete a memory type region
@@ -536,6 +537,7 @@ int mtrr_del(int reg, unsigned long base, unsigned long size)
 		return -EINVAL;
 	return mtrr_del_page(reg, base >> PAGE_SHIFT, size >> PAGE_SHIFT);
 }
+EXPORT_SYMBOL(mtrr_del);
 
 /**
  * arch_phys_wc_add - add a WC MTRR and handle errors if PAT is unavailable
@@ -752,9 +754,6 @@ void __init mtrr_bp_init(void)
 			/* BIOS may override */
 			__mtrr_enabled = get_mtrr_state();
 
-			if (mtrr_enabled())
-				mtrr_bp_pat_init();
-
 			if (mtrr_cleanup(phys_addr)) {
 				changed_by_mtrr_cleanup = 1;
 				mtrr_if->set_all();
@@ -762,16 +761,8 @@ void __init mtrr_bp_init(void)
 		}
 	}
 
-	if (!mtrr_enabled()) {
+	if (!mtrr_enabled())
 		pr_info("MTRR: Disabled\n");
-
-		/*
-		 * PAT initialization relies on MTRR's rendezvous handler.
-		 * Skip PAT init until the handler can initialize both
-		 * features independently.
-		 */
-		pat_disable("MTRRs disabled, skipping PAT initialization too.");
-	}
 }
 
 void mtrr_ap_init(void)

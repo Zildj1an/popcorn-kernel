@@ -106,21 +106,10 @@ static struct irq_chip arcv2_irq_chip = {
 static int arcv2_irq_map(struct irq_domain *d, unsigned int irq,
 			 irq_hw_number_t hw)
 {
-	/*
-	 * core intc IRQs [16, 23]:
-	 * Statically assigned always private-per-core (Timers, WDT, IPI, PCT)
-	 */
-	if (hw < 24) {
-		/*
-		 * A subsequent request_percpu_irq() fails if percpu_devid is
-		 * not set. That in turns sets NOAUTOEN, meaning each core needs
-		 * to call enable_percpu_irq()
-		 */
-		irq_set_percpu_devid(irq);
+	if (irq == TIMER0_IRQ || irq == IPI_IRQ)
 		irq_set_chip_and_handler(irq, &arcv2_irq_chip, handle_percpu_irq);
-	} else {
+	else
 		irq_set_chip_and_handler(irq, &arcv2_irq_chip, handle_level_irq);
-	}
 
 	return 0;
 }

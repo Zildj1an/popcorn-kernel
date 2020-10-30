@@ -279,7 +279,7 @@ static int dlfb_set_video_mode(struct dlfb_data *dev,
 {
 	char *buf;
 	char *wrptr;
-	int retval;
+	int retval = 0;
 	int writesize;
 	struct urb *urb;
 
@@ -769,11 +769,11 @@ static int dlfb_get_edid(struct dlfb_data *dev, char *edid, int len)
 
 	for (i = 0; i < len; i++) {
 		ret = usb_control_msg(dev->udev,
-				      usb_rcvctrlpipe(dev->udev, 0), 0x02,
-				      (0x80 | (0x02 << 5)), i << 8, 0xA1,
-				      rbuf, 2, USB_CTRL_GET_TIMEOUT);
-		if (ret < 2) {
-			pr_err("Read EDID byte %d failed: %d\n", i, ret);
+				    usb_rcvctrlpipe(dev->udev, 0), (0x02),
+				    (0x80 | (0x02 << 5)), i << 8, 0xA1, rbuf, 2,
+				    HZ);
+		if (ret < 1) {
+			pr_err("Read EDID byte %d failed err %x\n", i, ret);
 			i--;
 			break;
 		}
@@ -1487,25 +1487,15 @@ static struct device_attribute fb_device_attrs[] = {
 static int dlfb_select_std_channel(struct dlfb_data *dev)
 {
 	int ret;
-	void *buf;
-	static const u8 set_def_chn[] = {
-				0x57, 0xCD, 0xDC, 0xA7,
+	u8 set_def_chn[] = {	   0x57, 0xCD, 0xDC, 0xA7,
 				0x1C, 0x88, 0x5E, 0x15,
 				0x60, 0xFE, 0xC6, 0x97,
 				0x16, 0x3D, 0x47, 0xF2  };
 
-	buf = kmemdup(set_def_chn, sizeof(set_def_chn), GFP_KERNEL);
-
-	if (!buf)
-		return -ENOMEM;
-
 	ret = usb_control_msg(dev->udev, usb_sndctrlpipe(dev->udev, 0),
 			NR_USB_REQUEST_CHANNEL,
 			(USB_DIR_OUT | USB_TYPE_VENDOR), 0, 0,
-			buf, sizeof(set_def_chn), USB_CTRL_SET_TIMEOUT);
-
-	kfree(buf);
-
+			set_def_chn, sizeof(set_def_chn), USB_CTRL_SET_TIMEOUT);
 	return ret;
 }
 
@@ -1515,7 +1505,8 @@ static int dlfb_parse_vendor_descriptor(struct dlfb_data *dev,
 	char *desc;
 	char *buf;
 	char *desc_end;
-	int total_len;
+
+	int total_len = 0;
 
 	buf = kzalloc(MAX_VENDOR_DESCRIPTOR_SIZE, GFP_KERNEL);
 	if (!buf)
@@ -1591,7 +1582,7 @@ static int dlfb_usb_probe(struct usb_interface *interface,
 			const struct usb_device_id *id)
 {
 	struct usb_device *usbdev;
-	struct dlfb_data *dev;
+	struct dlfb_data *dev = NULL;
 	int retval = -ENOMEM;
 
 	/* usb initialization */
@@ -1674,6 +1665,7 @@ static void dlfb_init_framebuffer_work(struct work_struct *work)
 	/* allocates framebuffer driver structure, not framebuffer memory */
 	info = framebuffer_alloc(0, dev->gdev);
 	if (!info) {
+		retval = -ENOMEM;
 		pr_err("framebuffer_alloc failed\n");
 		goto error;
 	}
@@ -1920,7 +1912,7 @@ static int dlfb_alloc_urb_list(struct dlfb_data *dev, int count, size_t size)
 
 static struct urb *dlfb_get_urb(struct dlfb_data *dev)
 {
-	int ret;
+	int ret = 0;
 	struct list_head *entry;
 	struct urb_node *unode;
 	struct urb *urb = NULL;

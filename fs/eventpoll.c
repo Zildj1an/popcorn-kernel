@@ -43,10 +43,6 @@
 #include <linux/compat.h>
 #include <linux/rculist.h>
 
-#ifdef CONFIG_POPCORN
-#include <popcorn/syscall_server.h>
-#include <popcorn/types.h>
-#endif
 /*
  * LOCKING:
  * There are three level of locking required by epoll :
@@ -522,13 +518,8 @@ static void ep_remove_wait_queue(struct eppoll_entry *pwq)
 	wait_queue_head_t *whead;
 
 	rcu_read_lock();
-	/*
-	 * If it is cleared by POLLFREE, it should be rcu-safe.
-	 * If we read NULL we need a barrier paired with
-	 * smp_store_release() in ep_poll_callback(), otherwise
-	 * we rely on whead->lock.
-	 */
-	whead = smp_load_acquire(&pwq->whead);
+	/* If it is cleared by POLLFREE, it should be rcu-safe */
+	whead = rcu_dereference(pwq->whead);
 	if (whead)
 		remove_wait_queue(whead, &pwq->wait);
 	rcu_read_unlock();
@@ -1012,6 +1003,17 @@ static int ep_poll_callback(wait_queue_t *wait, unsigned mode, int sync, void *k
 	struct epitem *epi = ep_item_from_wait(wait);
 	struct eventpoll *ep = epi->ep;
 
+	if ((unsigned long)key & POLLFREE) {
+		ep_pwq_from_wait(wait)->whead = NULL;
+		/*
+		 * whead = NULL above can race with ep_remove_wait_queue()
+		 * which can do another remove_wait_queue() after us, so we
+		 * can't use __remove_wait_queue(). whead->lock is held by
+		 * the caller.
+		 */
+		list_del_init(&wait->task_list);
+	}
+
 	spin_lock_irqsave(&ep->lock, flags);
 
 	/*
@@ -1075,23 +1077,6 @@ out_unlock:
 	/* We have to call this outside the lock */
 	if (pwake)
 		ep_poll_safewake(&ep->poll_wait);
-
-
-	if ((unsigned long)key & POLLFREE) {
-		/*
-		 * If we race with ep_remove_wait_queue() it can miss
-		 * ->whead = NULL and do another remove_wait_queue() after
-		 * us, so we can't use __remove_wait_queue().
-		 */
-		list_del_init(&wait->task_list);
-		/*
-		 * ->whead != NULL protects us from the race with ep_free()
-		 * or ep_remove(), ep_remove_wait_queue() takes whead->lock
-		 * held by the caller. Once we nullify it, nothing protects
-		 * ep/epi or even wait.
-		 */
-		smp_store_release(&ep_pwq_from_wait(wait)->whead, NULL);
-	}
 
 	return 1;
 }
@@ -1782,13 +1767,6 @@ SYSCALL_DEFINE1(epoll_create1, int, flags)
 	struct eventpoll *ep = NULL;
 	struct file *file;
 
-#ifdef CONFIG_POPCORN
-	if (distributed_remote_process(current)) {
-		error = redirect_epoll_create1(flags);
-		SSPRINTK("remote epoll_create ret: %d\n", error);
-		return error;
-	}
-#endif
 	/* Check the EPOLL_* constant for consistency.  */
 	BUILD_BUG_ON(EPOLL_CLOEXEC != O_CLOEXEC);
 
@@ -1850,13 +1828,6 @@ SYSCALL_DEFINE4(epoll_ctl, int, epfd, int, op, int, fd,
 	struct epoll_event epds;
 	struct eventpoll *tep = NULL;
 
-#ifdef CONFIG_POPCORN
-	if (distributed_remote_process(current)) {
-		error = redirect_epoll_ctl(epfd, op, fd, event);
-		SSPRINTK("remote epoll_ctl ret: %d\n", error);
-		return error;
-	}
-#endif
 	error = -EFAULT;
 	if (ep_op_has_event(op) &&
 	    copy_from_user(&epds, event, sizeof(struct epoll_event)))
@@ -1994,13 +1965,6 @@ SYSCALL_DEFINE4(epoll_wait, int, epfd, struct epoll_event __user *, events,
 	struct fd f;
 	struct eventpoll *ep;
 
-#ifdef CONFIG_POPCORN
-	if (distributed_remote_process(current)) {
-		error = redirect_epoll_wait(epfd, events, maxevents, timeout);
-		SSPRINTK("remote epoll_wait ret: %d\n", error);
-		return error;
-	}
-#endif
 	/* The maximum number of event must be greater than zero */
 	if (maxevents <= 0 || maxevents > EP_MAX_EVENTS)
 		return -EINVAL;
@@ -2047,14 +2011,6 @@ SYSCALL_DEFINE6(epoll_pwait, int, epfd, struct epoll_event __user *, events,
 	int error;
 	sigset_t ksigmask, sigsaved;
 
-#ifdef CONFIG_POPCORN
-	if (distributed_remote_process(current)) {
-		error = redirect_epoll_pwait(epfd, events, maxevents, timeout,
-					     sigmask, sigsetsize);
-		SSPRINTK("remote epoll_pwait ret: %d\n", error);
-		return error;
-	}
-#endif
 	/*
 	 * If the caller wants a certain signal mask to be set during the wait,
 	 * we apply it here.

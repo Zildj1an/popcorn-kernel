@@ -86,9 +86,9 @@ struct nfs_direct_req {
 	struct nfs_direct_mirror mirrors[NFS_PAGEIO_DESCRIPTOR_MIRROR_MAX];
 	int			mirror_count;
 
-	loff_t			io_start;	/* Start offset for I/O */
 	ssize_t			count,		/* bytes actually processed */
 				bytes_left,	/* bytes left to be sent */
+				io_start,	/* start of IO */
 				error;		/* any reported error */
 	struct completion	completion;	/* wait for i/o completion */
 
@@ -166,11 +166,8 @@ nfs_direct_select_verf(struct nfs_direct_req *dreq,
 	struct nfs_writeverf *verfp = &dreq->verf;
 
 #ifdef CONFIG_NFS_V4_1
-	/*
-	 * pNFS is in use, use the DS verf except commit_through_mds is set
-	 * for layout segment where nbuckets is zero.
-	 */
-	if (ds_clp && dreq->ds_cinfo.nbuckets > 0) {
+	if (ds_clp) {
+		/* pNFS is in use, use the DS verf */
 		if (commit_idx >= 0 && commit_idx < dreq->ds_cinfo.nbuckets)
 			verfp = &dreq->ds_cinfo.buckets[commit_idx].direct_verf;
 		else
@@ -787,8 +784,10 @@ static void nfs_direct_write_completion(struct nfs_pgio_header *hdr)
 
 	spin_lock(&dreq->lock);
 
-	if (test_bit(NFS_IOHDR_ERROR, &hdr->flags))
+	if (test_bit(NFS_IOHDR_ERROR, &hdr->flags)) {
+		dreq->flags = 0;
 		dreq->error = hdr->error;
+	}
 	if (dreq->error == 0) {
 		nfs_direct_good_bytes(dreq, hdr);
 		if (nfs_write_need_commit(hdr)) {

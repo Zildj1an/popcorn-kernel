@@ -140,8 +140,6 @@ static int pci_bus_alloc_from_region(struct pci_bus *bus, struct resource *res,
 	type_mask |= IORESOURCE_TYPE_BITS;
 
 	pci_bus_for_each_resource(bus, r, i) {
-		resource_size_t min_used = min;
-
 		if (!r)
 			continue;
 
@@ -165,12 +163,12 @@ static int pci_bus_alloc_from_region(struct pci_bus *bus, struct resource *res,
 		 * overrides "min".
 		 */
 		if (avail.start)
-			min_used = avail.start;
+			min = avail.start;
 
 		max = avail.end;
 
 		/* Ok, try it out.. */
-		ret = allocate_resource(r, res, size, min_used, max,
+		ret = allocate_resource(r, res, size, min, max,
 					align, alignf, alignf_data);
 		if (ret == 0)
 			return 0;
@@ -258,8 +256,6 @@ bool pci_bus_clip_resource(struct pci_dev *dev, int idx)
 
 		res->start = start;
 		res->end = end;
-		res->flags &= ~IORESOURCE_UNSET;
-		orig_res.flags &= ~IORESOURCE_UNSET;
 		dev_printk(KERN_DEBUG, &dev->dev, "%pR clipped to %pR\n",
 				 &orig_res, res);
 

@@ -14,6 +14,53 @@
 #include <asm/barrier.h>
 #include <asm/smp.h>
 
+#ifdef CONFIG_ARC_PLAT_EZNPS
+static inline unsigned long
+__cmpxchg(volatile void *ptr, unsigned long expected, unsigned long new)
+{
+	write_aux_reg(CTOP_AUX_GPA1, expected);
+
+	__asm__ __volatile__(
+	"	mov r2, %0\n"
+	"	mov r3, %1\n"
+	"	.word %2\n"
+	"	mov %0, r2"
+	: "+r"(new)
+	: "r"(ptr), "i"(CTOP_INST_EXC_DI_R2_R2_R3)
+	: "r2", "r3", "memory");
+
+	return new;
+}
+
+#define cmpxchg(ptr, o, n) ((typeof(*(ptr)))__cmpxchg((ptr), \
+				(unsigned long)(o), (unsigned long)(n)))
+#define atomic_cmpxchg(v, o, n) ((int)cmpxchg(&((v)->counter), (o), (n)))
+
+static inline unsigned long __xchg(unsigned long val, volatile void *ptr,
+				   int size)
+{
+	extern unsigned long __xchg_bad_pointer(void);
+
+	switch (size) {
+	case 4:
+		__asm__ __volatile__(
+		"	mov r2, %0\n"
+		"	mov r3, %1\n"
+		"	.word %2\n"
+		"	mov %0, r2\n"
+		: "+r"(val)
+		: "r"(ptr), "i"(CTOP_INST_XEX_DI_R2_R2_R3)
+		: "r2", "r3", "memory");
+
+		return val;
+	}
+	return __xchg_bad_pointer();
+}
+
+#define xchg(ptr, with) ((typeof(*(ptr)))__xchg((unsigned long)(with), (ptr), \
+						 sizeof(*(ptr))))
+#define atomic_xchg(v, new) (xchg(&((v)->counter), new))
+#else /* CONFIG_ARC_PLAT_EZNPS */
 #ifdef CONFIG_ARC_HAS_LLSC
 
 static inline unsigned long
@@ -110,18 +157,18 @@ static inline unsigned long __xchg(unsigned long val, volatile void *ptr,
 						 sizeof(*(ptr))))
 
 /*
- * xchg() maps directly to ARC EX instruction which guarantees atomicity.
- * However in !LLSC config, it also needs to be use @atomic_ops_lock spinlock
- * due to a subtle reason:
- *  - For !LLSC, cmpxchg() needs to use that lock (see above) and there is lot
- *    of  kernel code which calls xchg()/cmpxchg() on same data (see llist.h)
- *    Hence xchg() needs to follow same locking rules.
+ * On ARC700, EX insn is inherently atomic, so by default "vanilla" xchg() need
+ * not require any locking. However there's a quirk.
+ * ARC lacks native CMPXCHG, thus emulated (see above), using external locking -
+ * incidently it "reuses" the same atomic_ops_lock used by atomic APIs.
+ * Now, llist code uses cmpxchg() and xchg() on same data, so xchg() needs to
+ * abide by same serializing rules, thus ends up using atomic_ops_lock as well.
  *
- * Technically the lock is also needed for UP (boils down to irq save/restore)
- * but we can cheat a bit since cmpxchg() atomic_ops_lock() would cause irqs to
- * be disabled thus can't possibly be interrpted/preempted/clobbered by xchg()
- * Other way around, xchg is one instruction anyways, so can't be interrupted
- * as such
+ * This however is only relevant if SMP and/or ARC lacks LLSC
+ *   if (UP or LLSC)
+ *      xchg doesn't need serialization
+ *   else <==> !(UP or LLSC) <==> (!UP and !LLSC) <==> (SMP and !LLSC)
+ *      xchg needs serialization
  */
 
 #if !defined(CONFIG_ARC_HAS_LLSC) && defined(CONFIG_SMP)
@@ -157,5 +204,13 @@ static inline unsigned long __xchg(unsigned long val, volatile void *ptr,
  *         atomic_xchg is involved.
  */
 #define atomic_xchg(v, new) (xchg(&((v)->counter), new))
+
+#endif /* CONFIG_ARC_PLAT_EZNPS */
+
+#ifdef CONFIG_HAVE_VIRT_CPU_ACCOUNTING_GEN
+#include <asm-generic/cmpxchg-local.h>
+#define cmpxchg64_local(ptr, o, n) __cmpxchg64_local_generic((ptr), (o), (n))
+#define cmpxchg64(ptr, o, n)    cmpxchg64_local((ptr), (o), (n))
+#endif /* HAVE_VIRT_CPU_ACCOUNTING_GEN */
 
 #endif

@@ -44,6 +44,8 @@ void die(const char *str, struct pt_regs *regs, unsigned long address)
 static noinline int
 unhandled_exception(const char *str, struct pt_regs *regs, siginfo_t *info)
 {
+	int ret = 1;
+
 	if (user_mode(regs)) {
 		struct task_struct *tsk = current;
 
@@ -54,12 +56,12 @@ unhandled_exception(const char *str, struct pt_regs *regs, siginfo_t *info)
 	} else {
 		/* If not due to copy_(to|from)_user, we are doomed */
 		if (fixup_exception(regs))
-			return 0;
-
-		die(str, regs, (unsigned long)info->si_addr);
+			ret = 0;
+		else
+			die(str, regs, (unsigned long)info->si_addr);
 	}
 
-	return 1;
+	return ret;
 }
 
 #define DO_ERROR_INFO(signr, str, name, sicode) \

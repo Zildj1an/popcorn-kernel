@@ -33,10 +33,6 @@
 #include <linux/memblock.h>
 #include <linux/edd.h>
 
-#ifdef CONFIG_KEXEC_CORE
-#include <linux/kexec.h>
-#endif
-
 #include <xen/xen.h>
 #include <xen/events.h>
 #include <xen/interface/xen.h>
@@ -74,7 +70,7 @@
 #include <asm/mach_traps.h>
 #include <asm/mwait.h>
 #include <asm/pci_x86.h>
-#include <asm/cpu.h>
+#include <asm/pat.h>
 
 #ifdef CONFIG_ACPI
 #include <linux/acpi.h>
@@ -88,7 +84,6 @@
 #include "mmu.h"
 #include "smp.h"
 #include "multicalls.h"
-#include "pmu.h"
 
 EXPORT_SYMBOL_GPL(hypercall_page);
 
@@ -432,12 +427,6 @@ static void __init xen_init_cpuid_mask(void)
 	cpuid_leaf1_edx_mask =
 		~((1 << X86_FEATURE_MTRR) |  /* disable MTRR */
 		  (1 << X86_FEATURE_ACC));   /* thermal monitoring */
-
-	/*
-	 * Xen PV would need some work to support PCID: CR3 handling as well
-	 * as xen_flush_tlb_others() would need updating.
-	 */
-	cpuid_leaf1_ecx_mask &= ~(1 << (X86_FEATURE_PCID % 32));  /* disable PCID */
 
 	if (!xen_initial_domain())
 		cpuid_leaf1_edx_mask &=
@@ -966,7 +955,7 @@ static void xen_load_sp0(struct tss_struct *tss,
 	tss->x86_tss.sp0 = thread->sp0;
 }
 
-void xen_set_iopl_mask(unsigned mask)
+static void xen_set_iopl_mask(unsigned mask)
 {
 	struct physdev_set_iopl set_iopl;
 
@@ -1021,7 +1010,8 @@ static void xen_write_cr0(unsigned long cr0)
 
 static void xen_write_cr4(unsigned long cr4)
 {
-	cr4 &= ~(X86_CR4_PGE | X86_CR4_PSE | X86_CR4_PCE);
+	cr4 &= ~X86_CR4_PGE;
+	cr4 &= ~X86_CR4_PSE;
 
 	native_write_cr4(cr4);
 }
@@ -1039,9 +1029,6 @@ static inline void xen_write_cr8(unsigned long val)
 static u64 xen_read_msr_safe(unsigned int msr, int *err)
 {
 	u64 val;
-
-	if (pmu_msr_read(msr, &val, err))
-		return val;
 
 	val = native_read_msr_safe(msr, err);
 	switch (msr) {
@@ -1087,11 +1074,9 @@ static int xen_write_msr_safe(unsigned int msr, unsigned low, unsigned high)
 		/* Fast syscall setup is all done in hypercalls, so
 		   these are all ignored.  Stub them out here to stop
 		   Xen console noise. */
-		break;
 
 	default:
-		if (!pmu_msr_write(msr, low, high, &ret))
-			ret = native_write_msr_safe(msr, low, high);
+		ret = native_write_msr_safe(msr, low, high);
 	}
 
 	return ret;
@@ -1197,7 +1182,7 @@ static const struct pv_info xen_info __initconst = {
 #ifdef CONFIG_X86_64
 	.extra_user_64bit_cs = FLAT_USER_CS64,
 #endif
-	.features = 0,
+
 	.name = "Xen",
 };
 
@@ -1230,7 +1215,10 @@ static const struct pv_cpu_ops xen_cpu_ops __initconst = {
 	.read_msr = xen_read_msr_safe,
 	.write_msr = xen_write_msr_safe,
 
-	.read_pmc = xen_read_pmc,
+	.read_tsc = native_read_tsc,
+	.read_pmc = native_read_pmc,
+
+	.read_tscp = native_read_tscp,
 
 	.iret = xen_iret,
 #ifdef CONFIG_X86_64
@@ -1279,10 +1267,6 @@ static const struct pv_apic_ops xen_apic_ops __initconst = {
 static void xen_reboot(int reason)
 {
 	struct sched_shutdown r = { .reason = reason };
-	int cpu;
-
-	for_each_online_cpu(cpu)
-		xen_pmu_finish(cpu);
 
 	if (HYPERVISOR_sched_op(SCHEDOP_shutdown, &r))
 		BUG();
@@ -1524,6 +1508,7 @@ asmlinkage __visible void __init xen_start_kernel(void)
 {
 	struct physdev_set_iopl set_iopl;
 	unsigned long initrd_start = 0;
+	u64 pat;
 	int rc;
 
 	if (!xen_start_info)
@@ -1539,8 +1524,6 @@ asmlinkage __visible void __init xen_start_kernel(void)
 
 	/* Install Xen paravirt ops */
 	pv_info = xen_info;
-	if (xen_initial_domain())
-		pv_info.features |= PV_SUPPORTED_RTC;
 	pv_init_ops = xen_init_ops;
 	pv_apic_ops = xen_apic_ops;
 	if (!xen_pvh_domain()) {
@@ -1627,9 +1610,14 @@ asmlinkage __visible void __init xen_start_kernel(void)
 	early_boot_irqs_disabled = true;
 
 	xen_raw_console_write("mapping kernel into physical memory\n");
-	xen_setup_kernel_pagetable((pgd_t *)xen_start_info->pt_base,
-				   xen_start_info->nr_pages);
-	xen_reserve_special_pages();
+	xen_setup_kernel_pagetable((pgd_t *)xen_start_info->pt_base, xen_start_info->nr_pages);
+
+	/*
+	 * Modify the cache mode translation tables to match Xen's PAT
+	 * configuration.
+	 */
+	rdmsrl(MSR_IA32_CR_PAT, pat);
+	pat_init_cache_modes(pat);
 
 	/* keep using Xen gdt for now; no urgent need to change it */
 
@@ -1812,21 +1800,6 @@ static struct notifier_block xen_hvm_cpu_notifier = {
 	.notifier_call	= xen_hvm_cpu_notify,
 };
 
-#ifdef CONFIG_KEXEC_CORE
-static void xen_hvm_shutdown(void)
-{
-	native_machine_shutdown();
-	if (kexec_in_progress)
-		xen_reboot(SHUTDOWN_soft_reset);
-}
-
-static void xen_hvm_crash_shutdown(struct pt_regs *regs)
-{
-	native_machine_crash_shutdown(regs);
-	xen_reboot(SHUTDOWN_soft_reset);
-}
-#endif
-
 static void __init xen_hvm_guest_init(void)
 {
 	if (xen_pv_domain())
@@ -1846,10 +1819,6 @@ static void __init xen_hvm_guest_init(void)
 	x86_init.irqs.intr_init = xen_init_IRQ;
 	xen_hvm_init_time_ops();
 	xen_hvm_init_mmu_ops();
-#ifdef CONFIG_KEXEC_CORE
-	machine_ops.shutdown = xen_hvm_shutdown;
-	machine_ops.crash_shutdown = xen_hvm_crash_shutdown;
-#endif
 }
 #endif
 
@@ -1885,10 +1854,8 @@ EXPORT_SYMBOL_GPL(xen_hvm_need_lapic);
 
 static void xen_set_cpu_features(struct cpuinfo_x86 *c)
 {
-	if (xen_pv_domain()) {
+	if (xen_pv_domain())
 		clear_cpu_bug(c, X86_BUG_SYSRET_SS_ATTRS);
-		set_cpu_cap(c, X86_FEATURE_XENPV);
-	}
 }
 
 const struct hypervisor_x86 x86_hyper_xen = {
@@ -1901,17 +1868,3 @@ const struct hypervisor_x86 x86_hyper_xen = {
 	.set_cpu_features       = xen_set_cpu_features,
 };
 EXPORT_SYMBOL(x86_hyper_xen);
-
-#ifdef CONFIG_HOTPLUG_CPU
-void xen_arch_register_cpu(int num)
-{
-	arch_register_cpu(num);
-}
-EXPORT_SYMBOL(xen_arch_register_cpu);
-
-void xen_arch_unregister_cpu(int num)
-{
-	arch_unregister_cpu(num);
-}
-EXPORT_SYMBOL(xen_arch_unregister_cpu);
-#endif

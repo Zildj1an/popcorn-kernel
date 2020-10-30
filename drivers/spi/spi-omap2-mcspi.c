@@ -245,7 +245,6 @@ static void omap2_mcspi_set_enable(const struct spi_device *spi, int enable)
 
 static void omap2_mcspi_set_cs(struct spi_device *spi, bool enable)
 {
-	struct omap2_mcspi *mcspi = spi_master_get_devdata(spi->master);
 	u32 l;
 
 	/* The controller handles the inverted chip selects
@@ -256,12 +255,6 @@ static void omap2_mcspi_set_cs(struct spi_device *spi, bool enable)
 		enable = !enable;
 
 	if (spi->controller_state) {
-		int err = pm_runtime_get_sync(mcspi->dev);
-		if (err < 0) {
-			dev_err(mcspi->dev, "failed to get sync: %d\n", err);
-			return;
-		}
-
 		l = mcspi_cached_chconf0(spi);
 
 		if (enable)
@@ -270,9 +263,6 @@ static void omap2_mcspi_set_cs(struct spi_device *spi, bool enable)
 			l |= OMAP2_MCSPI_CHCONF_FORCE;
 
 		mcspi_write_chconf0(spi, l);
-
-		pm_runtime_mark_last_busy(mcspi->dev);
-		pm_runtime_put_autosuspend(mcspi->dev);
 	}
 }
 
@@ -457,8 +447,6 @@ omap2_mcspi_rx_dma(struct spi_device *spi, struct spi_transfer *xfer,
 	int			elements = 0;
 	int			word_len, element_count;
 	struct omap2_mcspi_cs	*cs = spi->controller_state;
-	void __iomem		*chstat_reg = cs->base + OMAP2_MCSPI_CHSTAT0;
-
 	mcspi = spi_master_get_devdata(spi->master);
 	mcspi_dma = &mcspi->dma_channels[spi->chip_select];
 	count = xfer->len;
@@ -519,8 +507,8 @@ omap2_mcspi_rx_dma(struct spi_device *spi, struct spi_transfer *xfer,
 	if (l & OMAP2_MCSPI_CHCONF_TURBO) {
 		elements--;
 
-		if (!mcspi_wait_for_reg_bit(chstat_reg,
-					    OMAP2_MCSPI_CHSTAT_RXS)) {
+		if (likely(mcspi_read_cs_reg(spi, OMAP2_MCSPI_CHSTAT0)
+				   & OMAP2_MCSPI_CHSTAT_RXS)) {
 			u32 w;
 
 			w = mcspi_read_cs_reg(spi, OMAP2_MCSPI_RX0);
@@ -538,7 +526,8 @@ omap2_mcspi_rx_dma(struct spi_device *spi, struct spi_transfer *xfer,
 			return count;
 		}
 	}
-	if (!mcspi_wait_for_reg_bit(chstat_reg, OMAP2_MCSPI_CHSTAT_RXS)) {
+	if (likely(mcspi_read_cs_reg(spi, OMAP2_MCSPI_CHSTAT0)
+				& OMAP2_MCSPI_CHSTAT_RXS)) {
 		u32 w;
 
 		w = mcspi_read_cs_reg(spi, OMAP2_MCSPI_RX0);
@@ -1025,22 +1014,21 @@ static int omap2_mcspi_setup(struct spi_device *spi)
 		spi->controller_state = cs;
 		/* Link this to context save list */
 		list_add_tail(&cs->node, &ctx->cs);
-
-		if (gpio_is_valid(spi->cs_gpio)) {
-			ret = gpio_request(spi->cs_gpio, dev_name(&spi->dev));
-			if (ret) {
-				dev_err(&spi->dev, "failed to request gpio\n");
-				return ret;
-			}
-			gpio_direction_output(spi->cs_gpio,
-					 !(spi->mode & SPI_CS_HIGH));
-		}
 	}
 
 	if (!mcspi_dma->dma_rx || !mcspi_dma->dma_tx) {
 		ret = omap2_mcspi_request_dma(spi);
 		if (ret < 0 && ret != -EAGAIN)
 			return ret;
+	}
+
+	if (gpio_is_valid(spi->cs_gpio)) {
+		ret = gpio_request(spi->cs_gpio, dev_name(&spi->dev));
+		if (ret) {
+			dev_err(&spi->dev, "failed to request gpio\n");
+			return ret;
+		}
+		gpio_direction_output(spi->cs_gpio, !(spi->mode & SPI_CS_HIGH));
 	}
 
 	ret = pm_runtime_get_sync(mcspi->dev);
@@ -1219,33 +1207,6 @@ out:
 	return status;
 }
 
-static int omap2_mcspi_prepare_message(struct spi_master *master,
-				       struct spi_message *msg)
-{
-	struct omap2_mcspi	*mcspi = spi_master_get_devdata(master);
-	struct omap2_mcspi_regs	*ctx = &mcspi->ctx;
-	struct omap2_mcspi_cs	*cs;
-
-	/* Only a single channel can have the FORCE bit enabled
-	 * in its chconf0 register.
-	 * Scan all channels and disable them except the current one.
-	 * A FORCE can remain from a last transfer having cs_change enabled
-	 */
-	list_for_each_entry(cs, &ctx->cs, node) {
-		if (msg->spi->controller_state == cs)
-			continue;
-
-		if ((cs->chconf0 & OMAP2_MCSPI_CHCONF_FORCE)) {
-			cs->chconf0 &= ~OMAP2_MCSPI_CHCONF_FORCE;
-			writel_relaxed(cs->chconf0,
-					cs->base + OMAP2_MCSPI_CHCONF0);
-			readl_relaxed(cs->base + OMAP2_MCSPI_CHCONF0);
-		}
-	}
-
-	return 0;
-}
-
 static int omap2_mcspi_transfer_one(struct spi_master *master,
 		struct spi_device *spi, struct spi_transfer *t)
 {
@@ -1373,7 +1334,6 @@ static int omap2_mcspi_probe(struct platform_device *pdev)
 	master->bits_per_word_mask = SPI_BPW_RANGE_MASK(4, 32);
 	master->setup = omap2_mcspi_setup;
 	master->auto_runtime_pm = true;
-	master->prepare_message = omap2_mcspi_prepare_message;
 	master->transfer_one = omap2_mcspi_transfer_one;
 	master->set_cs = omap2_mcspi_set_cs;
 	master->cleanup = omap2_mcspi_cleanup;

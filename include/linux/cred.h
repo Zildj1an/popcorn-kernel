@@ -87,7 +87,6 @@ extern int set_current_groups(struct group_info *);
 extern void set_groups(struct cred *, struct group_info *);
 extern int groups_search(const struct group_info *, kgid_t);
 extern bool may_setgroups(void);
-extern void groups_sort(struct group_info *);
 
 /* access the groups "array" with this macro */
 #define GROUP_AT(gi, i) \
@@ -138,7 +137,6 @@ struct cred {
 	kernel_cap_t	cap_permitted;	/* caps we're permitted */
 	kernel_cap_t	cap_effective;	/* caps we can actually use */
 	kernel_cap_t	cap_bset;	/* capability bounding set */
-	kernel_cap_t	cap_ambient;	/* Ambient capability set */
 #ifdef CONFIG_KEYS
 	unsigned char	jit_keyring;	/* default keyring to attach requested
 					 * keys to */
@@ -213,13 +211,6 @@ static inline void validate_process_creds(void)
 {
 }
 #endif
-
-static inline bool cap_ambient_invariant_ok(const struct cred *cred)
-{
-	return cap_issubset(cred->cap_ambient,
-			    cap_intersect(cred->cap_permitted,
-					  cred->cap_inheritable));
-}
 
 /**
  * get_new_cred - Get a reference on a new set of credentials
@@ -378,10 +369,7 @@ extern struct user_namespace init_user_ns;
 #ifdef CONFIG_USER_NS
 #define current_user_ns()	(current_cred_xxx(user_ns))
 #else
-static inline struct user_namespace *current_user_ns(void)
-{
-	return &init_user_ns;
-}
+#define current_user_ns()	(&init_user_ns)
 #endif
 
 

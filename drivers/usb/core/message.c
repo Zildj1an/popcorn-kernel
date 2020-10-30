@@ -147,10 +147,6 @@ int usb_control_msg(struct usb_device *dev, unsigned int pipe, __u8 request,
 
 	ret = usb_internal_control_msg(dev, pipe, dr, data, size, timeout);
 
-	/* Linger a bit, prior to the next control message. */
-	if (dev->quirks & USB_QUIRK_DELAY_CTRL_MSG)
-		msleep(200);
-
 	kfree(dr);
 
 	return ret;
@@ -1391,6 +1387,8 @@ int usb_set_interface(struct usb_device *dev, int interface, int alternate)
 	 * new altsetting.
 	 */
 	if (manual) {
+		int i;
+
 		for (i = 0; i < alt->desc.bNumEndpoints; i++) {
 			epaddr = alt->endpoint[i].desc.bEndpointAddress;
 			pipe = __create_pipe(dev,
@@ -1555,44 +1553,6 @@ static void usb_release_interface(struct device *dev)
 	kref_put(&intfc->ref, usb_release_interface_cache);
 	usb_put_dev(interface_to_usbdev(intf));
 	kfree(intf);
-}
-
-/*
- * usb_deauthorize_interface - deauthorize an USB interface
- *
- * @intf: USB interface structure
- */
-void usb_deauthorize_interface(struct usb_interface *intf)
-{
-	struct device *dev = &intf->dev;
-
-	device_lock(dev->parent);
-
-	if (intf->authorized) {
-		device_lock(dev);
-		intf->authorized = 0;
-		device_unlock(dev);
-
-		usb_forced_unbind_intf(intf);
-	}
-
-	device_unlock(dev->parent);
-}
-
-/*
- * usb_authorize_interface - authorize an USB interface
- *
- * @intf: USB interface structure
- */
-void usb_authorize_interface(struct usb_interface *intf)
-{
-	struct device *dev = &intf->dev;
-
-	if (!intf->authorized) {
-		device_lock(dev);
-		intf->authorized = 1; /* authorize interface */
-		device_unlock(dev);
-	}
 }
 
 static int usb_if_uevent(struct device *dev, struct kobj_uevent_env *env)
@@ -1847,7 +1807,6 @@ free_interfaces:
 		intfc = cp->intf_cache[i];
 		intf->altsetting = intfc->altsetting;
 		intf->num_altsetting = intfc->num_altsetting;
-		intf->authorized = !!HCD_INTF_AUTHORIZED(hcd);
 		kref_get(&intfc->ref);
 
 		alt = usb_altnum_to_altsetting(intf, 0);

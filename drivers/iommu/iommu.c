@@ -391,30 +391,36 @@ int iommu_group_add_device(struct iommu_group *group, struct device *dev)
 	device->dev = dev;
 
 	ret = sysfs_create_link(&dev->kobj, &group->kobj, "iommu_group");
-	if (ret)
-		goto err_free_device;
+	if (ret) {
+		kfree(device);
+		return ret;
+	}
 
 	device->name = kasprintf(GFP_KERNEL, "%s", kobject_name(&dev->kobj));
 rename:
 	if (!device->name) {
-		ret = -ENOMEM;
-		goto err_remove_link;
+		sysfs_remove_link(&dev->kobj, "iommu_group");
+		kfree(device);
+		return -ENOMEM;
 	}
 
 	ret = sysfs_create_link_nowarn(group->devices_kobj,
 				       &dev->kobj, device->name);
 	if (ret) {
+		kfree(device->name);
 		if (ret == -EEXIST && i >= 0) {
 			/*
 			 * Account for the slim chance of collision
 			 * and append an instance to the name.
 			 */
-			kfree(device->name);
 			device->name = kasprintf(GFP_KERNEL, "%s.%d",
 						 kobject_name(&dev->kobj), i++);
 			goto rename;
 		}
-		goto err_free_name;
+
+		sysfs_remove_link(&dev->kobj, "iommu_group");
+		kfree(device);
+		return ret;
 	}
 
 	kobject_get(group->devices_kobj);
@@ -426,10 +432,8 @@ rename:
 	mutex_lock(&group->mutex);
 	list_add_tail(&device->list, &group->devices);
 	if (group->domain)
-		ret = __iommu_attach_device(group->domain, dev);
+		__iommu_attach_device(group->domain, dev);
 	mutex_unlock(&group->mutex);
-	if (ret)
-		goto err_put_group;
 
 	/* Notify any listeners about change to group. */
 	blocking_notifier_call_chain(&group->notifier,
@@ -440,21 +444,6 @@ rename:
 	pr_info("Adding device %s to group %d\n", dev_name(dev), group->id);
 
 	return 0;
-
-err_put_group:
-	mutex_lock(&group->mutex);
-	list_del(&device->list);
-	mutex_unlock(&group->mutex);
-	dev->iommu_group = NULL;
-	kobject_put(group->devices_kobj);
-err_free_name:
-	kfree(device->name);
-err_remove_link:
-	sysfs_remove_link(&dev->kobj, "iommu_group");
-err_free_device:
-	kfree(device);
-	pr_err("Failed to add device %s to group %d: %d\n", dev_name(dev), group->id, ret);
-	return ret;
 }
 EXPORT_SYMBOL_GPL(iommu_group_add_device);
 
@@ -739,34 +728,15 @@ static int get_pci_alias_or_group(struct pci_dev *pdev, u16 alias, void *opaque)
 }
 
 /*
- * Generic device_group call-back function. It just allocates one
- * iommu-group per device.
- */
-struct iommu_group *generic_device_group(struct device *dev)
-{
-	struct iommu_group *group;
-
-	group = iommu_group_alloc();
-	if (IS_ERR(group))
-		return NULL;
-
-	return group;
-}
-
-/*
  * Use standard PCI bus topology, isolation features, and DMA alias quirks
  * to find or create an IOMMU group for a device.
  */
-struct iommu_group *pci_device_group(struct device *dev)
+static struct iommu_group *iommu_group_get_for_pci_dev(struct pci_dev *pdev)
 {
-	struct pci_dev *pdev = to_pci_dev(dev);
 	struct group_for_pci_data data;
 	struct pci_bus *bus;
 	struct iommu_group *group = NULL;
 	u64 devfns[4] = { 0 };
-
-	if (WARN_ON(!dev_is_pci(dev)))
-		return ERR_PTR(-EINVAL);
 
 	/*
 	 * Find the upstream DMA alias for the device.  A device must not
@@ -821,6 +791,14 @@ struct iommu_group *pci_device_group(struct device *dev)
 	if (IS_ERR(group))
 		return NULL;
 
+	/*
+	 * Try to allocate a default domain - needs support from the
+	 * IOMMU driver.
+	 */
+	group->default_domain = __iommu_domain_alloc(pdev->dev.bus,
+						     IOMMU_DOMAIN_DMA);
+	group->domain = group->default_domain;
+
 	return group;
 }
 
@@ -836,7 +814,6 @@ struct iommu_group *pci_device_group(struct device *dev)
  */
 struct iommu_group *iommu_group_get_for_dev(struct device *dev)
 {
-	const struct iommu_ops *ops = dev->bus->iommu_ops;
 	struct iommu_group *group;
 	int ret;
 
@@ -844,24 +821,13 @@ struct iommu_group *iommu_group_get_for_dev(struct device *dev)
 	if (group)
 		return group;
 
-	group = ERR_PTR(-EINVAL);
+	if (!dev_is_pci(dev))
+		return ERR_PTR(-EINVAL);
 
-	if (ops && ops->device_group)
-		group = ops->device_group(dev);
+	group = iommu_group_get_for_pci_dev(to_pci_dev(dev));
 
 	if (IS_ERR(group))
 		return group;
-
-	/*
-	 * Try to allocate a default domain - needs support from the
-	 * IOMMU driver.
-	 */
-	if (!group->default_domain) {
-		group->default_domain = __iommu_domain_alloc(dev->bus,
-							     IOMMU_DOMAIN_DMA);
-		if (!group->domain)
-			group->domain = group->default_domain;
-	}
 
 	ret = iommu_group_add_device(group, dev);
 	if (ret) {

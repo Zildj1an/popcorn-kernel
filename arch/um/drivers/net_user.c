@@ -249,23 +249,21 @@ void close_addr(unsigned char *addr, unsigned char *netmask, void *arg)
 
 char *split_if_spec(char *str, ...)
 {
-	char **arg, *end, *ret = NULL;
+	char **arg, *end;
 	va_list ap;
 
 	va_start(ap, str);
 	while ((arg = va_arg(ap, char **)) != NULL) {
 		if (*str == '\0')
-			goto out;
+			return NULL;
 		end = strchr(str, ',');
 		if (end != str)
 			*arg = str;
 		if (end == NULL)
-			goto out;
+			return NULL;
 		*end++ = '\0';
 		str = end;
 	}
-	ret = str;
-out:
 	va_end(ap);
-	return ret;
+	return str;
 }

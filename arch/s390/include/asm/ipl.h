@@ -64,8 +64,7 @@ struct ipl_block_fcp {
 
 struct ipl_block_ccw {
 	u8  reserved1[84];
-	u16 reserved2 : 13;
-	u8  ssid : 3;
+	u8  reserved2[2];
 	u16 devno;
 	u8  vm_flags;
 	u8  reserved3[3];

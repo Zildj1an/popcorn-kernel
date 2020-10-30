@@ -24,34 +24,6 @@
 #define wmb()	asm volatile("sfence" ::: "memory")
 #endif
 
-/**
- * array_index_mask_nospec() - generate a mask that is ~0UL when the
- * 	bounds check succeeds and 0 otherwise
- * @index: array element index
- * @size: number of elements in array
- *
- * Returns:
- *     0 - (index < size)
- */
-static inline unsigned long array_index_mask_nospec(unsigned long index,
-		unsigned long size)
-{
-	unsigned long mask;
-
-	asm ("cmp %1,%2; sbb %0,%0;"
-			:"=r" (mask)
-			:"r"(size),"r" (index)
-			:"cc");
-	return mask;
-}
-
-/* Override the default implementation from linux/nospec.h. */
-#define array_index_mask_nospec array_index_mask_nospec
-
-/* Prevent speculative execution past this barrier. */
-#define barrier_nospec() alternative_2("", "mfence", X86_FEATURE_MFENCE_RDTSC, \
-					   "lfence", X86_FEATURE_LFENCE_RDTSC)
-
 #ifdef CONFIG_X86_PPRO_FENCE
 #define dma_rmb()	rmb()
 #else
@@ -85,12 +57,12 @@ static inline unsigned long array_index_mask_nospec(unsigned long index,
 do {									\
 	compiletime_assert_atomic_type(*p);				\
 	smp_mb();							\
-	WRITE_ONCE(*p, v);						\
+	ACCESS_ONCE(*p) = (v);						\
 } while (0)
 
 #define smp_load_acquire(p)						\
 ({									\
-	typeof(*p) ___p1 = READ_ONCE(*p);				\
+	typeof(*p) ___p1 = ACCESS_ONCE(*p);				\
 	compiletime_assert_atomic_type(*p);				\
 	smp_mb();							\
 	___p1;								\
@@ -102,12 +74,12 @@ do {									\
 do {									\
 	compiletime_assert_atomic_type(*p);				\
 	barrier();							\
-	WRITE_ONCE(*p, v);						\
+	ACCESS_ONCE(*p) = (v);						\
 } while (0)
 
 #define smp_load_acquire(p)						\
 ({									\
-	typeof(*p) ___p1 = READ_ONCE(*p);				\
+	typeof(*p) ___p1 = ACCESS_ONCE(*p);				\
 	compiletime_assert_atomic_type(*p);				\
 	barrier();							\
 	___p1;								\
@@ -118,5 +90,16 @@ do {									\
 /* Atomic operations are already serializing on x86 */
 #define smp_mb__before_atomic()	barrier()
 #define smp_mb__after_atomic()	barrier()
+
+/*
+ * Stop RDTSC speculation. This is needed when you need to use RDTSC
+ * (or get_cycles or vread that possibly accesses the TSC) in a defined
+ * code region.
+ */
+static __always_inline void rdtsc_barrier(void)
+{
+	alternative_2("", "mfence", X86_FEATURE_MFENCE_RDTSC,
+			  "lfence", X86_FEATURE_LFENCE_RDTSC);
+}
 
 #endif /* _ASM_X86_BARRIER_H */

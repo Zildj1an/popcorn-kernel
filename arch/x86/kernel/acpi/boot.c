@@ -321,19 +321,20 @@ acpi_parse_lapic_nmi(struct acpi_subtable_header * header, const unsigned long e
 #ifdef CONFIG_X86_IO_APIC
 #define MP_ISA_BUS		0
 
-static int __init mp_register_ioapic_irq(u8 bus_irq, u8 polarity,
-						u8 trigger, u32 gsi);
-
 static void __init mp_override_legacy_irq(u8 bus_irq, u8 polarity, u8 trigger,
 					  u32 gsi)
 {
+	int ioapic;
+	int pin;
+	struct mpc_intsrc mp_irq;
+
 	/*
-	 * Check bus_irq boundary.
+	 * Convert 'gsi' to 'ioapic.pin'.
 	 */
-	if (bus_irq >= NR_IRQS_LEGACY) {
-		pr_warn("Invalid bus_irq %u for legacy override\n", bus_irq);
+	ioapic = mp_find_ioapic(gsi);
+	if (ioapic < 0)
 		return;
-	}
+	pin = mp_find_ioapic_pin(ioapic, gsi);
 
 	/*
 	 * TBD: This check is for faulty timer entries, where the override
@@ -343,8 +344,16 @@ static void __init mp_override_legacy_irq(u8 bus_irq, u8 polarity, u8 trigger,
 	if ((bus_irq == 0) && (trigger == 3))
 		trigger = 1;
 
-	if (mp_register_ioapic_irq(bus_irq, polarity, trigger, gsi) < 0)
-		return;
+	mp_irq.type = MP_INTSRC;
+	mp_irq.irqtype = mp_INT;
+	mp_irq.irqflag = (trigger << 2) | polarity;
+	mp_irq.srcbus = MP_ISA_BUS;
+	mp_irq.srcbusirq = bus_irq;	/* IRQ */
+	mp_irq.dstapic = mpc_ioapic_id(ioapic); /* APIC ID */
+	mp_irq.dstirq = pin;	/* INTIN# */
+
+	mp_save_irq(&mp_irq);
+
 	/*
 	 * Reset default identity mapping if gsi is also an legacy IRQ,
 	 * otherwise there will be more than one entry with the same GSI
@@ -388,34 +397,6 @@ static int mp_config_acpi_gsi(struct device *dev, u32 gsi, int trigger,
 
 	mp_save_irq(&mp_irq);
 #endif
-	return 0;
-}
-
-static int __init mp_register_ioapic_irq(u8 bus_irq, u8 polarity,
-						u8 trigger, u32 gsi)
-{
-	struct mpc_intsrc mp_irq;
-	int ioapic, pin;
-
-	/* Convert 'gsi' to 'ioapic.pin'(INTIN#) */
-	ioapic = mp_find_ioapic(gsi);
-	if (ioapic < 0) {
-		pr_warn("Failed to find ioapic for gsi : %u\n", gsi);
-		return ioapic;
-	}
-
-	pin = mp_find_ioapic_pin(ioapic, gsi);
-
-	mp_irq.type = MP_INTSRC;
-	mp_irq.irqtype = mp_INT;
-	mp_irq.irqflag = (trigger << 2) | polarity;
-	mp_irq.srcbus = MP_ISA_BUS;
-	mp_irq.srcbusirq = bus_irq;
-	mp_irq.dstapic = mpc_ioapic_id(ioapic);
-	mp_irq.dstirq = pin;
-
-	mp_save_irq(&mp_irq);
-
 	return 0;
 }
 
@@ -463,12 +444,7 @@ static void __init acpi_sci_ioapic_setup(u8 bus_irq, u16 polarity, u16 trigger, 
 	if (acpi_sci_flags & ACPI_MADT_POLARITY_MASK)
 		polarity = acpi_sci_flags & ACPI_MADT_POLARITY_MASK;
 
-	if (bus_irq < NR_IRQS_LEGACY)
-		mp_override_legacy_irq(bus_irq, polarity, trigger, gsi);
-	else
-		mp_register_ioapic_irq(bus_irq, polarity, trigger, gsi);
-
-	acpi_penalize_sci_irq(bus_irq, trigger, polarity);
+	mp_override_legacy_irq(bus_irq, polarity, trigger, gsi);
 
 	/*
 	 * stash over-ride to indicate we've been here
@@ -734,7 +710,7 @@ static void acpi_map_cpu2node(acpi_handle handle, int cpu, int physid)
 #endif
 }
 
-int acpi_map_cpu(acpi_handle handle, phys_cpuid_t physid, int *pcpu)
+static int _acpi_map_lsapic(acpi_handle handle, int physid, int *pcpu)
 {
 	int cpu;
 
@@ -749,6 +725,12 @@ int acpi_map_cpu(acpi_handle handle, phys_cpuid_t physid, int *pcpu)
 
 	*pcpu = cpu;
 	return 0;
+}
+
+/* wrapper to silence section mismatch warning */
+int __ref acpi_map_cpu(acpi_handle handle, phys_cpuid_t physid, int *pcpu)
+{
+	return _acpi_map_lsapic(handle, physid, pcpu);
 }
 EXPORT_SYMBOL(acpi_map_cpu);
 
@@ -999,8 +981,6 @@ static int __init acpi_parse_madt_lapic_entries(void)
 {
 	int count;
 	int x2count = 0;
-	int ret;
-	struct acpi_subtable_proc madt_proc[2];
 
 	if (!cpu_has_apic)
 		return -ENODEV;
@@ -1024,22 +1004,10 @@ static int __init acpi_parse_madt_lapic_entries(void)
 				      acpi_parse_sapic, MAX_LOCAL_APIC);
 
 	if (!count) {
-		memset(madt_proc, 0, sizeof(madt_proc));
-		madt_proc[0].id = ACPI_MADT_TYPE_LOCAL_APIC;
-		madt_proc[0].handler = acpi_parse_lapic;
-		madt_proc[1].id = ACPI_MADT_TYPE_LOCAL_X2APIC;
-		madt_proc[1].handler = acpi_parse_x2apic;
-		ret = acpi_table_parse_entries_array(ACPI_SIG_MADT,
-				sizeof(struct acpi_table_madt),
-				madt_proc, ARRAY_SIZE(madt_proc), MAX_LOCAL_APIC);
-		if (ret < 0) {
-			printk(KERN_ERR PREFIX
-					"Error parsing LAPIC/X2APIC entries\n");
-			return ret;
-		}
-
-		x2count = madt_proc[0].count;
-		count = madt_proc[1].count;
+		x2count = acpi_table_parse_madt(ACPI_MADT_TYPE_LOCAL_X2APIC,
+					acpi_parse_x2apic, MAX_LOCAL_APIC);
+		count = acpi_table_parse_madt(ACPI_MADT_TYPE_LOCAL_APIC,
+					acpi_parse_lapic, MAX_LOCAL_APIC);
 	}
 	if (!count && !x2count) {
 		printk(KERN_ERR PREFIX "No LAPIC entries present\n");

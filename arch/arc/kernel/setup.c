@@ -160,6 +160,10 @@ static const struct cpuinfo_data arc_cpu_tbl[] = {
 	{ {0x00, NULL		} }
 };
 
+#define IS_AVAIL1(v, s)		((v) ? s : "")
+#define IS_USED_RUN(v)		((v) ? "" : "(not used) ")
+#define IS_USED_CFG(cfg)	IS_USED_RUN(IS_ENABLED(cfg))
+#define IS_AVAIL2(v, s, cfg)	IS_AVAIL1(v, s), IS_AVAIL1(v, IS_USED_CFG(cfg))
 
 static char *arc_cpu_mumbojumbo(int cpu_id, char *buf, int len)
 {
@@ -332,6 +336,10 @@ static void arc_chk_core_config(void)
 		pr_warn("CONFIG_ARC_FPU_SAVE_RESTORE needed for working apps\n");
 	else if (!cpu->extn.fpu_dp && fpu_enabled)
 		panic("FPU non-existent, disable CONFIG_ARC_FPU_SAVE_RESTORE\n");
+
+	if (is_isa_arcv2() && IS_ENABLED(CONFIG_SMP) && cpu->isa.atomic &&
+	    !IS_ENABLED(CONFIG_ARC_STAR_9000923308))
+		panic("llock/scond livelock workaround missing\n");
 }
 
 /*
@@ -348,13 +356,13 @@ void setup_processor(void)
 	read_arc_build_cfg_regs();
 	arc_init_IRQ();
 
-	printk(arc_cpu_mumbojumbo(cpu_id, str, sizeof(str)));
+	//printk(arc_cpu_mumbojumbo(cpu_id, str, sizeof(str)));
 
 	arc_mmu_init();
 	arc_cache_init();
 
-	printk(arc_extn_mumbojumbo(cpu_id, str, sizeof(str)));
-	printk(arc_platform_smp_cpuinfo());
+	//printk(arc_extn_mumbojumbo(cpu_id, str, sizeof(str)));
+	//printk(arc_platform_smp_cpuinfo());
 
 	arc_chk_core_config();
 }
@@ -407,9 +415,8 @@ void __init setup_arch(char **cmdline_p)
 	if (machine_desc->init_early)
 		machine_desc->init_early();
 
-	smp_init_cpus();
-
 	setup_processor();
+	smp_init_cpus();
 	setup_arch_memory();
 
 	/* copy flat DT out of .init and then unflatten it */
@@ -425,6 +432,7 @@ void __init setup_arch(char **cmdline_p)
 #endif
 
 	arc_unwind_init();
+	arc_unwind_setup();
 }
 
 static int __init customize_machine(void)
@@ -492,19 +500,25 @@ done:
 
 static void *c_start(struct seq_file *m, loff_t *pos)
 {
-	/*
-	 * Callback returns cpu-id to iterator for show routine, NULL to stop.
-	 * However since NULL is also a valid cpu-id (0), we use a round-about
-	 * way to pass it w/o having to kmalloc/free a 2 byte string.
-	 * Encode cpu-id as 0xFFcccc, which is decoded by show routine.
-	 */
-	return *pos < num_possible_cpus() ? cpu_to_ptr(*pos) : NULL;
+	if (*pos == 0)  /* just in case, cpu 0 is not the first */
+		*pos = cpumask_first(cpu_online_mask);
+	else
+		*pos = cpumask_next(*pos - 1, cpu_online_mask);
+
+	return *pos < nr_cpu_ids ? cpu_to_ptr(*pos) : NULL;
 }
 
 static void *c_next(struct seq_file *m, void *v, loff_t *pos)
 {
-	++*pos;
-	return c_start(m, pos);
+	*pos = cpumask_next(*pos, cpu_online_mask);
+
+	/*
+	 * return cpu-id to iterator for show routine, NULL to stop.
+	 * However since NULL is also a valid cpu-id (0), we use a round-about
+	 * way to pass it w/o having to kmalloc/free a 2 byte string.
+	 * Encode cpu-id as 0xFFcccc, which is decoded by show routine.
+	 */
+	return *pos < nr_cpu_ids ? cpu_to_ptr(*pos) : NULL;
 }
 
 static void c_stop(struct seq_file *m, void *v)
@@ -518,14 +532,17 @@ const struct seq_operations cpuinfo_op = {
 	.show	= show_cpuinfo
 };
 
-static DEFINE_PER_CPU(struct cpu, cpu_topology);
+static DEFINE_PER_CPU(struct cpu, cpu_topo_info);
 
 static int __init topology_init(void)
 {
 	int cpu;
 
+	for_each_online_node(cpu)
+		register_one_node(cpu);
+
 	for_each_present_cpu(cpu)
-	    register_cpu(&per_cpu(cpu_topology, cpu), cpu);
+	    register_cpu(&per_cpu(cpu_topo_info, cpu), cpu);
 
 	return 0;
 }

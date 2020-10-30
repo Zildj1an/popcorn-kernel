@@ -35,62 +35,12 @@
 #include <asm/opal.h>
 #include <asm/kexec.h>
 #include <asm/smp.h>
-#include <asm/tm.h>
-#include <asm/setup.h>
 
 #include "powernv.h"
-
-static void pnv_setup_rfi_flush(void)
-{
-	struct device_node *np, *fw_features;
-	enum l1d_flush_type type;
-	int enable;
-
-	/* Default to fallback in case fw-features are not available */
-	type = L1D_FLUSH_FALLBACK;
-	enable = 1;
-
-	np = of_find_node_by_name(NULL, "ibm,opal");
-	fw_features = of_get_child_by_name(np, "fw-features");
-	of_node_put(np);
-
-	if (fw_features) {
-		np = of_get_child_by_name(fw_features, "inst-l1d-flush-trig2");
-		if (np && of_property_read_bool(np, "enabled"))
-			type = L1D_FLUSH_MTTRIG;
-
-		of_node_put(np);
-
-		np = of_get_child_by_name(fw_features, "inst-l1d-flush-ori30,30,0");
-		if (np && of_property_read_bool(np, "enabled"))
-			type = L1D_FLUSH_ORI;
-
-		of_node_put(np);
-
-		/* Enable unless firmware says NOT to */
-		enable = 2;
-		np = of_get_child_by_name(fw_features, "needs-l1d-flush-msr-hv-1-to-0");
-		if (np && of_property_read_bool(np, "disabled"))
-			enable--;
-
-		of_node_put(np);
-
-		np = of_get_child_by_name(fw_features, "needs-l1d-flush-msr-pr-0-to-1");
-		if (np && of_property_read_bool(np, "disabled"))
-			enable--;
-
-		of_node_put(np);
-		of_node_put(fw_features);
-	}
-
-	setup_rfi_flush(type, enable > 0);
-}
 
 static void __init pnv_setup_arch(void)
 {
 	set_arch_panic_timeout(10, ARCH_PANIC_TIMEOUT);
-
-	pnv_setup_rfi_flush();
 
 	/* Initialize SMP */
 	pnv_smp_init();
@@ -140,8 +90,12 @@ static void pnv_show_cpuinfo(struct seq_file *m)
 	if (root)
 		model = of_get_property(root, "model", NULL);
 	seq_printf(m, "machine\t\t: PowerNV %s\n", model);
-	if (firmware_has_feature(FW_FEATURE_OPAL))
-		seq_printf(m, "firmware\t: OPAL\n");
+	if (firmware_has_feature(FW_FEATURE_OPALv3))
+		seq_printf(m, "firmware\t: OPAL v3\n");
+	else if (firmware_has_feature(FW_FEATURE_OPALv2))
+		seq_printf(m, "firmware\t: OPAL v2\n");
+	else if (firmware_has_feature(FW_FEATURE_OPAL))
+		seq_printf(m, "firmware\t: OPAL v1\n");
 	else
 		seq_printf(m, "firmware\t: BML\n");
 	of_node_put(root);
@@ -211,6 +165,14 @@ static void pnv_progress(char *s, unsigned short hex)
 {
 }
 
+static u64 pnv_dma_get_required_mask(struct device *dev)
+{
+	if (dev_is_pci(dev))
+		return pnv_pci_dma_get_required_mask(to_pci_dev(dev));
+
+	return __dma_get_required_mask(dev);
+}
+
 static void pnv_shutdown(void)
 {
 	/* Let the PCI code clear up IODA tables */
@@ -233,7 +195,7 @@ static void pnv_kexec_wait_secondaries_down(void)
 
 	for_each_online_cpu(i) {
 		uint8_t status;
-		int64_t rc, timeout = 1000;
+		int64_t rc;
 
 		if (i == my_cpu)
 			continue;
@@ -250,18 +212,6 @@ static void pnv_kexec_wait_secondaries_down(void)
 				       i, paca[i].hw_cpu_id);
 				notified = i;
 			}
-
-			/*
-			 * On crash secondaries might be unreachable or hung,
-			 * so timeout if we've waited too long
-			 * */
-			mdelay(1);
-			if (timeout-- == 0) {
-				printk(KERN_ERR "kexec: timed out waiting for "
-				       "cpu %d (physical %d) to enter OPAL\n",
-				       i, paca[i].hw_cpu_id);
-				break;
-			}
 		}
 	}
 }
@@ -270,9 +220,9 @@ static void pnv_kexec_cpu_down(int crash_shutdown, int secondary)
 {
 	xics_kexec_teardown_cpu(secondary);
 
-	/* On OPAL, we return all CPUs to firmware */
+	/* On OPAL v3, we return all CPUs to firmware */
 
-	if (!firmware_has_feature(FW_FEATURE_OPAL))
+	if (!firmware_has_feature(FW_FEATURE_OPALv3))
 		return;
 
 	if (secondary) {
@@ -283,16 +233,16 @@ static void pnv_kexec_cpu_down(int crash_shutdown, int secondary)
 
 		/* Return the CPU to OPAL */
 		opal_return_cpu();
+	} else if (crash_shutdown) {
+		/*
+		 * On crash, we don't wait for secondaries to go
+		 * down as they might be unreachable or hung, so
+		 * instead we just wait a bit and move on.
+		 */
+		mdelay(1);
 	} else {
 		/* Primary waits for the secondaries to have reached OPAL */
 		pnv_kexec_wait_secondaries_down();
-
-		/*
-		 * We might be running as little-endian - now that interrupts
-		 * are disabled, reset the HILE bit to big-endian so we don't
-		 * take interrupts in the wrong endian later
-		 */
-		opal_reinit_cpus(OPAL_REINIT_CPUS_HILE_BE);
 	}
 }
 #endif /* CONFIG_KEXEC */
@@ -341,7 +291,7 @@ static unsigned long pnv_get_proc_freq(unsigned int cpu)
 {
 	unsigned long ret_freq;
 
-	ret_freq = cpufreq_get(cpu) * 1000ul;
+	ret_freq = cpufreq_quick_get(cpu) * 1000ul;
 
 	/*
 	 * If the backend cpufreq driver does not exist,
@@ -364,6 +314,7 @@ define_machine(powernv) {
 	.machine_shutdown	= pnv_shutdown,
 	.power_save             = power7_idle,
 	.calibrate_decr		= generic_calibrate_decr,
+	.dma_get_required_mask	= pnv_dma_get_required_mask,
 #ifdef CONFIG_KEXEC
 	.kexec_cpu_down		= pnv_kexec_cpu_down,
 #endif

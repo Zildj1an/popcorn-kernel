@@ -21,13 +21,6 @@
 #include <linux/swap.h>
 #include <linux/swapops.h>
 
-#ifdef CONFIG_POPCORN
-#include <popcorn/types.h>
-#include <popcorn/vma_server.h>
-#include <popcorn/page_server.h>
-#include <popcorn/bundle.h>
-#endif
-
 /*
  * Any behaviour which results in changes to the vma->vm_flags needs to
  * take mmap_sem for writing. Others, which simply traverse vmas, need
@@ -39,9 +32,6 @@ static int madvise_need_mmap_write(int behavior)
 	case MADV_REMOVE:
 	case MADV_WILLNEED:
 	case MADV_DONTNEED:
-#ifdef CONFIG_POPCORN
-	case MADV_RELEASE:
-#endif
 		return 0;
 	default:
 		/* be safe, default to 1. list exceptions explicitly */
@@ -113,8 +103,7 @@ static long madvise_behavior(struct vm_area_struct *vma,
 
 	pgoff = vma->vm_pgoff + ((start - vma->vm_start) >> PAGE_SHIFT);
 	*prev = vma_merge(mm, *prev, start, end, new_flags, vma->anon_vma,
-			  vma->vm_file, pgoff, vma_policy(vma),
-			  vma->vm_userfaultfd_ctx);
+				vma->vm_file, pgoff, vma_policy(vma));
 	if (*prev) {
 		vma = *prev;
 		goto success;
@@ -233,14 +222,15 @@ static long madvise_willneed(struct vm_area_struct *vma,
 {
 	struct file *file = vma->vm_file;
 
-	*prev = vma;
 #ifdef CONFIG_SWAP
 	if (!file) {
+		*prev = vma;
 		force_swapin_readahead(vma, start, end);
 		return 0;
 	}
 
 	if (shmem_mapping(file->f_mapping)) {
+		*prev = vma;
 		force_shm_swapin_readahead(vma, start, end,
 					file->f_mapping);
 		return 0;
@@ -255,6 +245,7 @@ static long madvise_willneed(struct vm_area_struct *vma,
 		return 0;
 	}
 
+	*prev = vma;
 	start = ((start - vma->vm_start) >> PAGE_SHIFT) + vma->vm_pgoff;
 	if (end > vma->vm_end)
 		end = vma->vm_end;
@@ -309,7 +300,7 @@ static long madvise_remove(struct vm_area_struct *vma,
 
 	*prev = NULL;	/* tell sys_madvise we drop mmap_sem */
 
-	if (vma->vm_flags & VM_LOCKED)
+	if (vma->vm_flags & (VM_LOCKED | VM_HUGETLB))
 		return -EINVAL;
 
 	f = vma->vm_file;
@@ -378,23 +369,6 @@ static int madvise_hwpoison(int bhv, unsigned long start, unsigned long end)
 }
 #endif
 
-#ifdef CONFIG_POPCORN
-int madvise_release(struct vm_area_struct *vma, unsigned long start, unsigned long end)
-{
-	int nr_pages = 0;
-	unsigned long addr;
-
-	/* mmap_sem is held */
-	for (addr = start; addr < end; addr += PAGE_SIZE) {
-		nr_pages += page_server_release_page_ownership(vma, addr);
-	}
-
-	VSPRINTK("  [%d] %d %d / %ld %lx-%lx\n", current->pid, my_nid,
-			nr_pages, (end - start) / PAGE_SIZE, start, end);
-	return 0;
-}
-#endif
-
 static long
 madvise_vma(struct vm_area_struct *vma, struct vm_area_struct **prev,
 		unsigned long start, unsigned long end, int behavior)
@@ -406,16 +380,12 @@ madvise_vma(struct vm_area_struct *vma, struct vm_area_struct **prev,
 		return madvise_willneed(vma, prev, start, end);
 	case MADV_DONTNEED:
 		return madvise_dontneed(vma, prev, start, end);
-#ifdef CONFIG_POPCORN
-	case MADV_RELEASE:
-		return madvise_release(vma, start, end);
-#endif
 	default:
 		return madvise_behavior(vma, prev, start, end, behavior);
 	}
 }
 
-static bool
+static int
 madvise_behavior_valid(int behavior)
 {
 	switch (behavior) {
@@ -437,13 +407,10 @@ madvise_behavior_valid(int behavior)
 #endif
 	case MADV_DONTDUMP:
 	case MADV_DODUMP:
-#ifdef CONFIG_POPCORN
-	case MADV_RELEASE:
-#endif
-		return true;
+		return 1;
 
 	default:
-		return false;
+		return 0;
 	}
 }
 
@@ -498,10 +465,6 @@ SYSCALL_DEFINE3(madvise, unsigned long, start, size_t, len_in, int, behavior)
 	int write;
 	size_t len;
 	struct blk_plug plug;
-#ifdef CONFIG_POPCORN
-	unsigned long start_orig = start;
-	size_t len_orig = len_in;
-#endif
 
 #ifdef CONFIG_MEMORY_FAILURE
 	if (behavior == MADV_HWPOISON || behavior == MADV_SOFT_OFFLINE)
@@ -582,13 +545,6 @@ out:
 		up_write(&current->mm->mmap_sem);
 	else
 		up_read(&current->mm->mmap_sem);
-
-#ifdef CONFIG_POPCORN
-	if (distributed_remote_process(current)) {
-		error = vma_server_madvise_remote(start_orig, len_orig, behavior);
-		if (error) return error;
-	}
-#endif
 
 	return error;
 }

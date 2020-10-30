@@ -329,15 +329,12 @@ qla2x00_sysfs_read_optrom(struct file *filp, struct kobject *kobj,
 	struct qla_hw_data *ha = vha->hw;
 	ssize_t rval = 0;
 
-	mutex_lock(&ha->optrom_mutex);
-
 	if (ha->optrom_state != QLA_SREADING)
-		goto out;
+		return 0;
 
+	mutex_lock(&ha->optrom_mutex);
 	rval = memory_read_from_buffer(buf, count, &off, ha->optrom_buffer,
 	    ha->optrom_region_size);
-
-out:
 	mutex_unlock(&ha->optrom_mutex);
 
 	return rval;
@@ -352,19 +349,14 @@ qla2x00_sysfs_write_optrom(struct file *filp, struct kobject *kobj,
 	    struct device, kobj)));
 	struct qla_hw_data *ha = vha->hw;
 
-	mutex_lock(&ha->optrom_mutex);
-
-	if (ha->optrom_state != QLA_SWRITING) {
-		mutex_unlock(&ha->optrom_mutex);
+	if (ha->optrom_state != QLA_SWRITING)
 		return -EINVAL;
-	}
-	if (off > ha->optrom_region_size) {
-		mutex_unlock(&ha->optrom_mutex);
+	if (off > ha->optrom_region_size)
 		return -ERANGE;
-	}
 	if (off + count > ha->optrom_region_size)
 		count = ha->optrom_region_size - off;
 
+	mutex_lock(&ha->optrom_mutex);
 	memcpy(&ha->optrom_buffer[off], buf, count);
 	mutex_unlock(&ha->optrom_mutex);
 
@@ -404,8 +396,6 @@ qla2x00_sysfs_write_optrom_ctl(struct file *filp, struct kobject *kobj,
 		return -EINVAL;
 	if (start > ha->optrom_size)
 		return -EINVAL;
-	if (size > ha->optrom_size - start)
-		size = ha->optrom_size - start;
 
 	mutex_lock(&ha->optrom_mutex);
 	switch (val) {
@@ -431,7 +421,8 @@ qla2x00_sysfs_write_optrom_ctl(struct file *filp, struct kobject *kobj,
 		}
 
 		ha->optrom_region_start = start;
-		ha->optrom_region_size = start + size;
+		ha->optrom_region_size = start + size > ha->optrom_size ?
+		    ha->optrom_size - start : size;
 
 		ha->optrom_state = QLA_SREADING;
 		ha->optrom_buffer = vmalloc(ha->optrom_region_size);
@@ -504,7 +495,8 @@ qla2x00_sysfs_write_optrom_ctl(struct file *filp, struct kobject *kobj,
 		}
 
 		ha->optrom_region_start = start;
-		ha->optrom_region_size = start + size;
+		ha->optrom_region_size = start + size > ha->optrom_size ?
+		    ha->optrom_size - start : size;
 
 		ha->optrom_state = QLA_SWRITING;
 		ha->optrom_buffer = vmalloc(ha->optrom_region_size);
@@ -892,6 +884,7 @@ qla2x00_sysfs_read_dcbx_tlv(struct file *filp, struct kobject *kobj,
 	    struct device, kobj)));
 	struct qla_hw_data *ha = vha->hw;
 	int rval;
+	uint16_t actual_size;
 
 	if (!capable(CAP_SYS_ADMIN) || off != 0 || count > DCBX_TLV_DATA_SIZE)
 		return 0;
@@ -908,6 +901,7 @@ qla2x00_sysfs_read_dcbx_tlv(struct file *filp, struct kobject *kobj,
 	}
 
 do_read:
+	actual_size = 0;
 	memset(ha->dcbx_tlv, 0, DCBX_TLV_DATA_SIZE);
 
 	rval = qla2x00_get_dcbx_params(vha, ha->dcbx_tlv_dma,
@@ -1085,7 +1079,8 @@ qla2x00_model_desc_show(struct device *dev, struct device_attribute *attr,
 			char *buf)
 {
 	scsi_qla_host_t *vha = shost_priv(class_to_shost(dev));
-	return scnprintf(buf, PAGE_SIZE, "%s\n", vha->hw->model_desc);
+	return scnprintf(buf, PAGE_SIZE, "%s\n",
+	    vha->hw->model_desc ? vha->hw->model_desc : "");
 }
 
 static ssize_t
@@ -1353,8 +1348,7 @@ qla2x00_mpi_version_show(struct device *dev, struct device_attribute *attr,
 	scsi_qla_host_t *vha = shost_priv(class_to_shost(dev));
 	struct qla_hw_data *ha = vha->hw;
 
-	if (!IS_QLA81XX(ha) && !IS_QLA8031(ha) && !IS_QLA8044(ha) &&
-	    !IS_QLA27XX(ha))
+	if (!IS_QLA81XX(ha) && !IS_QLA8031(ha) && !IS_QLA8044(ha))
 		return scnprintf(buf, PAGE_SIZE, "\n");
 
 	return scnprintf(buf, PAGE_SIZE, "%d.%02d.%02d (%x)\n",
@@ -1543,20 +1537,6 @@ qla2x00_allow_cna_fw_dump_store(struct device *dev,
 	return strlen(buf);
 }
 
-static ssize_t
-qla2x00_pep_version_show(struct device *dev, struct device_attribute *attr,
-	char *buf)
-{
-	scsi_qla_host_t *vha = shost_priv(class_to_shost(dev));
-	struct qla_hw_data *ha = vha->hw;
-
-	if (!IS_QLA27XX(ha))
-		return scnprintf(buf, PAGE_SIZE, "\n");
-
-	return scnprintf(buf, PAGE_SIZE, "%d.%02d.%02d\n",
-	    ha->pep_version[0], ha->pep_version[1], ha->pep_version[2]);
-}
-
 static DEVICE_ATTR(driver_version, S_IRUGO, qla2x00_drvr_version_show, NULL);
 static DEVICE_ATTR(fw_version, S_IRUGO, qla2x00_fw_version_show, NULL);
 static DEVICE_ATTR(serial_num, S_IRUGO, qla2x00_serial_num_show, NULL);
@@ -1601,7 +1581,6 @@ static DEVICE_ATTR(fw_dump_size, S_IRUGO, qla2x00_fw_dump_size_show, NULL);
 static DEVICE_ATTR(allow_cna_fw_dump, S_IRUGO | S_IWUSR,
 		   qla2x00_allow_cna_fw_dump_show,
 		   qla2x00_allow_cna_fw_dump_store);
-static DEVICE_ATTR(pep_version, S_IRUGO, qla2x00_pep_version_show, NULL);
 
 struct device_attribute *qla2x00_host_attrs[] = {
 	&dev_attr_driver_version,
@@ -1635,7 +1614,6 @@ struct device_attribute *qla2x00_host_attrs[] = {
 	&dev_attr_diag_megabytes,
 	&dev_attr_fw_dump_size,
 	&dev_attr_allow_cna_fw_dump,
-	&dev_attr_pep_version,
 	NULL,
 };
 

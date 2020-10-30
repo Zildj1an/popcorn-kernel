@@ -135,6 +135,14 @@ static const struct dmi_system_id video_detect_dmi_table[] = {
 		DMI_MATCH(DMI_PRODUCT_NAME, "UL30A"),
 		},
 	},
+	{
+	.callback = video_detect_force_vendor,
+	.ident = "Dell Inspiron 5737",
+	.matches = {
+		DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
+		DMI_MATCH(DMI_PRODUCT_NAME, "Inspiron 5737"),
+		},
+	},
 
 	/*
 	 * These models have a working acpi_video backlight control, and using
@@ -206,15 +214,6 @@ static const struct dmi_system_id video_detect_dmi_table[] = {
 		},
 	},
 	{
-	 /* https://bugzilla.redhat.com/show_bug.cgi?id=1557060 */
-	 .callback = video_detect_force_video,
-	 .ident = "SAMSUNG 670Z5E",
-	 .matches = {
-		DMI_MATCH(DMI_SYS_VENDOR, "SAMSUNG ELECTRONICS CO., LTD."),
-		DMI_MATCH(DMI_PRODUCT_NAME, "670Z5E"),
-		},
-	},
-	{
 	 /* https://bugzilla.redhat.com/show_bug.cgi?id=1094948 */
 	 .callback = video_detect_force_video,
 	 .ident = "SAMSUNG 730U3E/740U3E",
@@ -234,15 +233,6 @@ static const struct dmi_system_id video_detect_dmi_table[] = {
 		},
 	},
 	{
-	 /* https://bugzilla.redhat.com/show_bug.cgi?id=1272633 */
-	 .callback = video_detect_force_video,
-	 .ident = "Dell XPS14 L421X",
-	 .matches = {
-		DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
-		DMI_MATCH(DMI_PRODUCT_NAME, "XPS L421X"),
-		},
-	},
-	{
 	 /* https://bugzilla.redhat.com/show_bug.cgi?id=1163574 */
 	 .callback = video_detect_force_video,
 	 .ident = "Dell XPS15 L521X",
@@ -253,15 +243,6 @@ static const struct dmi_system_id video_detect_dmi_table[] = {
 	},
 
 	/* Non win8 machines which need native backlight nevertheless */
-	{
-	 /* https://bugzilla.redhat.com/show_bug.cgi?id=1201530 */
-	 .callback = video_detect_force_native,
-	 .ident = "Lenovo Ideapad S405",
-	 .matches = {
-		DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
-		DMI_MATCH(DMI_BOARD_NAME, "Lenovo IdeaPad S405"),
-		},
-	},
 	{
 	 /* https://bugzilla.redhat.com/show_bug.cgi?id=1187004 */
 	 .callback = video_detect_force_native,
@@ -280,26 +261,6 @@ static const struct dmi_system_id video_detect_dmi_table[] = {
 		DMI_MATCH(DMI_PRODUCT_NAME, "MacBookPro12,1"),
 		},
 	},
-	{
-	 /* https://bugzilla.redhat.com/show_bug.cgi?id=1123661 */
-	 .callback = video_detect_force_native,
-	 .ident = "Dell XPS 17 L702X",
-	 .matches = {
-		DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
-		DMI_MATCH(DMI_PRODUCT_NAME, "Dell System XPS L702X"),
-		},
-	},
-	{
-	/* https://bugzilla.redhat.com/show_bug.cgi?id=1204476 */
-	/* https://bugs.launchpad.net/ubuntu/+source/linux-lts-trusty/+bug/1416940 */
-	.callback = video_detect_force_native,
-	.ident = "HP Pavilion dv6",
-	.matches = {
-		DMI_MATCH(DMI_SYS_VENDOR, "Hewlett-Packard"),
-		DMI_MATCH(DMI_PRODUCT_NAME, "HP Pavilion dv6 Notebook PC"),
-		},
-	},
-
 	{ },
 };
 

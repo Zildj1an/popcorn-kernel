@@ -33,7 +33,6 @@
 #include <linux/crash_dump.h>
 #include <linux/memblock.h>
 #include <asm/asm-offsets.h>
-#include <asm/diag.h>
 #include <asm/switch_to.h>
 #include <asm/facility.h>
 #include <asm/ipl.h>
@@ -200,7 +199,6 @@ static int pcpu_alloc_lowcore(struct pcpu *pcpu, int cpu)
 	lc->panic_stack = panic_stack + PANIC_FRAME_OFFSET;
 	lc->cpu_nr = cpu;
 	lc->spinlock_lockval = arch_spin_lockval(cpu);
-	lc->br_r1_trampoline = 0x07f1;	/* br %r1 */
 	if (MACHINE_HAS_VX)
 		lc->vector_save_area_addr =
 			(unsigned long) &lc->vector_save_area;
@@ -251,9 +249,7 @@ static void pcpu_prepare_secondary(struct pcpu *pcpu, int cpu)
 	__ctl_store(lc->cregs_save_area, 0, 15);
 	save_access_regs((unsigned int *) lc->access_regs_save_area);
 	memcpy(lc->stfle_fac_list, S390_lowcore.stfle_fac_list,
-	       sizeof(lc->stfle_fac_list));
-	memcpy(lc->alt_stfle_fac_list, S390_lowcore.alt_stfle_fac_list,
-	       sizeof(lc->alt_stfle_fac_list));
+	       MAX_FACILITY_BIT/8);
 }
 
 static void pcpu_attach_task(struct pcpu *pcpu, struct task_struct *tsk)
@@ -265,8 +261,6 @@ static void pcpu_attach_task(struct pcpu *pcpu, struct task_struct *tsk)
 		+ THREAD_SIZE - STACK_FRAME_OVERHEAD - sizeof(struct pt_regs);
 	lc->thread_info = (unsigned long) task_thread_info(tsk);
 	lc->current_task = (unsigned long) tsk;
-	lc->lpp = LPP_MAGIC;
-	lc->current_pid = tsk->pid;
 	lc->user_timer = ti->user_timer;
 	lc->system_timer = ti->system_timer;
 	lc->steal_timer = 0;
@@ -302,7 +296,6 @@ static void pcpu_delegate(struct pcpu *pcpu, void (*func)(void *),
 	mem_assign_absolute(lc->restart_fn, (unsigned long) func);
 	mem_assign_absolute(lc->restart_data, (unsigned long) data);
 	mem_assign_absolute(lc->restart_source, source_cpu);
-	__bpon();
 	asm volatile(
 		"0:	sigp	0,%0,%2	# sigp restart to target cpu\n"
 		"	brc	2,0b	# busy, try again\n"
@@ -382,14 +375,11 @@ int smp_vcpu_scheduled(int cpu)
 
 void smp_yield_cpu(int cpu)
 {
-	if (MACHINE_HAS_DIAG9C) {
-		diag_stat_inc_norecursion(DIAG_STAT_X09C);
+	if (MACHINE_HAS_DIAG9C)
 		asm volatile("diag %0,0,0x9c"
 			     : : "d" (pcpu_devices[cpu].address));
-	} else if (MACHINE_HAS_DIAG44) {
-		diag_stat_inc_norecursion(DIAG_STAT_X044);
+	else if (MACHINE_HAS_DIAG44)
 		asm volatile("diag 0,0,0x44");
-	}
 }
 
 /*
@@ -542,8 +532,8 @@ EXPORT_SYMBOL(smp_ctl_clear_bit);
 
 #ifdef CONFIG_CRASH_DUMP
 
-static void __init __smp_store_cpu_state(struct save_area_ext *sa_ext,
-					 u16 address, int is_boot_cpu)
+static void __smp_store_cpu_state(struct save_area_ext *sa_ext, u16 address,
+				  int is_boot_cpu)
 {
 	void *lc = (void *)(unsigned long) store_prefix();
 	unsigned long vx_sa;
@@ -892,7 +882,6 @@ void __cpu_die(unsigned int cpu)
 void __noreturn cpu_die(void)
 {
 	idle_task_exit();
-	__bpon();
 	pcpu_sigp_retry(pcpu_devices + smp_processor_id(), SIGP_STOP, 0);
 	for (;;) ;
 }

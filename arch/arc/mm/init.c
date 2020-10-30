@@ -30,9 +30,13 @@ static unsigned long low_mem_sz;
 
 #ifdef CONFIG_HIGHMEM
 static unsigned long min_high_pfn;
+static unsigned long max_high_pfn;
 static u64 high_mem_start;
 static u64 high_mem_sz;
 #endif
+
+struct pglist_data node_data[MAX_NUMNODES] __read_mostly;
+EXPORT_SYMBOL(node_data);
 
 /* User can over-ride above with "mem=nnn[KkMm]" in cmdline */
 static int __init setup_mem_sz(char *str)
@@ -51,9 +55,7 @@ void __init early_init_dt_add_memory_arch(u64 base, u64 size)
 	int in_use = 0;
 
 	if (!low_mem_sz) {
-		if (base != low_mem_start)
-			panic("CONFIG_LINUX_LINK_BASE != DT memory { }");
-
+		BUG_ON(base != low_mem_start);
 		low_mem_sz = size;
 		in_use = 1;
 	} else {
@@ -65,7 +67,7 @@ void __init early_init_dt_add_memory_arch(u64 base, u64 size)
 	}
 
 	pr_info("Memory @ %llx [%lldM] %s\n",
-		base, TO_MB(size), !in_use ? "Not used":"");
+			base, TO_MB(size), !in_use ? "Not used":"");
 }
 
 #ifdef CONFIG_BLK_DEV_INITRD
@@ -96,6 +98,7 @@ void __init setup_arch_memory(void)
 {
 	unsigned long zones_size[MAX_NR_ZONES];
 	unsigned long zones_holes[MAX_NR_ZONES];
+	unsigned long min_pfn;
 
 	init_mm.start_code = (unsigned long)_text;
 	init_mm.end_code = (unsigned long)_etext;
@@ -103,17 +106,22 @@ void __init setup_arch_memory(void)
 	init_mm.brk = (unsigned long)_end;
 
 	/* first page of system - kernel .vector starts here */
-	min_low_pfn = ARCH_PFN_OFFSET;
+	min_low_pfn = min_pfn = ARCH_PFN_OFFSET;
 
 	/* Last usable page of low mem */
 	max_low_pfn = max_pfn = PFN_DOWN(low_mem_start + low_mem_sz);
 
 #ifdef CONFIG_HIGHMEM
 	min_high_pfn = PFN_DOWN(high_mem_start);
-	max_pfn = PFN_DOWN(high_mem_start + high_mem_sz);
+	max_high_pfn = PFN_DOWN(high_mem_start + high_mem_sz);
+
+	min_pfn = min(min_low_pfn, min_high_pfn);
+	max_pfn = max(max_low_pfn, max_high_pfn);
 #endif
 
-	max_mapnr = max_pfn - min_low_pfn;
+#ifdef CONFIG_FLATMEM
+	max_mapnr = max_pfn - min_pfn;
+#endif
 
 	/*------------- bootmem allocator setup -----------------------*/
 
@@ -131,6 +139,10 @@ void __init setup_arch_memory(void)
 	memblock_add(low_mem_start, low_mem_sz);
 	memblock_reserve(low_mem_start, __pa(_end) - low_mem_start);
 
+	node_set_online(0);
+	node_set_state(0, N_MEMORY);
+	node_set_state(0, N_NORMAL_MEMORY);
+
 #ifdef CONFIG_BLK_DEV_INITRD
 	if (initrd_start)
 		memblock_reserve(__pa(initrd_start), initrd_end - initrd_start);
@@ -145,13 +157,6 @@ void __init setup_arch_memory(void)
 	zones_size[ZONE_NORMAL] = max_low_pfn - min_low_pfn;
 	zones_holes[ZONE_NORMAL] = 0;
 
-#ifdef CONFIG_HIGHMEM
-	zones_size[ZONE_HIGHMEM] = max_pfn - max_low_pfn;
-
-	/* This handles the peripheral address space hole */
-	zones_holes[ZONE_HIGHMEM] = min_high_pfn - max_low_pfn;
-#endif
-
 	/*
 	 * We can't use the helper free_area_init(zones[]) because it uses
 	 * PAGE_OFFSET to compute the @min_low_pfn which would be wrong
@@ -160,10 +165,34 @@ void __init setup_arch_memory(void)
 	 */
 	free_area_init_node(0,			/* node-id */
 			    zones_size,		/* num pages per zone */
-			    min_low_pfn,	/* first pfn of node */
+			    ARCH_PFN_OFFSET,	/* first pfn of node */
 			    zones_holes);	/* holes */
+	node_set_online(0);
 
 #ifdef CONFIG_HIGHMEM
+	node_set_online(1);
+	node_set_state(1, N_MEMORY);
+	node_set_state(1, N_HIGH_MEMORY);
+
+	memset(zones_size, 0, sizeof(zones_size));
+	memset(zones_holes, 0, sizeof(zones_holes));
+
+	if ( min_high_pfn > min_low_pfn ) {
+		zones_size[ZONE_HIGHMEM] = max_high_pfn - max_low_pfn;
+
+		/* This handles the peripheral address space hole */
+		zones_holes[ZONE_HIGHMEM] = min_high_pfn - max_low_pfn;
+	} else {
+		/* highmem is between zero and PAGE_OFFSET */
+		zones_size[ZONE_HIGHMEM] = min_low_pfn;
+		zones_holes[ZONE_HIGHMEM] = min_high_pfn;
+	}
+
+	free_area_init_node(1,			/* node-id */
+			    zones_size,		/* num pages per zone */
+			    min_high_pfn,	/* first pfn of node */
+			    zones_holes);	/* holes */
+
 	high_memory = (void *)(min_high_pfn << PAGE_SHIFT);
 	kmap_init();
 #endif
@@ -181,7 +210,7 @@ void __init mem_init(void)
 	unsigned long tmp;
 
 	reset_all_zones_managed_pages();
-	for (tmp = min_high_pfn; tmp < max_pfn; tmp++)
+	for (tmp = min_high_pfn; tmp < max_high_pfn; tmp++)
 		free_highmem_page(pfn_to_page(tmp));
 #endif
 

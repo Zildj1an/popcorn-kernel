@@ -40,6 +40,14 @@
 	lr	r5, [ARC_REG_DC_CTRL]
 	bclr	r5, r5, 6		; Invalidate (discard w/o wback)
 #ifdef CONFIG_ARC_HAS_DCACHE
+#ifdef CONFIG_ARC_PLAT_EZNPS
+	sr 	1, [ARC_REG_DC_IVDC]
+	lr r3, [CTOP_AUX_THREAD_ID]
+	cmp r3, 0
+	bnz 2f
+	sr	HW_COMPLY_KRN_NOT_D_CACHED, [CTOP_AUX_HW_COMPLY]
+2:
+#endif
 	bclr	r5, r5, 0		; Enable (+Inv)
 #else
 	bset	r5, r5, 0		; Disable (+Inv)
@@ -47,40 +55,39 @@
 	sr	r5, [ARC_REG_DC_CTRL]
 
 1:
+#ifdef CONFIG_ARC_PLAT_EZNPS
+	lr r5, [CTOP_AUX_CORE_ID]
+	sr r5, [CTOP_AUX_LOGIC_CORE_ID]
+	lr r3, [CTOP_AUX_CLUSTER_ID]
+	.short CTOP_INST_MOV2B_FLIP_R3_B1_B2_INST
+	.word  CTOP_INST_MOV2B_FLIP_R3_B1_B2_LIMM
+	sr r3, [CTOP_AUX_LOGIC_CLUSTER_ID]
+#endif
 .endm
 
 	.section .init.text, "ax",@progbits
-
-;----------------------------------------------------------------
-; Default Reset Handler (jumped into from Reset vector)
-; - Don't clobber r0,r1,r2 as they might have u-boot provided args
-; - Platforms can override this weak version if needed
-;----------------------------------------------------------------
-WEAK(res_service)
-	j	stext
-END(res_service)
-
-;----------------------------------------------------------------
-; Kernel Entry point
-;----------------------------------------------------------------
-ENTRY(stext)
+	.type stext, @function
+	.globl stext
+stext:
+	;-------------------------------------------------------------------
+	; Don't clobber r0-r2 yet. It might have bootloader provided info
+	;-------------------------------------------------------------------
 
 	CPU_EARLY_SETUP
 
 #ifdef CONFIG_SMP
+	; Ensure Boot (Master) proceeds. Others wait in platform dependent way
+	;	IDENTITY Reg [ 3  2  1  0 ]
+	;	(cpu-id)             ^^^	=> Zero for UP ARC700
+	;					=> #Core-ID if SMP (Master 0)
+	; Note that non-boot CPUs might not land here if halt-on-reset and
+	; instead breath life from @first_lines_of_secondary, but we still
+	; need to make sure only boot cpu takes this path.
 	GET_CPU_ID  r5
 	cmp	r5, 0
-	mov.nz	r0, r5
-#ifdef CONFIG_ARC_SMP_HALT_ON_RESET
-	; Non-Master can proceed as system would be booted sufficiently
-	jnz	first_lines_of_secondary
-#else
-	; Non-Masters wait for Master to boot enough and bring them up
-	jnz	arc_platform_smp_wait_to_boot
+	mov.ne	r0, r5
+	jne	arc_platform_smp_wait_to_boot
 #endif
-	; Master falls thru
-#endif
-
 	; Clear BSS before updating any globals
 	; XXX: use ZOL here
 	mov	r5, __bss_start
@@ -111,14 +118,22 @@ ENTRY(stext)
 	GET_TSK_STACK_BASE r9, sp	; r9 = tsk, sp = stack base(output)
 
 	j	start_kernel	; "C" entry point
-END(stext)
 
 #ifdef CONFIG_SMP
+#ifndef ARC_PLAT_START_PC_ALIGN
+#define ARC_PLAT_START_PC_ALIGN 4
+#endif
 ;----------------------------------------------------------------
 ;     First lines of code run by secondary before jumping to 'C'
 ;----------------------------------------------------------------
 	.section .text, "ax",@progbits
-ENTRY(first_lines_of_secondary)
+	.type first_lines_of_secondary, @function
+	.globl first_lines_of_secondary
+	.align ARC_PLAT_START_PC_ALIGN
+
+first_lines_of_secondary:
+
+	CPU_EARLY_SETUP
 
 	; setup per-cpu idle task as "current" on this CPU
 	ld	r0, [@secondary_idle_tsk]
@@ -131,5 +146,5 @@ ENTRY(first_lines_of_secondary)
 	GET_TSK_STACK_BASE r0, sp
 
 	j	start_kernel_secondary
-END(first_lines_of_secondary)
+
 #endif

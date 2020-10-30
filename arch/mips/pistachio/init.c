@@ -58,6 +58,7 @@ void __init plat_mem_setup(void)
 		panic("Device-tree not present");
 
 	__dt_setup_arch((void *)fw_arg1);
+	strlcpy(arcs_cmdline, boot_command_line, COMMAND_LINE_SIZE);
 
 	plat_setup_iocoherency();
 }

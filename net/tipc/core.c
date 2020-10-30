@@ -42,12 +42,11 @@
 #include "bearer.h"
 #include "net.h"
 #include "socket.h"
-#include "bcast.h"
 
 #include <linux/module.h>
 
 /* configurable TIPC parameters */
-unsigned int tipc_net_id __read_mostly;
+int tipc_net_id __read_mostly;
 int sysctl_tipc_rmem[3] __read_mostly;	/* min/default/max */
 
 static int __net_init tipc_init_net(struct net *net)
@@ -56,12 +55,7 @@ static int __net_init tipc_init_net(struct net *net)
 	int err;
 
 	tn->net_id = 4711;
-	tn->node_addr = 0;
-	tn->trial_addr = 0;
-	tn->addr_trial_end = 0;
-	memset(tn->node_id, 0, sizeof(tn->node_id));
-	memset(tn->node_id_string, 0, sizeof(tn->node_id_string));
-	tn->mon_threshold = TIPC_DEF_MON_THRESHOLD;
+	tn->own_addr = 0;
 	get_random_bytes(&tn->random, sizeof(int));
 	INIT_LIST_HEAD(&tn->node_list);
 	spin_lock_init(&tn->node_list_lock);
@@ -74,19 +68,11 @@ static int __net_init tipc_init_net(struct net *net)
 	if (err)
 		goto out_nametbl;
 
-	INIT_LIST_HEAD(&tn->dist_queue);
 	err = tipc_topsrv_start(net);
 	if (err)
 		goto out_subscr;
-
-	err = tipc_bcast_init(net);
-	if (err)
-		goto out_bclink;
-
 	return 0;
 
-out_bclink:
-	tipc_bcast_stop(net);
 out_subscr:
 	tipc_nametbl_stop(net);
 out_nametbl:
@@ -99,7 +85,6 @@ static void __net_exit tipc_exit_net(struct net *net)
 {
 	tipc_topsrv_stop(net);
 	tipc_net_stop(net);
-	tipc_bcast_stop(net);
 	tipc_nametbl_stop(net);
 	tipc_sk_rht_destroy(net);
 }
@@ -117,9 +102,11 @@ static int __init tipc_init(void)
 
 	pr_info("Activated (version " TIPC_MOD_VER ")\n");
 
-	sysctl_tipc_rmem[0] = RCVBUF_MIN;
-	sysctl_tipc_rmem[1] = RCVBUF_DEF;
-	sysctl_tipc_rmem[2] = RCVBUF_MAX;
+	sysctl_tipc_rmem[0] = TIPC_CONN_OVERLOAD_LIMIT >> 4 <<
+			      TIPC_LOW_IMPORTANCE;
+	sysctl_tipc_rmem[1] = TIPC_CONN_OVERLOAD_LIMIT >> 4 <<
+			      TIPC_CRITICAL_IMPORTANCE;
+	sysctl_tipc_rmem[2] = TIPC_CONN_OVERLOAD_LIMIT;
 
 	err = tipc_netlink_start();
 	if (err)

@@ -17,6 +17,7 @@
 #ifndef __ASSEMBLY__
 
 #include <asm/ptrace.h>
+#include <asm/hw_breakpoint.h>
 
 #ifdef CONFIG_ARC_FPU_SAVE_RESTORE
 /* These DPFP regs need to be saved/restored across ctx-sw */
@@ -38,6 +39,12 @@ struct thread_struct {
 #ifdef CONFIG_ARC_FPU_SAVE_RESTORE
 	struct arc_fpu fpu;
 #endif
+#ifdef CONFIG_HAVE_HW_BREAKPOINT
+	struct perf_event *hbp[ARC_MAX_HBP_SLOTS];
+#endif
+#ifdef CONFIG_ARC_PLAT_EZNPS
+	struct eznps_dp dp;
+#endif
 };
 
 #define INIT_THREAD  {                          \
@@ -57,7 +64,16 @@ struct task_struct;
  * A lot of busy-wait loops in SMP are based off of non-volatile data otherwise
  * get optimised away by gcc
  */
+#ifdef CONFIG_SMP
+#ifdef CONFIG_EZNPS_MTM_EXT
+#define cpu_relax()     \
+	__asm__ __volatile__ ("nop\n	.word %0" : : "i"(CTOP_INST_SCHD_RW) : "memory")
+#else
 #define cpu_relax()	__asm__ __volatile__ ("" : : : "memory")
+#endif
+#else
+#define cpu_relax()	do { } while (0)
+#endif
 
 #define cpu_relax_lowlatency() cpu_relax()
 
@@ -109,20 +125,51 @@ extern unsigned int get_wchan(struct task_struct *p);
  * 0xC000_0000		0xFFFF_FFFF	(peripheral uncached space)
  * -----------------------------------------------------------------------------
  */
-#define VMALLOC_START	0x70000000
-
 /*
  * 1 PGDIR_SIZE each for fixmap/pkmap, 2 PGDIR_SIZE gutter
  * See asm/highmem.h for details
  */
-#define VMALLOC_SIZE	(PAGE_OFFSET - VMALLOC_START - PGDIR_SIZE * 4)
-#define VMALLOC_END	(VMALLOC_START + VMALLOC_SIZE)
+#define VMALLOC_END	(PAGE_OFFSET - (PGDIR_SIZE * 32 * 2))
+#define VMALLOC_SIZE	(CONFIG_ARC_VMALLOC_SIZE << 20)
+#define VMALLOC_START	(VMALLOC_END - VMALLOC_SIZE)
 
-#define USER_KERNEL_GUTTER    0x10000000
+#define TASK_SIZE	0x60000000
 
-#define TASK_SIZE	(VMALLOC_START - USER_KERNEL_GUTTER)
+#define USER_KERNEL_GUTTER    (VMALLOC_START - TASK_SIZE)
 
+#ifdef CONFIG_ARC_PLAT_EZNPS
+#define FMT_START	0x58000000
+#define FMT_SHIFT	23
+#define FMT_SIZE	4
+
+/*
+ * The 4 bits between the 23rd bit and the 26th bit of the virtual address
+ * represent the fmt slot to use for address translation
+ */
+#define FMT_MASK	GENMASK((FMT_SHIFT + FMT_SIZE - 1), FMT_SHIFT)
+
+/*
+ * The fmtp auxiliary register address is in 4 byte granularity
+ */
+#define GET_FMT_AUX_REG_ADDR(address) \
+	((address & FMT_MASK) >> (FMT_SHIFT - 2))
+/* NPS architecture defines special window of 129M in user address space for
+ * special memory areas, when accessing this window the MMU do not use TLB.
+ * Instead MMU direct the access to:
+ * 0x57f00000:0x57ffffff -- 1M of closely coupled memory (aka CMEM)
+ * 0x58000000:0x5fffffff -- 16 huge pages, 8M each, with fixed map (aka FMTs)
+ *
+ * CMEM - is the fastest memory we got and its size is 16K.
+ * FMT  - is used to map either to internal/external memory.
+ * Internal memory is the second fast memory and its size is 16M
+ * External memory is the biggest memory (16G) and also the slowest.
+ *
+ * STACK_TOP need to be PMD align (21bit) that is why we supply 0x57e00000.
+ */
+#define STACK_TOP       0x57e00000
+#else /* CONFIG_ARC_PLAT_EZNPS */
 #define STACK_TOP       TASK_SIZE
+#endif /* CONFIG_ARC_PLAT_EZNPS */
 #define STACK_TOP_MAX   STACK_TOP
 
 /* This decides where the kernel will search for a free chunk of vm

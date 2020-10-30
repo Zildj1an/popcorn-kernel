@@ -186,7 +186,7 @@ int hvutil_transport_send(struct hvutil_transport *hvt, void *msg, int len)
 		return -EINVAL;
 	} else if (hvt->mode == HVUTIL_TRANSPORT_NETLINK) {
 		cn_msg = kzalloc(sizeof(*cn_msg) + len, GFP_ATOMIC);
-		if (!cn_msg)
+		if (!msg)
 			return -ENOMEM;
 		cn_msg->id.idx = hvt->cn_id.idx;
 		cn_msg->id.val = hvt->cn_id.val;
@@ -204,12 +204,9 @@ int hvutil_transport_send(struct hvutil_transport *hvt, void *msg, int len)
 		goto out_unlock;
 	}
 	hvt->outmsg = kzalloc(len, GFP_KERNEL);
-	if (hvt->outmsg) {
-		memcpy(hvt->outmsg, msg, len);
-		hvt->outmsg_len = len;
-		wake_up_interruptible(&hvt->outmsg_q);
-	} else
-		ret = -ENOMEM;
+	memcpy(hvt->outmsg, msg, len);
+	hvt->outmsg_len = len;
+	wake_up_interruptible(&hvt->outmsg_q);
 out_unlock:
 	mutex_unlock(&hvt->outmsg_lock);
 	return ret;

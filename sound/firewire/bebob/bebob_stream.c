@@ -47,16 +47,14 @@ static const unsigned int bridgeco_freq_table[] = {
 	[6] = 0x07,
 };
 
-static int
-get_formation_index(unsigned int rate, unsigned int *index)
+static unsigned int
+get_formation_index(unsigned int rate)
 {
 	unsigned int i;
 
 	for (i = 0; i < ARRAY_SIZE(snd_bebob_rate_table); i++) {
-		if (snd_bebob_rate_table[i] == rate) {
-			*index = i;
-			return 0;
-		}
+		if (snd_bebob_rate_table[i] == rate)
+			return i;
 	}
 	return -EINVAL;
 }
@@ -121,7 +119,7 @@ end:
 int snd_bebob_stream_get_clock_src(struct snd_bebob *bebob,
 				   enum snd_bebob_clock_type *src)
 {
-	const struct snd_bebob_clock_spec *clk_spec = bebob->spec->clock;
+	struct snd_bebob_clock_spec *clk_spec = bebob->spec->clock;
 	u8 addr[AVC_BRIDGECO_ADDR_BYTES], input[7];
 	unsigned int id;
 	enum avc_bridgeco_plug_type type;
@@ -340,7 +338,7 @@ map_data_channels(struct snd_bebob *bebob, struct amdtp_stream *s)
 					err = -ENOSYS;
 					goto end;
 				}
-				amdtp_am824_set_midi_position(s, stm_pos);
+				s->midi_position = stm_pos;
 				midi = stm_pos;
 				break;
 			/* for PCM data channel */
@@ -356,12 +354,11 @@ map_data_channels(struct snd_bebob *bebob, struct amdtp_stream *s)
 			case 0x09:	/* Digital */
 			default:
 				location = pcm + sec_loc;
-				if (location >= AM824_MAX_CHANNELS_FOR_PCM) {
+				if (location >= AMDTP_MAX_CHANNELS_FOR_PCM) {
 					err = -ENOSYS;
 					goto end;
 				}
-				amdtp_am824_set_pcm_position(s, location,
-							     stm_pos);
+				s->pcm_positions[location] = stm_pos;
 				break;
 			}
 		}
@@ -427,24 +424,15 @@ make_both_connections(struct snd_bebob *bebob, unsigned int rate)
 		goto end;
 
 	/* confirm params for both streams */
-	err = get_formation_index(rate, &index);
-	if (err < 0)
-		goto end;
+	index = get_formation_index(rate);
 	pcm_channels = bebob->tx_stream_formations[index].pcm;
 	midi_channels = bebob->tx_stream_formations[index].midi;
-	err = amdtp_am824_set_parameters(&bebob->tx_stream, rate,
-					 pcm_channels, midi_channels * 8,
-					 false);
-	if (err < 0)
-		goto end;
-
+	amdtp_stream_set_parameters(&bebob->tx_stream,
+				    rate, pcm_channels, midi_channels * 8);
 	pcm_channels = bebob->rx_stream_formations[index].pcm;
 	midi_channels = bebob->rx_stream_formations[index].midi;
-	err = amdtp_am824_set_parameters(&bebob->rx_stream, rate,
-					 pcm_channels, midi_channels * 8,
-					 false);
-	if (err < 0)
-		goto end;
+	amdtp_stream_set_parameters(&bebob->rx_stream,
+				    rate, pcm_channels, midi_channels * 8);
 
 	/* establish connections for both streams */
 	err = cmp_connection_establish(&bebob->out_conn,
@@ -542,8 +530,8 @@ int snd_bebob_stream_init_duplex(struct snd_bebob *bebob)
 	if (err < 0)
 		goto end;
 
-	err = amdtp_am824_init(&bebob->tx_stream, bebob->unit,
-			       AMDTP_IN_STREAM, CIP_BLOCKING);
+	err = amdtp_stream_init(&bebob->tx_stream, bebob->unit,
+				AMDTP_IN_STREAM, CIP_BLOCKING);
 	if (err < 0) {
 		amdtp_stream_destroy(&bebob->tx_stream);
 		destroy_both_connections(bebob);
@@ -571,8 +559,8 @@ int snd_bebob_stream_init_duplex(struct snd_bebob *bebob)
 	if (bebob->maudio_special_quirk)
 		bebob->tx_stream.flags |= CIP_EMPTY_HAS_WRONG_DBC;
 
-	err = amdtp_am824_init(&bebob->rx_stream, bebob->unit,
-			       AMDTP_OUT_STREAM, CIP_BLOCKING);
+	err = amdtp_stream_init(&bebob->rx_stream, bebob->unit,
+				AMDTP_OUT_STREAM, CIP_BLOCKING);
 	if (err < 0) {
 		amdtp_stream_destroy(&bebob->tx_stream);
 		amdtp_stream_destroy(&bebob->rx_stream);
@@ -584,7 +572,7 @@ end:
 
 int snd_bebob_stream_start_duplex(struct snd_bebob *bebob, unsigned int rate)
 {
-	const struct snd_bebob_rate_spec *rate_spec = bebob->spec->rate;
+	struct snd_bebob_rate_spec *rate_spec = bebob->spec->rate;
 	struct amdtp_stream *master, *slave;
 	enum cip_flags sync_mode;
 	unsigned int curr_rate;
@@ -876,8 +864,8 @@ parse_stream_formation(u8 *buf, unsigned int len,
 		}
 	}
 
-	if (formation[i].pcm  > AM824_MAX_CHANNELS_FOR_PCM ||
-	    formation[i].midi > AM824_MAX_CHANNELS_FOR_MIDI)
+	if (formation[i].pcm  > AMDTP_MAX_CHANNELS_FOR_PCM ||
+	    formation[i].midi > AMDTP_MAX_CHANNELS_FOR_MIDI)
 		return -ENOSYS;
 
 	return 0;
@@ -971,7 +959,7 @@ end:
 
 int snd_bebob_stream_discover(struct snd_bebob *bebob)
 {
-	const struct snd_bebob_clock_spec *clk_spec = bebob->spec->clock;
+	struct snd_bebob_clock_spec *clk_spec = bebob->spec->clock;
 	u8 plugs[AVC_PLUG_INFO_BUF_BYTES], addr[AVC_BRIDGECO_ADDR_BYTES];
 	enum avc_bridgeco_plug_type type;
 	unsigned int i;

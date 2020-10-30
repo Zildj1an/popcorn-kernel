@@ -105,25 +105,16 @@ static int r_show(struct seq_file *m, void *v)
 {
 	struct resource *root = m->private;
 	struct resource *r = v, *p;
-	unsigned long long start, end;
 	int width = root->end < 0x10000 ? 4 : 8;
 	int depth;
 
 	for (depth = 0, p = r; depth < MAX_IORES_LEVEL; depth++, p = p->parent)
 		if (p->parent == root)
 			break;
-
-	if (file_ns_capable(m->file, &init_user_ns, CAP_SYS_ADMIN)) {
-		start = r->start;
-		end = r->end;
-	} else {
-		start = end = 0;
-	}
-
 	seq_printf(m, "%*s%0*llx-%0*llx : %s\n",
 			depth * 2, "",
-			width, start,
-			width, end,
+			width, (unsigned long long) r->start,
+			width, (unsigned long long) r->end,
 			r->name ? r->name : "<BAD>");
 	return 0;
 }
@@ -501,51 +492,40 @@ int __weak page_is_ram(unsigned long pfn)
 }
 EXPORT_SYMBOL_GPL(page_is_ram);
 
-/**
- * region_intersects() - determine intersection of region with known resources
- * @start: region start address
- * @size: size of region
- * @name: name of resource (in iomem_resource)
+/*
+ * Search for a resouce entry that fully contains the specified region.
+ * If found, return 1 if it is RAM, 0 if not.
+ * If not found, or region is not fully contained, return -1
  *
- * Check if the specified region partially overlaps or fully eclipses a
- * resource identified by @name.  Return REGION_DISJOINT if the region
- * does not overlap @name, return REGION_MIXED if the region overlaps
- * @type and another resource, and return REGION_INTERSECTS if the
- * region overlaps @type and no other defined resource. Note, that
- * REGION_INTERSECTS is also returned in the case when the specified
- * region overlaps RAM and undefined memory holes.
- *
- * region_intersect() is used by memory remapping functions to ensure
- * the user is not remapping RAM and is a vast speed up over walking
- * through the resource table page by page.
+ * Used by the ioremap functions to ensure the user is not remapping RAM and is
+ * a vast speed up over walking through the resource table page by page.
  */
-int region_intersects(resource_size_t start, size_t size, const char *name)
+int region_is_ram(resource_size_t start, unsigned long size)
 {
-	unsigned long flags = IORESOURCE_MEM | IORESOURCE_BUSY;
-	resource_size_t end = start + size - 1;
-	int type = 0; int other = 0;
 	struct resource *p;
+	resource_size_t end = start + size - 1;
+	unsigned long flags = IORESOURCE_MEM | IORESOURCE_BUSY;
+	const char *name = "System RAM";
+	int ret = -1;
 
 	read_lock(&resource_lock);
 	for (p = iomem_resource.child; p ; p = p->sibling) {
-		bool is_type = strcmp(p->name, name) == 0 && p->flags == flags;
+		if (p->end < start)
+			continue;
 
-		if (start >= p->start && start <= p->end)
-			is_type ? type++ : other++;
-		if (end >= p->start && end <= p->end)
-			is_type ? type++ : other++;
-		if (p->start >= start && p->end <= end)
-			is_type ? type++ : other++;
+		if (p->start <= start && end <= p->end) {
+			/* resource fully contains region */
+			if ((p->flags != flags) || strcmp(p->name, name))
+				ret = 0;
+			else
+				ret = 1;
+			break;
+		}
+		if (end < p->start)
+			break;	/* not found */
 	}
 	read_unlock(&resource_lock);
-
-	if (other == 0)
-		return type ? REGION_INTERSECTS : REGION_DISJOINT;
-
-	if (type)
-		return REGION_MIXED;
-
-	return REGION_DISJOINT;
+	return ret;
 }
 
 void __weak arch_remove_reservations(struct resource *avail)
@@ -611,8 +591,7 @@ static int __find_resource(struct resource *root, struct resource *old,
 			alloc.start = constraint->alignf(constraint->alignf_data, &avail,
 					size, constraint->align);
 			alloc.end = alloc.start + size - 1;
-			if (alloc.start <= alloc.end &&
-			    resource_contains(&avail, &alloc)) {
+			if (resource_contains(&avail, &alloc)) {
 				new->start = alloc.start;
 				new->end = alloc.end;
 				return 0;
@@ -1093,10 +1072,9 @@ struct resource * __request_region(struct resource *parent,
 		if (!conflict)
 			break;
 		if (conflict != parent) {
-			if (!(conflict->flags & IORESOURCE_BUSY)) {
-				parent = conflict;
+			parent = conflict;
+			if (!(conflict->flags & IORESOURCE_BUSY))
 				continue;
-			}
 		}
 		if (conflict->flags & flags & IORESOURCE_MUXED) {
 			add_wait_queue(&muxed_resource_wait, &wait);

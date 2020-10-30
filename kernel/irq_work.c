@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010 Red Hat, Inc., Peter Zijlstra
+ * Copyright (C) 2010 Red Hat, Inc., Peter Zijlstra <pzijlstr@redhat.com>
  *
  * Provides a framework for enqueueing and running callbacks from hardirq
  * context. The enqueueing is NMI-safe.
@@ -17,6 +17,7 @@
 #include <linux/cpu.h>
 #include <linux/notifier.h>
 #include <linux/smp.h>
+#include <linux/isolation.h>
 #include <asm/processor.h>
 
 
@@ -75,8 +76,10 @@ bool irq_work_queue_on(struct irq_work *work, int cpu)
 	if (!irq_work_claim(work))
 		return false;
 
-	if (llist_add(&work->llnode, &per_cpu(raised_list, cpu)))
+	if (llist_add(&work->llnode, &per_cpu(raised_list, cpu))) {
+		task_isolation_debug(cpu);
 		arch_send_call_function_single_ipi(cpu);
+	}
 
 	return true;
 }

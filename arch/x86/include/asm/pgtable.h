@@ -18,20 +18,7 @@
 #ifndef __ASSEMBLY__
 #include <asm/x86_init.h>
 
-#ifdef CONFIG_PAGE_TABLE_ISOLATION
-extern int kaiser_enabled;
-#else
-#define kaiser_enabled 0
-#endif
-
 void ptdump_walk_pgd_level(struct seq_file *m, pgd_t *pgd);
-void ptdump_walk_pgd_level_checkwx(void);
-
-#ifdef CONFIG_DEBUG_WX
-#define debug_checkwx() ptdump_walk_pgd_level_checkwx()
-#else
-#define debug_checkwx() do { } while (0)
-#endif
 
 /*
  * ZERO_PAGE is a global shared page that is always zero: used
@@ -155,12 +142,12 @@ static inline unsigned long pte_pfn(pte_t pte)
 
 static inline unsigned long pmd_pfn(pmd_t pmd)
 {
-	return (pmd_val(pmd) & pmd_pfn_mask(pmd)) >> PAGE_SHIFT;
+	return (pmd_val(pmd) & PTE_PFN_MASK) >> PAGE_SHIFT;
 }
 
 static inline unsigned long pud_pfn(pud_t pud)
 {
-	return (pud_val(pud) & pud_pfn_mask(pud)) >> PAGE_SHIFT;
+	return (pud_val(pud) & PTE_PFN_MASK) >> PAGE_SHIFT;
 }
 
 #define pte_page(pte)	pfn_to_page(pte_pfn(pte))
@@ -331,16 +318,6 @@ static inline pmd_t pmd_mksoft_dirty(pmd_t pmd)
 	return pmd_set_flags(pmd, _PAGE_SOFT_DIRTY);
 }
 
-static inline pte_t pte_clear_soft_dirty(pte_t pte)
-{
-	return pte_clear_flags(pte, _PAGE_SOFT_DIRTY);
-}
-
-static inline pmd_t pmd_clear_soft_dirty(pmd_t pmd)
-{
-	return pmd_clear_flags(pmd, _PAGE_SOFT_DIRTY);
-}
-
 #endif /* CONFIG_HAVE_ARCH_SOFT_DIRTY */
 
 /*
@@ -402,9 +379,7 @@ static inline pgprot_t pgprot_modify(pgprot_t oldprot, pgprot_t newprot)
 	return __pgprot(preservebits | addbits);
 }
 
-#define pte_pgprot(x) __pgprot(pte_flags(x))
-#define pmd_pgprot(x) __pgprot(pmd_flags(x))
-#define pud_pgprot(x) __pgprot(pud_flags(x))
+#define pte_pgprot(x) __pgprot(pte_flags(x) & PTE_FLAGS_MASK)
 
 #define canon_pgprot(p) __pgprot(massage_pgprot(p))
 
@@ -527,15 +502,14 @@ static inline int pmd_none(pmd_t pmd)
 
 static inline unsigned long pmd_page_vaddr(pmd_t pmd)
 {
-	return (unsigned long)__va(pmd_val(pmd) & pmd_pfn_mask(pmd));
+	return (unsigned long)__va(pmd_val(pmd) & PTE_PFN_MASK);
 }
 
 /*
  * Currently stuck as a macro due to indirect forward reference to
  * linux/mmzone.h's __section_mem_map_addr() definition:
  */
-#define pmd_page(pmd)		\
-	pfn_to_page((pmd_val(pmd) & pmd_pfn_mask(pmd)) >> PAGE_SHIFT)
+#define pmd_page(pmd)	pfn_to_page((pmd_val(pmd) & PTE_PFN_MASK) >> PAGE_SHIFT)
 
 /*
  * the pmd page can be thought of an array like this: pmd_t[PTRS_PER_PMD]
@@ -596,15 +570,14 @@ static inline int pud_present(pud_t pud)
 
 static inline unsigned long pud_page_vaddr(pud_t pud)
 {
-	return (unsigned long)__va(pud_val(pud) & pud_pfn_mask(pud));
+	return (unsigned long)__va((unsigned long)pud_val(pud) & PTE_PFN_MASK);
 }
 
 /*
  * Currently stuck as a macro due to indirect forward reference to
  * linux/mmzone.h's __section_mem_map_addr() definition:
  */
-#define pud_page(pud)		\
-	pfn_to_page((pud_val(pud) & pud_pfn_mask(pud)) >> PAGE_SHIFT)
+#define pud_page(pud)		pfn_to_page(pud_val(pud) >> PAGE_SHIFT)
 
 /* Find an entry in the second-level page table.. */
 static inline pmd_t *pmd_offset(pud_t *pud, unsigned long address)
@@ -659,17 +632,7 @@ static inline pud_t *pud_offset(pgd_t *pgd, unsigned long address)
 
 static inline int pgd_bad(pgd_t pgd)
 {
-	pgdval_t ignore_flags = _PAGE_USER;
-	/*
-	 * We set NX on KAISER pgds that map userspace memory so
-	 * that userspace can not meaningfully use the kernel
-	 * page table by accident; it will fault on the first
-	 * instruction it tries to run.  See native_set_pgd().
-	 */
-	if (kaiser_enabled)
-		ignore_flags |= _PAGE_NX;
-
-	return (pgd_flags(pgd) & ~ignore_flags) != _KERNPG_TABLE;
+	return (pgd_flags(pgd) & ~_PAGE_USER) != _KERNPG_TABLE;
 }
 
 static inline int pgd_none(pgd_t pgd)
@@ -871,15 +834,7 @@ static inline void pmdp_set_wrprotect(struct mm_struct *mm,
  */
 static inline void clone_pgd_range(pgd_t *dst, pgd_t *src, int count)
 {
-	memcpy(dst, src, count * sizeof(pgd_t));
-#ifdef CONFIG_PAGE_TABLE_ISOLATION
-	if (kaiser_enabled) {
-		/* Clone the shadow pgd part as well */
-		memcpy(native_get_shadow_pgd(dst),
-			native_get_shadow_pgd(src),
-			count * sizeof(pgd_t));
-	}
-#endif
+       memcpy(dst, src, count * sizeof(pgd_t));
 }
 
 #define PTE_SHIFT ilog2(PTRS_PER_PTE)

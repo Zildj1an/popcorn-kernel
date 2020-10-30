@@ -189,7 +189,7 @@ static int ceph_releasepage(struct page *page, gfp_t g)
 /*
  * read a single page, without unlocking it.
  */
-static int ceph_do_readpage(struct file *filp, struct page *page)
+static int readpage_nounlock(struct file *filp, struct page *page)
 {
 	struct inode *inode = file_inode(filp);
 	struct ceph_inode_info *ci = ceph_inode(inode);
@@ -219,7 +219,7 @@ static int ceph_do_readpage(struct file *filp, struct page *page)
 
 	err = ceph_readpage_from_fscache(inode, page);
 	if (err == 0)
-		return -EINPROGRESS;
+		goto out;
 
 	dout("readpage inode %p file %p page %p index %lu\n",
 	     inode, filp, page, page->index);
@@ -249,11 +249,8 @@ out:
 
 static int ceph_readpage(struct file *filp, struct page *page)
 {
-	int r = ceph_do_readpage(filp, page);
-	if (r != -EINPROGRESS)
-		unlock_page(page);
-	else
-		r = 0;
+	int r = readpage_nounlock(filp, page);
+	unlock_page(page);
 	return r;
 }
 
@@ -279,7 +276,7 @@ static void finish_read(struct ceph_osd_request *req, struct ceph_msg *msg)
 	for (i = 0; i < num_pages; i++) {
 		struct page *page = osd_data->pages[i];
 
-		if (rc < 0 && rc != ENOENT)
+		if (rc < 0)
 			goto unlock;
 		if (bytes < (int)PAGE_CACHE_SIZE) {
 			/* zero (remainder of) page */
@@ -700,7 +697,7 @@ static int ceph_writepages_start(struct address_space *mapping,
 	struct pagevec pvec;
 	int done = 0;
 	int rc = 0;
-	unsigned int wsize = i_blocksize(inode);
+	unsigned wsize = 1 << inode->i_blkbits;
 	struct ceph_osd_request *req = NULL;
 	int do_sync = 0;
 	loff_t snap_size, i_size;
@@ -720,10 +717,8 @@ static int ceph_writepages_start(struct address_space *mapping,
 	     wbc->sync_mode == WB_SYNC_NONE ? "NONE" :
 	     (wbc->sync_mode == WB_SYNC_ALL ? "ALL" : "HOLD"));
 
-	if (ACCESS_ONCE(fsc->mount_state) == CEPH_MOUNT_SHUTDOWN) {
+	if (fsc->mount_state == CEPH_MOUNT_SHUTDOWN) {
 		pr_warn("writepage_start %p on forced umount\n", inode);
-		truncate_pagecache(inode, 0);
-		mapping_set_error(mapping, -EIO);
 		return -EIO; /* we're in a forced umount, don't write! */
 	}
 	if (fsc->mount_options->wsize && fsc->mount_options->wsize < wsize)
@@ -1097,7 +1092,7 @@ retry_locked:
 			goto retry_locked;
 		r = writepage_nounlock(page, NULL);
 		if (r < 0)
-			goto fail_unlock;
+			goto fail_nosnap;
 		goto retry_locked;
 	}
 
@@ -1125,14 +1120,11 @@ retry_locked:
 	}
 
 	/* we need to read it. */
-	r = ceph_do_readpage(file, page);
-	if (r < 0) {
-		if (r == -EINPROGRESS)
-			return -EAGAIN;
-		goto fail_unlock;
-	}
+	r = readpage_nounlock(file, page);
+	if (r < 0)
+		goto fail_nosnap;
 	goto retry_locked;
-fail_unlock:
+fail_nosnap:
 	unlock_page(page);
 	return r;
 }
@@ -1289,8 +1281,8 @@ static int ceph_filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 		int ret1;
 		struct address_space *mapping = inode->i_mapping;
 		struct page *page = find_or_create_page(mapping, 0,
-						mapping_gfp_constraint(mapping,
-						~__GFP_FS));
+						mapping_gfp_mask(mapping) &
+						~__GFP_FS);
 		if (!page) {
 			ret = VM_FAULT_OOM;
 			goto out;
@@ -1434,8 +1426,7 @@ void ceph_fill_inline_data(struct inode *inode, struct page *locked_page,
 		if (i_size_read(inode) == 0)
 			return;
 		page = find_or_create_page(mapping, 0,
-					   mapping_gfp_constraint(mapping,
-					   ~__GFP_FS));
+					   mapping_gfp_mask(mapping) & ~__GFP_FS);
 		if (!page)
 			return;
 		if (PageUptodate(page)) {
@@ -1602,7 +1593,7 @@ out:
 	return err;
 }
 
-static const struct vm_operations_struct ceph_vmops = {
+static struct vm_operations_struct ceph_vmops = {
 	.fault		= ceph_filemap_fault,
 	.page_mkwrite	= ceph_page_mkwrite,
 };

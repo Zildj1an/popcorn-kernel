@@ -269,8 +269,7 @@ static int ion_test_remove(struct platform_device *pdev)
 	if (!testdev)
 		return -ENODATA;
 
-	misc_deregister(&testdev->misc);
-	return 0;
+	return misc_deregister(&testdev->misc);
 }
 
 static struct platform_device *ion_test_pdev;
@@ -285,8 +284,8 @@ static int __init ion_test_init(void)
 {
 	ion_test_pdev = platform_device_register_simple("ion-test",
 							-1, NULL, 0);
-	if (IS_ERR(ion_test_pdev))
-		return PTR_ERR(ion_test_pdev);
+	if (!ion_test_pdev)
+		return -ENODEV;
 
 	return platform_driver_probe(&ion_test_platform_driver, ion_test_probe);
 }

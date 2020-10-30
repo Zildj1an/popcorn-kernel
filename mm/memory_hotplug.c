@@ -339,8 +339,8 @@ static int __ref ensure_zone_is_initialized(struct zone *zone,
 			unsigned long start_pfn, unsigned long num_pages)
 {
 	if (!zone_is_initialized(zone))
-		return init_currently_empty_zone(zone, start_pfn, num_pages);
-
+		return init_currently_empty_zone(zone, start_pfn, num_pages,
+						 MEMMAP_HOTPLUG);
 	return 0;
 }
 
@@ -778,10 +778,7 @@ int __remove_pages(struct zone *zone, unsigned long phys_start_pfn,
 
 	start = phys_start_pfn << PAGE_SHIFT;
 	size = nr_pages * PAGE_SIZE;
-
-	/* in the ZONE_DEVICE case device driver owns the memory region */
-	if (!is_dev_zone(zone))
-		ret = release_mem_region_adjustable(&iomem_resource, start, size);
+	ret = release_mem_region_adjustable(&iomem_resource, start, size);
 	if (ret) {
 		resource_size_t endres = start + size - 1;
 
@@ -1218,13 +1215,8 @@ static int should_add_memory_movable(int nid, u64 start, u64 size)
 	return 0;
 }
 
-int zone_for_memory(int nid, u64 start, u64 size, int zone_default,
-		bool for_device)
+int zone_for_memory(int nid, u64 start, u64 size, int zone_default)
 {
-#ifdef CONFIG_ZONE_DEVICE
-	if (for_device)
-		return ZONE_DEVICE;
-#endif
 	if (should_add_memory_movable(nid, start, size))
 		return ZONE_MOVABLE;
 
@@ -1232,19 +1224,21 @@ int zone_for_memory(int nid, u64 start, u64 size, int zone_default,
 }
 
 /* we are OK calling __meminit stuff here - we have CONFIG_MEMORY_HOTPLUG */
-int __ref add_memory_resource(int nid, struct resource *res)
+int __ref add_memory(int nid, u64 start, u64 size)
 {
-	u64 start, size;
 	pg_data_t *pgdat = NULL;
 	bool new_pgdat;
 	bool new_node;
+	struct resource *res;
 	int ret;
-
-	start = res->start;
-	size = resource_size(res);
 
 	ret = check_hotplug_memory_range(start, size);
 	if (ret)
+		return ret;
+
+	res = register_memory_resource(start, size);
+	ret = -EEXIST;
+	if (!res)
 		return ret;
 
 	{	/* Stupid hack to suppress address-never-null warning */
@@ -1253,14 +1247,6 @@ int __ref add_memory_resource(int nid, struct resource *res)
 	}
 
 	mem_hotplug_begin();
-
-	/*
-	 * Add new range to memblock so that when hotadd_new_pgdat() is called
-	 * to allocate new pgdat, get_pfn_range_for_nid() will be able to find
-	 * this new range and calculate total pages correctly.  The range will
-	 * be removed at hot-remove time.
-	 */
-	memblock_add_node(start, size, nid);
 
 	new_node = !node_online(nid);
 	if (new_node) {
@@ -1271,7 +1257,7 @@ int __ref add_memory_resource(int nid, struct resource *res)
 	}
 
 	/* call arch's memory hotadd */
-	ret = arch_add_memory(nid, start, size, false);
+	ret = arch_add_memory(nid, start, size);
 
 	if (ret < 0)
 		goto error;
@@ -1291,6 +1277,7 @@ int __ref add_memory_resource(int nid, struct resource *res)
 
 	/* create new memmap entry */
 	firmware_map_add_hotplug(start, start + size, "System RAM");
+	memblock_add_node(start, size, nid);
 
 	goto out;
 
@@ -1298,26 +1285,10 @@ error:
 	/* rollback pgdat allocation and others */
 	if (new_pgdat)
 		rollback_node_hotadd(nid, pgdat);
-	memblock_remove(start, size);
+	release_memory_resource(res);
 
 out:
 	mem_hotplug_done();
-	return ret;
-}
-EXPORT_SYMBOL_GPL(add_memory_resource);
-
-int __ref add_memory(int nid, u64 start, u64 size)
-{
-	struct resource *res;
-	int ret;
-
-	res = register_memory_resource(start, size);
-	if (!res)
-		return -EEXIST;
-
-	ret = add_memory_resource(nid, res);
-	if (ret < 0)
-		release_memory_resource(res);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(add_memory);
@@ -1371,49 +1342,29 @@ int is_mem_section_removable(unsigned long start_pfn, unsigned long nr_pages)
 }
 
 /*
- * Confirm all pages in a range [start, end) belong to the same zone.
- * When true, return its valid [start, end).
+ * Confirm all pages in a range [start, end) is belongs to the same zone.
  */
-int test_pages_in_a_zone(unsigned long start_pfn, unsigned long end_pfn,
-			 unsigned long *valid_start, unsigned long *valid_end)
+int test_pages_in_a_zone(unsigned long start_pfn, unsigned long end_pfn)
 {
-	unsigned long pfn, sec_end_pfn;
-	unsigned long start, end;
+	unsigned long pfn;
 	struct zone *zone = NULL;
 	struct page *page;
 	int i;
-	for (pfn = start_pfn, sec_end_pfn = SECTION_ALIGN_UP(start_pfn + 1);
+	for (pfn = start_pfn;
 	     pfn < end_pfn;
-	     pfn = sec_end_pfn, sec_end_pfn += PAGES_PER_SECTION) {
-		/* Make sure the memory section is present first */
-		if (!present_section_nr(pfn_to_section_nr(pfn)))
+	     pfn += MAX_ORDER_NR_PAGES) {
+		i = 0;
+		/* This is just a CONFIG_HOLES_IN_ZONE check.*/
+		while ((i < MAX_ORDER_NR_PAGES) && !pfn_valid_within(pfn + i))
+			i++;
+		if (i == MAX_ORDER_NR_PAGES)
 			continue;
-		for (; pfn < sec_end_pfn && pfn < end_pfn;
-		     pfn += MAX_ORDER_NR_PAGES) {
-			i = 0;
-			/* This is just a CONFIG_HOLES_IN_ZONE check.*/
-			while ((i < MAX_ORDER_NR_PAGES) &&
-				!pfn_valid_within(pfn + i))
-				i++;
-			if (i == MAX_ORDER_NR_PAGES)
-				continue;
-			page = pfn_to_page(pfn + i);
-			if (zone && page_zone(page) != zone)
-				return 0;
-			if (!zone)
-				start = pfn + i;
-			zone = page_zone(page);
-			end = pfn + MAX_ORDER_NR_PAGES;
-		}
+		page = pfn_to_page(pfn + i);
+		if (zone && page_zone(page) != zone)
+			return 0;
+		zone = page_zone(page);
 	}
-
-	if (zone) {
-		*valid_start = start;
-		*valid_end = end;
-		return 1;
-	} else {
-		return 0;
-	}
+	return 1;
 }
 
 /*
@@ -1731,7 +1682,6 @@ static int __ref __offline_pages(unsigned long start_pfn,
 	long offlined_pages;
 	int ret, drain, retry_max, node;
 	unsigned long flags;
-	unsigned long valid_start, valid_end;
 	struct zone *zone;
 	struct memory_notify arg;
 
@@ -1742,10 +1692,10 @@ static int __ref __offline_pages(unsigned long start_pfn,
 		return -EINVAL;
 	/* This makes hotplug much easier...and readable.
 	   we assume this for now. .*/
-	if (!test_pages_in_a_zone(start_pfn, end_pfn, &valid_start, &valid_end))
+	if (!test_pages_in_a_zone(start_pfn, end_pfn))
 		return -EINVAL;
 
-	zone = page_zone(pfn_to_page(valid_start));
+	zone = page_zone(pfn_to_page(start_pfn));
 	node = zone_to_nid(zone);
 	nr_pages = end_pfn - start_pfn;
 

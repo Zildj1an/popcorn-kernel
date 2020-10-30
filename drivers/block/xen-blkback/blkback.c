@@ -87,7 +87,7 @@ MODULE_PARM_DESC(max_persistent_grants,
  * Maximum order of pages to be used for the shared ring between front and
  * backend, 4KB page granularity is used.
  */
-unsigned int xen_blkif_max_ring_order = XENBUS_MAX_RING_GRANT_ORDER;
+unsigned int xen_blkif_max_ring_order = XENBUS_MAX_RING_PAGE_ORDER;
 module_param_named(max_ring_page_order, xen_blkif_max_ring_order, int, S_IRUGO);
 MODULE_PARM_DESC(max_ring_page_order, "Maximum order of pages to be used for the shared ring");
 /*
@@ -595,6 +595,8 @@ int xen_blkif_schedule(void *arg)
 	unsigned long timeout;
 	int ret;
 
+	xen_blkif_get(blkif);
+
 	while (!kthread_should_stop()) {
 		if (try_to_freeze())
 			continue;
@@ -648,6 +650,7 @@ purge_gnt_list:
 		print_stats(blkif);
 
 	blkif->xenblkd = NULL;
+	xen_blkif_put(blkif);
 
 	return 0;
 }
@@ -947,8 +950,6 @@ static int xen_blkbk_parse_indirect(struct blkif_request *req,
 		goto unmap;
 
 	for (n = 0, i = 0; n < nseg; n++) {
-		uint8_t first_sect, last_sect;
-
 		if ((n % SEGS_PER_INDIRECT_FRAME) == 0) {
 			/* Map indirect segments */
 			if (segments)
@@ -956,18 +957,15 @@ static int xen_blkbk_parse_indirect(struct blkif_request *req,
 			segments = kmap_atomic(pages[n/SEGS_PER_INDIRECT_FRAME]->page);
 		}
 		i = n % SEGS_PER_INDIRECT_FRAME;
-
 		pending_req->segments[n]->gref = segments[i].gref;
-
-		first_sect = READ_ONCE(segments[i].first_sect);
-		last_sect = READ_ONCE(segments[i].last_sect);
-		if (last_sect >= (XEN_PAGE_SIZE >> 9) || last_sect < first_sect) {
+		seg[n].nsec = segments[i].last_sect -
+			segments[i].first_sect + 1;
+		seg[n].offset = (segments[i].first_sect << 9);
+		if ((segments[i].last_sect >= (PAGE_SIZE >> 9)) ||
+		    (segments[i].last_sect < segments[i].first_sect)) {
 			rc = -EINVAL;
 			goto unmap;
 		}
-
-		seg[n].nsec = last_sect - first_sect + 1;
-		seg[n].offset = first_sect << 9;
 		preq->nr_sects += seg[n].nsec;
 	}
 
@@ -1080,9 +1078,9 @@ static void __end_block_io_op(struct pending_req *pending_req, int error)
 /*
  * bio callback.
  */
-static void end_block_io_op(struct bio *bio)
+static void end_block_io_op(struct bio *bio, int error)
 {
-	__end_block_io_op(bio->bi_private, bio->bi_error);
+	__end_block_io_op(bio->bi_private, error);
 	bio_put(bio);
 }
 
@@ -1212,7 +1210,6 @@ static int dispatch_rw_block_io(struct xen_blkif *blkif,
 
 	req_operation = req->operation == BLKIF_OP_INDIRECT ?
 			req->u.indirect.indirect_op : req->operation;
-
 	if ((req->operation == BLKIF_OP_INDIRECT) &&
 	    (req_operation != BLKIF_OP_READ) &&
 	    (req_operation != BLKIF_OP_WRITE)) {
@@ -1271,7 +1268,7 @@ static int dispatch_rw_block_io(struct xen_blkif *blkif,
 			seg[i].nsec = req->u.rw.seg[i].last_sect -
 				req->u.rw.seg[i].first_sect + 1;
 			seg[i].offset = (req->u.rw.seg[i].first_sect << 9);
-			if ((req->u.rw.seg[i].last_sect >= (XEN_PAGE_SIZE >> 9)) ||
+			if ((req->u.rw.seg[i].last_sect >= (PAGE_SIZE >> 9)) ||
 			    (req->u.rw.seg[i].last_sect <
 			     req->u.rw.seg[i].first_sect))
 				goto fail_response;
@@ -1407,34 +1404,33 @@ static int dispatch_rw_block_io(struct xen_blkif *blkif,
 static void make_response(struct xen_blkif *blkif, u64 id,
 			  unsigned short op, int st)
 {
-	struct blkif_response *resp;
+	struct blkif_response  resp;
 	unsigned long     flags;
 	union blkif_back_rings *blk_rings = &blkif->blk_rings;
 	int notify;
+
+	resp.id        = id;
+	resp.operation = op;
+	resp.status    = st;
 
 	spin_lock_irqsave(&blkif->blk_ring_lock, flags);
 	/* Place on the response ring for the relevant domain. */
 	switch (blkif->blk_protocol) {
 	case BLKIF_PROTOCOL_NATIVE:
-		resp = RING_GET_RESPONSE(&blk_rings->native,
-					 blk_rings->native.rsp_prod_pvt);
+		memcpy(RING_GET_RESPONSE(&blk_rings->native, blk_rings->native.rsp_prod_pvt),
+		       &resp, sizeof(resp));
 		break;
 	case BLKIF_PROTOCOL_X86_32:
-		resp = RING_GET_RESPONSE(&blk_rings->x86_32,
-					 blk_rings->x86_32.rsp_prod_pvt);
+		memcpy(RING_GET_RESPONSE(&blk_rings->x86_32, blk_rings->x86_32.rsp_prod_pvt),
+		       &resp, sizeof(resp));
 		break;
 	case BLKIF_PROTOCOL_X86_64:
-		resp = RING_GET_RESPONSE(&blk_rings->x86_64,
-					 blk_rings->x86_64.rsp_prod_pvt);
+		memcpy(RING_GET_RESPONSE(&blk_rings->x86_64, blk_rings->x86_64.rsp_prod_pvt),
+		       &resp, sizeof(resp));
 		break;
 	default:
 		BUG();
 	}
-
-	resp->id        = id;
-	resp->operation = op;
-	resp->status    = st;
-
 	blk_rings->common.rsp_prod_pvt++;
 	RING_PUSH_RESPONSES_AND_CHECK_NOTIFY(&blk_rings->common, notify);
 	spin_unlock_irqrestore(&blkif->blk_ring_lock, flags);
@@ -1449,10 +1445,10 @@ static int __init xen_blkif_init(void)
 	if (!xen_domain())
 		return -ENODEV;
 
-	if (xen_blkif_max_ring_order > XENBUS_MAX_RING_GRANT_ORDER) {
+	if (xen_blkif_max_ring_order > XENBUS_MAX_RING_PAGE_ORDER) {
 		pr_info("Invalid max_ring_order (%d), will use default max: %d.\n",
-			xen_blkif_max_ring_order, XENBUS_MAX_RING_GRANT_ORDER);
-		xen_blkif_max_ring_order = XENBUS_MAX_RING_GRANT_ORDER;
+			xen_blkif_max_ring_order, XENBUS_MAX_RING_PAGE_ORDER);
+		xen_blkif_max_ring_order = XENBUS_MAX_RING_PAGE_ORDER;
 	}
 
 	rc = xen_blkif_interface_init();

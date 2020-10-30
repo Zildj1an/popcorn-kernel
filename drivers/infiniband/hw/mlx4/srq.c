@@ -34,7 +34,6 @@
 #include <linux/mlx4/qp.h>
 #include <linux/mlx4/srq.h>
 #include <linux/slab.h>
-#include <linux/vmalloc.h>
 
 #include "mlx4_ib.h"
 #include "user.h"
@@ -173,12 +172,8 @@ struct ib_srq *mlx4_ib_create_srq(struct ib_pd *pd,
 
 		srq->wrid = kmalloc(srq->msrq.max * sizeof (u64), GFP_KERNEL);
 		if (!srq->wrid) {
-			srq->wrid = __vmalloc(srq->msrq.max * sizeof(u64),
-					      GFP_KERNEL, PAGE_KERNEL);
-			if (!srq->wrid) {
-				err = -ENOMEM;
-				goto err_mtt;
-			}
+			err = -ENOMEM;
+			goto err_mtt;
 		}
 	}
 
@@ -209,7 +204,7 @@ err_wrid:
 	if (pd->uobject)
 		mlx4_ib_db_unmap_user(to_mucontext(pd->uobject->context), &srq->db);
 	else
-		kvfree(srq->wrid);
+		kfree(srq->wrid);
 
 err_mtt:
 	mlx4_mtt_cleanup(dev->dev, &srq->mtt);
@@ -286,7 +281,7 @@ int mlx4_ib_destroy_srq(struct ib_srq *srq)
 		mlx4_ib_db_unmap_user(to_mucontext(srq->uobject->context), &msrq->db);
 		ib_umem_release(msrq->umem);
 	} else {
-		kvfree(msrq->wrid);
+		kfree(msrq->wrid);
 		mlx4_buf_free(dev->dev, msrq->msrq.max << msrq->msrq.wqe_shift,
 			      &msrq->buf);
 		mlx4_db_free(dev->dev, &msrq->db);

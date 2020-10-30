@@ -16,7 +16,6 @@
 #include <net/bluetooth/hci_core.h>
 #include <net/bluetooth/l2cap.h>
 
-#include "hci_request.h"
 #include "a2mp.h"
 #include "amp.h"
 
@@ -63,7 +62,7 @@ static void a2mp_send(struct amp_mgr *mgr, u8 code, u8 ident, u16 len, void *dat
 
 	memset(&msg, 0, sizeof(msg));
 
-	iov_iter_kvec(&msg.msg_iter, WRITE, &iv, 1, total_len);
+	iov_iter_kvec(&msg.msg_iter, WRITE | ITER_KVEC, &iv, 1, total_len);
 
 	l2cap_chan_send(chan, &msg, total_len);
 
@@ -239,7 +238,7 @@ static int a2mp_discover_rsp(struct amp_mgr *mgr, struct sk_buff *skb,
 		}
 
 		len -= sizeof(*cl);
-		cl = skb_pull(skb, sizeof(*cl));
+		cl = (void *) skb_pull(skb, sizeof(*cl));
 	}
 
 	/* Fall back to L2CAP init sequence */
@@ -279,7 +278,7 @@ static int a2mp_change_notify(struct amp_mgr *mgr, struct sk_buff *skb,
 	while (skb->len >= sizeof(*cl)) {
 		BT_DBG("Controller id %d type %d status %d", cl->id, cl->type,
 		       cl->status);
-		cl = skb_pull(skb, sizeof(*cl));
+		cl = (struct a2mp_cl *) skb_pull(skb, sizeof(*cl));
 	}
 
 	/* TODO send A2MP_CHANGE_RSP */
@@ -287,21 +286,11 @@ static int a2mp_change_notify(struct amp_mgr *mgr, struct sk_buff *skb,
 	return 0;
 }
 
-static void read_local_amp_info_complete(struct hci_dev *hdev, u8 status,
-					 u16 opcode)
-{
-	BT_DBG("%s status 0x%2.2x", hdev->name, status);
-
-	a2mp_send_getinfo_rsp(hdev);
-}
-
 static int a2mp_getinfo_req(struct amp_mgr *mgr, struct sk_buff *skb,
 			    struct a2mp_cmd *hdr)
 {
 	struct a2mp_info_req *req  = (void *) skb->data;
 	struct hci_dev *hdev;
-	struct hci_request hreq;
-	int err = 0;
 
 	if (le16_to_cpu(hdr->len) < sizeof(*req))
 		return -EINVAL;
@@ -322,11 +311,7 @@ static int a2mp_getinfo_req(struct amp_mgr *mgr, struct sk_buff *skb,
 	}
 
 	set_bit(READ_LOC_AMP_INFO, &mgr->state);
-	hci_req_init(&hreq, hdev);
-	hci_req_add(&hreq, HCI_OP_READ_LOCAL_AMP_INFO, 0, NULL);
-	err = hci_req_run(&hreq, read_local_amp_info_complete);
-	if (err < 0)
-		a2mp_send_getinfo_rsp(hdev);
+	hci_send_cmd(hdev, HCI_OP_READ_LOCAL_AMP_INFO, 0, NULL);
 
 done:
 	if (hdev)
@@ -573,7 +558,7 @@ static int a2mp_discphyslink_req(struct amp_mgr *mgr, struct sk_buff *skb,
 	hcon = hci_conn_hash_lookup_ba(hdev, AMP_LINK,
 				       &mgr->l2cap_conn->hcon->dst);
 	if (!hcon) {
-		bt_dev_err(hdev, "no phys link exist");
+		BT_ERR("No phys link exist");
 		rsp.status = A2MP_STATUS_NO_PHYSICAL_LINK_EXISTS;
 		goto clean;
 	}
@@ -810,7 +795,7 @@ static struct l2cap_chan *a2mp_chan_open(struct l2cap_conn *conn, bool locked)
 /* AMP Manager functions */
 struct amp_mgr *amp_mgr_get(struct amp_mgr *mgr)
 {
-	BT_DBG("mgr %p orig refcnt %d", mgr, kref_read(&mgr->kref));
+	BT_DBG("mgr %p orig refcnt %d", mgr, atomic_read(&mgr->kref.refcount));
 
 	kref_get(&mgr->kref);
 
@@ -833,7 +818,7 @@ static void amp_mgr_destroy(struct kref *kref)
 
 int amp_mgr_put(struct amp_mgr *mgr)
 {
-	BT_DBG("mgr %p orig refcnt %d", mgr, kref_read(&mgr->kref));
+	BT_DBG("mgr %p orig refcnt %d", mgr, atomic_read(&mgr->kref.refcount));
 
 	return kref_put(&mgr->kref, &amp_mgr_destroy);
 }

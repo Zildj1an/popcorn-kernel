@@ -30,12 +30,6 @@
 
 #define LLC_RESERVE sizeof(struct llc_pdu_un)
 
-static int br_send_bpdu_finish(struct net *net, struct sock *sk,
-			       struct sk_buff *skb)
-{
-	return dev_queue_xmit(skb);
-}
-
 static void br_send_bpdu(struct net_bridge_port *p,
 			 const unsigned char *data, int length)
 {
@@ -50,7 +44,7 @@ static void br_send_bpdu(struct net_bridge_port *p,
 	skb->priority = TC_PRIO_CONTROL;
 
 	skb_reserve(skb, LLC_RESERVE);
-	__skb_put_data(skb, data, length);
+	memcpy(__skb_put(skb, length), data, length);
 
 	llc_pdu_header_init(skb, LLC_PDU_TYPE_U, LLC_SAP_BSPAN,
 			    LLC_SAP_BSPAN, LLC_PDU_CMD);
@@ -60,9 +54,9 @@ static void br_send_bpdu(struct net_bridge_port *p,
 
 	skb_reset_mac_header(skb);
 
-	NF_HOOK(NFPROTO_BRIDGE, NF_BR_LOCAL_OUT,
-		dev_net(p->dev), NULL, skb, NULL, skb->dev,
-		br_send_bpdu_finish);
+	NF_HOOK(NFPROTO_BRIDGE, NF_BR_LOCAL_OUT, NULL, skb,
+		NULL, skb->dev,
+		dev_queue_xmit_sk);
 }
 
 static inline void br_set_ticks(unsigned char *dest, int j)

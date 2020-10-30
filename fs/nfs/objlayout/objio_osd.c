@@ -124,7 +124,7 @@ objio_alloc_deviceid_node(struct nfs_server *server, struct pnfs_device *pdev,
 
 retry_lookup:
 	od = osduld_info_lookup(&odi);
-	if (IS_ERR(od)) {
+	if (unlikely(IS_ERR(od))) {
 		err = PTR_ERR(od);
 		dprintk("%s: osduld_info_lookup => %d\n", __func__, err);
 		if (err == -ENODEV && retry_flag) {
@@ -476,7 +476,10 @@ static struct page *__r4w_get_page(void *priv, u64 offset, bool *uptodate)
 		}
 		unlock_page(page);
 	}
-	*uptodate = PageUptodate(page);
+	if (PageDirty(page) || PageWriteback(page))
+		*uptodate = true;
+	else
+		*uptodate = PageUptodate(page);
 	dprintk("%s: index=0x%lx uptodate=%d\n", __func__, index, *uptodate);
 	return page;
 }

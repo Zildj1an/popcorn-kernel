@@ -26,7 +26,6 @@
 #define _HYPERV_H
 
 #include <uapi/linux/hyperv.h>
-#include <uapi/asm/hyperv.h>
 
 #include <linux/types.h>
 #include <linux/scatterlist.h>
@@ -630,11 +629,6 @@ struct hv_input_signal_event_buffer {
 	struct hv_input_signal_event event;
 };
 
-enum hv_signal_policy {
-	HV_SIGNAL_POLICY_DEFAULT = 0,
-	HV_SIGNAL_POLICY_EXPLICIT,
-};
-
 struct vmbus_channel {
 	/* Unique channel id */
 	int id;
@@ -762,20 +756,7 @@ struct vmbus_channel {
 	 * link up channels based on their CPU affinity.
 	 */
 	struct list_head percpu_list;
-	/*
-	 * Host signaling policy: The default policy will be
-	 * based on the ring buffer state. We will also support
-	 * a policy where the client driver can have explicit
-	 * signaling control.
-	 */
-	enum hv_signal_policy  signal_policy;
 };
-
-static inline void set_channel_signal_state(struct vmbus_channel *c,
-					    enum hv_signal_policy policy)
-{
-	c->signal_policy = policy;
-}
 
 static inline void set_channel_read_state(struct vmbus_channel *c, bool state)
 {
@@ -995,11 +976,6 @@ int __must_check __vmbus_driver_register(struct hv_driver *hv_driver,
 					 struct module *owner,
 					 const char *mod_name);
 void vmbus_driver_unregister(struct hv_driver *hv_driver);
-
-int vmbus_allocate_mmio(struct resource **new, struct hv_device *device_obj,
-			resource_size_t min, resource_size_t max,
-			resource_size_t size, resource_size_t align,
-			bool fb_overlap_ok);
 
 /**
  * VMBUS_DEVICE - macro used to describe a specific hyperv vmbus device
@@ -1256,6 +1232,8 @@ extern bool vmbus_prep_negotiate_resp(struct icmsg_hdr *,
 					int);
 
 void hv_process_channel_removal(struct vmbus_channel *channel, u32 relid);
+
+extern struct resource hyperv_mmio;
 
 /*
  * Negotiated version with the Host.

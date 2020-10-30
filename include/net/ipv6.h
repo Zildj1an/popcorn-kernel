@@ -205,7 +205,6 @@ extern rwlock_t ip6_ra_lock;
  */
 
 struct ipv6_txoptions {
-	atomic_t		refcnt;
 	/* Length of this structure */
 	int			tot_len;
 
@@ -218,7 +217,7 @@ struct ipv6_txoptions {
 	struct ipv6_opt_hdr	*dst0opt;
 	struct ipv6_rt_hdr	*srcrt;	/* Routing Header */
 	struct ipv6_opt_hdr	*dst1opt;
-	struct rcu_head		rcu;
+
 	/* Option buffer, as read by IPV6_PKTOPTIONS, starts here. */
 };
 
@@ -253,24 +252,6 @@ struct ipv6_fl_socklist {
 	struct rcu_head			rcu;
 };
 
-static inline struct ipv6_txoptions *txopt_get(const struct ipv6_pinfo *np)
-{
-	struct ipv6_txoptions *opt;
-
-	rcu_read_lock();
-	opt = rcu_dereference(np->opt);
-	if (opt && !atomic_inc_not_zero(&opt->refcnt))
-		opt = NULL;
-	rcu_read_unlock();
-	return opt;
-}
-
-static inline void txopt_put(struct ipv6_txoptions *opt)
-{
-	if (opt && atomic_dec_and_test(&opt->refcnt))
-		kfree_rcu(opt, rcu);
-}
-
 struct ip6_flowlabel *fl6_sock_lookup(struct sock *sk, __be32 label);
 struct ipv6_txoptions *fl6_merge_options(struct ipv6_txoptions *opt_space,
 					 struct ip6_flowlabel *fl,
@@ -281,7 +262,6 @@ int ipv6_flowlabel_opt_get(struct sock *sk, struct in6_flowlabel_req *freq,
 			   int flags);
 int ip6_flowlabel_init(void);
 void ip6_flowlabel_cleanup(void);
-bool ip6_autoflowlabel(struct net *net, const struct ipv6_pinfo *np);
 
 static inline void fl6_sock_release(struct ip6_flowlabel *fl)
 {
@@ -510,7 +490,6 @@ struct ip6_create_arg {
 	u32 user;
 	const struct in6_addr *src;
 	const struct in6_addr *dst;
-	int iif;
 	u8 ecn;
 };
 
@@ -728,73 +707,53 @@ static inline void iph_to_flow_copy_v6addrs(struct flow_keys *flow,
 }
 
 #if IS_ENABLED(CONFIG_IPV6)
-
-/* Sysctl settings for net ipv6.auto_flowlabels */
-#define IP6_AUTO_FLOW_LABEL_OFF		0
-#define IP6_AUTO_FLOW_LABEL_OPTOUT	1
-#define IP6_AUTO_FLOW_LABEL_OPTIN	2
-#define IP6_AUTO_FLOW_LABEL_FORCED	3
-
-#define IP6_AUTO_FLOW_LABEL_MAX		IP6_AUTO_FLOW_LABEL_FORCED
-
-#define IP6_DEFAULT_AUTO_FLOW_LABELS	IP6_AUTO_FLOW_LABEL_OPTOUT
-
-static inline __be32 ip6_make_flowlabel(struct net *net, struct sk_buff *skb,
-					__be32 flowlabel, bool autolabel,
-					struct flowi6 *fl6)
+static inline void ip6_set_txhash(struct sock *sk)
 {
-	u32 hash;
+	struct inet_sock *inet = inet_sk(sk);
+	struct ipv6_pinfo *np = inet6_sk(sk);
+	struct flow_keys keys;
 
-	/* @flowlabel may include more than a flow label, eg, the traffic class.
-	 * Here we want only the flow label value.
-	 */
-	flowlabel &= IPV6_FLOWLABEL_MASK;
+	memset(&keys, 0, sizeof(keys));
 
-	if (flowlabel ||
-	    net->ipv6.sysctl.auto_flowlabels == IP6_AUTO_FLOW_LABEL_OFF ||
-	    (!autolabel &&
-	     net->ipv6.sysctl.auto_flowlabels != IP6_AUTO_FLOW_LABEL_FORCED))
-		return flowlabel;
+	memcpy(&keys.addrs.v6addrs.src, &np->saddr,
+	       sizeof(keys.addrs.v6addrs.src));
+	memcpy(&keys.addrs.v6addrs.dst, &sk->sk_v6_daddr,
+	       sizeof(keys.addrs.v6addrs.dst));
+	keys.control.addr_type = FLOW_DISSECTOR_KEY_IPV6_ADDRS;
+	keys.ports.src = inet->inet_sport;
+	keys.ports.dst = inet->inet_dport;
 
-	hash = skb_get_hash_flowi6(skb, fl6);
-
-	/* Since this is being sent on the wire obfuscate hash a bit
-	 * to minimize possbility that any useful information to an
-	 * attacker is leaked. Only lower 20 bits are relevant.
-	 */
-	rol32(hash, 16);
-
-	flowlabel = (__force __be32)hash & IPV6_FLOWLABEL_MASK;
-
-	if (net->ipv6.sysctl.flowlabel_state_ranges)
-		flowlabel |= IPV6_FLOWLABEL_STATELESS_FLAG;
-
-	return flowlabel;
+	sk->sk_txhash = flow_hash_from_keys(&keys);
 }
 
-static inline int ip6_default_np_autolabel(struct net *net)
+static inline __be32 ip6_make_flowlabel(struct net *net, struct sk_buff *skb,
+					__be32 flowlabel, bool autolabel)
 {
-	switch (net->ipv6.sysctl.auto_flowlabels) {
-	case IP6_AUTO_FLOW_LABEL_OFF:
-	case IP6_AUTO_FLOW_LABEL_OPTIN:
-	default:
-		return 0;
-	case IP6_AUTO_FLOW_LABEL_OPTOUT:
-	case IP6_AUTO_FLOW_LABEL_FORCED:
-		return 1;
+	if (!flowlabel && (autolabel || net->ipv6.sysctl.auto_flowlabels)) {
+		u32 hash;
+
+		hash = skb_get_hash(skb);
+
+		/* Since this is being sent on the wire obfuscate hash a bit
+		 * to minimize possbility that any useful information to an
+		 * attacker is leaked. Only lower 20 bits are relevant.
+		 */
+		hash ^= hash >> 12;
+
+		flowlabel = (__force __be32)hash & IPV6_FLOWLABEL_MASK;
+
+		if (net->ipv6.sysctl.flowlabel_state_ranges)
+			flowlabel |= IPV6_FLOWLABEL_STATELESS_FLAG;
 	}
+
+	return flowlabel;
 }
 #else
 static inline void ip6_set_txhash(struct sock *sk) { }
 static inline __be32 ip6_make_flowlabel(struct net *net, struct sk_buff *skb,
-					__be32 flowlabel, bool autolabel,
-					struct flowi6 *fl6)
+					__be32 flowlabel, bool autolabel)
 {
 	return flowlabel;
-}
-static inline int ip6_default_np_autolabel(struct net *net)
-{
-	return 0;
 }
 #endif
 
@@ -833,12 +792,12 @@ static inline u8 ip6_tclass(__be32 flowinfo)
 int ipv6_rcv(struct sk_buff *skb, struct net_device *dev,
 	     struct packet_type *pt, struct net_device *orig_dev);
 
-int ip6_rcv_finish(struct net *net, struct sock *sk, struct sk_buff *skb);
+int ip6_rcv_finish(struct sock *sk, struct sk_buff *skb);
 
 /*
  *	upper-layer output functions
  */
-int ip6_xmit(const struct sock *sk, struct sk_buff *skb, struct flowi6 *fl6,
+int ip6_xmit(struct sock *sk, struct sk_buff *skb, struct flowi6 *fl6,
 	     struct ipv6_txoptions *opt, int tclass);
 
 int ip6_find_1stfragopt(struct sk_buff *skb, u8 **nexthdr);
@@ -873,9 +832,8 @@ static inline struct sk_buff *ip6_finish_skb(struct sock *sk)
 			      &inet6_sk(sk)->cork);
 }
 
-int ip6_dst_lookup(struct net *net, struct sock *sk, struct dst_entry **dst,
-		   struct flowi6 *fl6);
-struct dst_entry *ip6_dst_lookup_flow(const struct sock *sk, struct flowi6 *fl6,
+int ip6_dst_lookup(struct sock *sk, struct dst_entry **dst, struct flowi6 *fl6);
+struct dst_entry *ip6_dst_lookup_flow(struct sock *sk, struct flowi6 *fl6,
 				      const struct in6_addr *final_dst);
 struct dst_entry *ip6_sk_dst_lookup_flow(struct sock *sk, struct flowi6 *fl6,
 					 const struct in6_addr *final_dst);
@@ -886,13 +844,14 @@ struct dst_entry *ip6_blackhole_route(struct net *net,
  *	skb processing functions
  */
 
-int ip6_output(struct net *net, struct sock *sk, struct sk_buff *skb);
+int ip6_output(struct sock *sk, struct sk_buff *skb);
 int ip6_forward(struct sk_buff *skb);
 int ip6_input(struct sk_buff *skb);
 int ip6_mc_input(struct sk_buff *skb);
 
-int __ip6_local_out(struct net *net, struct sock *sk, struct sk_buff *skb);
-int ip6_local_out(struct net *net, struct sock *sk, struct sk_buff *skb);
+int __ip6_local_out(struct sk_buff *skb);
+int ip6_local_out_sk(struct sock *sk, struct sk_buff *skb);
+int ip6_local_out(struct sk_buff *skb);
 
 /*
  *	Extension header (options) processing
@@ -964,7 +923,6 @@ int inet6_hash_connect(struct inet_timewait_death_row *death_row,
  */
 extern const struct proto_ops inet6_stream_ops;
 extern const struct proto_ops inet6_dgram_ops;
-extern const struct proto_ops inet6_sockraw_ops;
 
 struct group_source_req;
 struct group_filter;

@@ -200,7 +200,8 @@ err_out_unlock:
 	return ret;
 }
 
-static int rcar_thermal_get_temp(struct thermal_zone_device *zone, int *temp)
+static int rcar_thermal_get_temp(struct thermal_zone_device *zone,
+				 unsigned long *temp)
 {
 	struct rcar_thermal_priv *priv = rcar_zone_to_priv(zone);
 
@@ -234,7 +235,7 @@ static int rcar_thermal_get_trip_type(struct thermal_zone_device *zone,
 }
 
 static int rcar_thermal_get_trip_temp(struct thermal_zone_device *zone,
-				      int trip, int *temp)
+				      int trip, unsigned long *temp)
 {
 	struct rcar_thermal_priv *priv = rcar_zone_to_priv(zone);
 	struct device *dev = rcar_priv_to_dev(priv);
@@ -298,7 +299,7 @@ static void _rcar_thermal_irq_ctrl(struct rcar_thermal_priv *priv, int enable)
 static void rcar_thermal_work(struct work_struct *work)
 {
 	struct rcar_thermal_priv *priv;
-	int cctemp, nctemp;
+	unsigned long cctemp, nctemp;
 
 	priv = container_of(work, struct rcar_thermal_priv, work.work);
 
@@ -361,24 +362,6 @@ static irqreturn_t rcar_thermal_irq(int irq, void *data)
 /*
  *		platform functions
  */
-static int rcar_thermal_remove(struct platform_device *pdev)
-{
-	struct rcar_thermal_common *common = platform_get_drvdata(pdev);
-	struct device *dev = &pdev->dev;
-	struct rcar_thermal_priv *priv;
-
-	rcar_thermal_for_each_priv(priv, common) {
-		if (rcar_has_irq_support(priv))
-			rcar_thermal_irq_disable(priv);
-		thermal_zone_device_unregister(priv->zone);
-	}
-
-	pm_runtime_put(dev);
-	pm_runtime_disable(dev);
-
-	return 0;
-}
-
 static int rcar_thermal_probe(struct platform_device *pdev)
 {
 	struct rcar_thermal_common *common;
@@ -394,8 +377,6 @@ static int rcar_thermal_probe(struct platform_device *pdev)
 	common = devm_kzalloc(dev, sizeof(*common), GFP_KERNEL);
 	if (!common)
 		return -ENOMEM;
-
-	platform_set_drvdata(pdev, common);
 
 	INIT_LIST_HEAD(&common->head);
 	spin_lock_init(&common->lock);
@@ -474,14 +455,41 @@ static int rcar_thermal_probe(struct platform_device *pdev)
 		rcar_thermal_common_write(common, ENR, enr_bits);
 	}
 
+	platform_set_drvdata(pdev, common);
+
 	dev_info(dev, "%d sensor probed\n", i);
 
 	return 0;
 
 error_unregister:
-	rcar_thermal_remove(pdev);
+	rcar_thermal_for_each_priv(priv, common) {
+		if (rcar_has_irq_support(priv))
+			rcar_thermal_irq_disable(priv);
+		thermal_zone_device_unregister(priv->zone);
+	}
+
+	pm_runtime_put(dev);
+	pm_runtime_disable(dev);
 
 	return ret;
+}
+
+static int rcar_thermal_remove(struct platform_device *pdev)
+{
+	struct rcar_thermal_common *common = platform_get_drvdata(pdev);
+	struct device *dev = &pdev->dev;
+	struct rcar_thermal_priv *priv;
+
+	rcar_thermal_for_each_priv(priv, common) {
+		if (rcar_has_irq_support(priv))
+			rcar_thermal_irq_disable(priv);
+		thermal_zone_device_unregister(priv->zone);
+	}
+
+	pm_runtime_put(dev);
+	pm_runtime_disable(dev);
+
+	return 0;
 }
 
 static const struct of_device_id rcar_thermal_dt_ids[] = {

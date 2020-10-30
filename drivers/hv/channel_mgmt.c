@@ -28,7 +28,6 @@
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/completion.h>
-#include <linux/delay.h>
 #include <linux/hyperv.h>
 
 #include "hyperv_vmbus.h"
@@ -192,8 +191,6 @@ void hv_process_channel_removal(struct vmbus_channel *channel, u32 relid)
 	if (channel == NULL)
 		return;
 
-	BUG_ON(!channel->rescind);
-
 	if (channel->target_cpu != get_cpu()) {
 		put_cpu();
 		smp_call_function_single(channel->target_cpu,
@@ -207,8 +204,6 @@ void hv_process_channel_removal(struct vmbus_channel *channel, u32 relid)
 		spin_lock_irqsave(&vmbus_connection.channel_lock, flags);
 		list_del(&channel->listentry);
 		spin_unlock_irqrestore(&vmbus_connection.channel_lock, flags);
-
-		primary_channel = channel;
 	} else {
 		primary_channel = channel->primary_channel;
 		spin_lock_irqsave(&primary_channel->lock, flags);
@@ -216,14 +211,6 @@ void hv_process_channel_removal(struct vmbus_channel *channel, u32 relid)
 		primary_channel->num_sc--;
 		spin_unlock_irqrestore(&primary_channel->lock, flags);
 	}
-
-	/*
-	 * We need to free the bit for init_vp_index() to work in the case
-	 * of sub-channel, when we reload drivers like hv_netvsc.
-	 */
-	cpumask_clear_cpu(channel->target_cpu,
-			  &primary_channel->alloced_cpus_in_node);
-
 	free_channel(channel);
 }
 
@@ -233,7 +220,9 @@ void vmbus_free_channels(void)
 
 	list_for_each_entry_safe(channel, tmp, &vmbus_connection.chn_list,
 		listentry) {
-		/* hv_process_channel_removal() needs this */
+		/* if we don't set rescind to true, vmbus_close_internal()
+		 * won't invoke hv_process_channel_removal().
+		 */
 		channel->rescind = true;
 
 		vmbus_device_unregister(channel->device_obj);
@@ -358,7 +347,6 @@ enum {
 	IDE = 0,
 	SCSI,
 	NIC,
-	ND_NIC,
 	MAX_PERF_CHN,
 };
 
@@ -403,7 +391,6 @@ static void init_vp_index(struct vmbus_channel *channel, const uuid_le *type_gui
 	struct vmbus_channel *primary = channel->primary_channel;
 	int next_node;
 	struct cpumask available_mask;
-	struct cpumask *alloced_mask;
 
 	for (i = IDE; i < MAX_PERF_CHN; i++) {
 		if (!memcmp(type_guid->b, hp_devs[i].guid,
@@ -421,6 +408,7 @@ static void init_vp_index(struct vmbus_channel *channel, const uuid_le *type_gui
 		 * channel, bind it to cpu 0.
 		 */
 		channel->numa_node = 0;
+		cpumask_set_cpu(0, &channel->alloced_cpus_in_node);
 		channel->target_cpu = 0;
 		channel->target_vp = hv_context.vp_index[0];
 		return;
@@ -445,93 +433,24 @@ static void init_vp_index(struct vmbus_channel *channel, const uuid_le *type_gui
 		channel->numa_node = next_node;
 		primary = channel;
 	}
-	alloced_mask = &hv_context.hv_numa_map[primary->numa_node];
 
-	if (cpumask_weight(alloced_mask) ==
+	if (cpumask_weight(&primary->alloced_cpus_in_node) ==
 	    cpumask_weight(cpumask_of_node(primary->numa_node))) {
 		/*
 		 * We have cycled through all the CPUs in the node;
 		 * reset the alloced map.
 		 */
-		cpumask_clear(alloced_mask);
+		cpumask_clear(&primary->alloced_cpus_in_node);
 	}
 
-	cpumask_xor(&available_mask, alloced_mask,
+	cpumask_xor(&available_mask, &primary->alloced_cpus_in_node,
 		    cpumask_of_node(primary->numa_node));
 
-	cur_cpu = -1;
-
-	/*
-	 * Normally Hyper-V host doesn't create more subchannels than there
-	 * are VCPUs on the node but it is possible when not all present VCPUs
-	 * on the node are initialized by guest. Clear the alloced_cpus_in_node
-	 * to start over.
-	 */
-	if (cpumask_equal(&primary->alloced_cpus_in_node,
-			  cpumask_of_node(primary->numa_node)))
-		cpumask_clear(&primary->alloced_cpus_in_node);
-
-	while (true) {
-		cur_cpu = cpumask_next(cur_cpu, &available_mask);
-		if (cur_cpu >= nr_cpu_ids) {
-			cur_cpu = -1;
-			cpumask_copy(&available_mask,
-				     cpumask_of_node(primary->numa_node));
-			continue;
-		}
-
-		/*
-		 * NOTE: in the case of sub-channel, we clear the sub-channel
-		 * related bit(s) in primary->alloced_cpus_in_node in
-		 * hv_process_channel_removal(), so when we reload drivers
-		 * like hv_netvsc in SMP guest, here we're able to re-allocate
-		 * bit from primary->alloced_cpus_in_node.
-		 */
-		if (!cpumask_test_cpu(cur_cpu,
-				&primary->alloced_cpus_in_node)) {
-			cpumask_set_cpu(cur_cpu,
-					&primary->alloced_cpus_in_node);
-			cpumask_set_cpu(cur_cpu, alloced_mask);
-			break;
-		}
-	}
+	cur_cpu = cpumask_next(-1, &available_mask);
+	cpumask_set_cpu(cur_cpu, &primary->alloced_cpus_in_node);
 
 	channel->target_cpu = cur_cpu;
 	channel->target_vp = hv_context.vp_index[cur_cpu];
-}
-
-static void vmbus_wait_for_unload(void)
-{
-	int cpu = smp_processor_id();
-	void *page_addr = hv_context.synic_message_page[cpu];
-	struct hv_message *msg = (struct hv_message *)page_addr +
-				  VMBUS_MESSAGE_SINT;
-	struct vmbus_channel_message_header *hdr;
-	bool unloaded = false;
-
-	while (1) {
-		if (msg->header.message_type == HVMSG_NONE) {
-			mdelay(10);
-			continue;
-		}
-
-		hdr = (struct vmbus_channel_message_header *)msg->u.payload;
-		if (hdr->msgtype == CHANNELMSG_UNLOAD_RESPONSE)
-			unloaded = true;
-
-		msg->header.message_type = HVMSG_NONE;
-		/*
-		 * header.message_type needs to be written before we do
-		 * wrmsrl() below.
-		 */
-		mb();
-
-		if (msg->header.message_flags.msg_pending)
-			wrmsrl(HV_X64_MSR_EOM, 0);
-
-		if (unloaded)
-			break;
-	}
 }
 
 /*
@@ -550,23 +469,12 @@ void vmbus_initiate_unload(void)
 {
 	struct vmbus_channel_message_header hdr;
 
-	/* Pre-Win2012R2 hosts don't support reconnect */
-	if (vmbus_proto_version < VERSION_WIN8_1)
-		return;
-
 	init_completion(&vmbus_connection.unload_event);
 	memset(&hdr, 0, sizeof(struct vmbus_channel_message_header));
 	hdr.msgtype = CHANNELMSG_UNLOAD;
 	vmbus_post_msg(&hdr, sizeof(struct vmbus_channel_message_header));
 
-	/*
-	 * vmbus_initiate_unload() is also called on crash and the crash can be
-	 * happening in an interrupt context, where scheduling is impossible.
-	 */
-	if (!in_interrupt())
-		wait_for_completion(&vmbus_connection.unload_event);
-	else
-		vmbus_wait_for_unload();
+	wait_for_completion(&vmbus_connection.unload_event);
 }
 
 /*

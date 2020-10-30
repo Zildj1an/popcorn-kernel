@@ -74,9 +74,9 @@ static const int int_time_mapping[] = {100000, 50000, 200000, 400000};
 static const struct reg_field reg_field_it =
 				REG_FIELD(LTR501_ALS_MEAS_RATE, 3, 4);
 static const struct reg_field reg_field_als_intr =
-				REG_FIELD(LTR501_INTR, 1, 1);
-static const struct reg_field reg_field_ps_intr =
 				REG_FIELD(LTR501_INTR, 0, 0);
+static const struct reg_field reg_field_ps_intr =
+				REG_FIELD(LTR501_INTR, 1, 1);
 static const struct reg_field reg_field_als_rate =
 				REG_FIELD(LTR501_ALS_MEAS_RATE, 0, 2);
 static const struct reg_field reg_field_ps_rate =
@@ -180,7 +180,7 @@ static const struct ltr501_samp_table ltr501_ps_samp_table[] = {
 			{500000, 2000000}
 };
 
-static int ltr501_match_samp_freq(const struct ltr501_samp_table *tab,
+static unsigned int ltr501_match_samp_freq(const struct ltr501_samp_table *tab,
 					   int len, int val, int val2)
 {
 	int i, freq;
@@ -1551,6 +1551,7 @@ static struct i2c_driver ltr501_driver = {
 		.name   = LTR501_DRV_NAME,
 		.pm	= &ltr501_pm_ops,
 		.acpi_match_table = ACPI_PTR(ltr_acpi_match),
+		.owner  = THIS_MODULE,
 	},
 	.probe  = ltr501_probe,
 	.remove	= ltr501_remove,

@@ -112,29 +112,18 @@ static void musb_h_tx_flush_fifo(struct musb_hw_ep *ep)
 	struct musb	*musb = ep->musb;
 	void __iomem	*epio = ep->regs;
 	u16		csr;
+	u16		lastcsr = 0;
 	int		retries = 1000;
 
 	csr = musb_readw(epio, MUSB_TXCSR);
 	while (csr & MUSB_TXCSR_FIFONOTEMPTY) {
+		if (csr != lastcsr)
+			dev_dbg(musb->controller, "Host TX FIFONOTEMPTY csr: %02x\n", csr);
+		lastcsr = csr;
 		csr |= MUSB_TXCSR_FLUSHFIFO | MUSB_TXCSR_TXPKTRDY;
 		musb_writew(epio, MUSB_TXCSR, csr);
 		csr = musb_readw(epio, MUSB_TXCSR);
-
-		/*
-		 * FIXME: sometimes the tx fifo flush failed, it has been
-		 * observed during device disconnect on AM335x.
-		 *
-		 * To reproduce the issue, ensure tx urb(s) are queued when
-		 * unplug the usb device which is connected to AM335x usb
-		 * host port.
-		 *
-		 * I found using a usb-ethernet device and running iperf
-		 * (client on AM335x) has very high chance to trigger it.
-		 *
-		 * Better to turn on dev_dbg() in musb_cleanup_urb() with
-		 * CPPI enabled to see the issue when aborting the tx channel.
-		 */
-		if (dev_WARN_ONCE(musb->controller, retries-- < 1,
+		if (WARN(retries-- < 1,
 				"Could not flush host TX%d fifo: csr: %04x\n",
 				ep->epnum, csr))
 			return;
@@ -595,13 +584,14 @@ musb_rx_reinit(struct musb *musb, struct musb_qh *qh, u8 epnum)
 		musb_writew(ep->regs, MUSB_TXCSR, 0);
 
 	/* scrub all previous state, clearing toggle */
-	}
-	csr = musb_readw(ep->regs, MUSB_RXCSR);
-	if (csr & MUSB_RXCSR_RXPKTRDY)
-		WARNING("rx%d, packet/%d ready?\n", ep->epnum,
-			musb_readw(ep->regs, MUSB_RXCOUNT));
+	} else {
+		csr = musb_readw(ep->regs, MUSB_RXCSR);
+		if (csr & MUSB_RXCSR_RXPKTRDY)
+			WARNING("rx%d, packet/%d ready?\n", ep->epnum,
+				musb_readw(ep->regs, MUSB_RXCOUNT));
 
-	musb_h_flush_rxfifo(ep, MUSB_RXCSR_CLRDATATOG);
+		musb_h_flush_rxfifo(ep, MUSB_RXCSR_CLRDATATOG);
+	}
 
 	/* target addr and (for multipoint) hub addr/port */
 	if (musb->is_multipoint) {
@@ -662,7 +652,7 @@ static int musb_tx_dma_set_mode_mentor(struct dma_controller *dma,
 		csr &= ~(MUSB_TXCSR_AUTOSET | MUSB_TXCSR_DMAMODE);
 		csr |= MUSB_TXCSR_DMAENAB; /* against programmer's guide */
 	}
-	channel->desired_mode = *mode;
+	channel->desired_mode = mode;
 	musb_writew(epio, MUSB_TXCSR, csr);
 
 	return 0;
@@ -995,15 +985,9 @@ static void musb_bulk_nak_timeout(struct musb *musb, struct musb_hw_ep *ep,
 	if (is_in) {
 		dma = is_dma_capable() ? ep->rx_channel : NULL;
 
-		/*
-		 * Need to stop the transaction by clearing REQPKT first
-		 * then the NAK Timeout bit ref MUSBMHDRC USB 2.0 HIGH-SPEED
-		 * DUAL-ROLE CONTROLLER Programmer's Guide, section 9.2.2
-		 */
+		/* clear nak timeout bit */
 		rx_csr = musb_readw(epio, MUSB_RXCSR);
 		rx_csr |= MUSB_RXCSR_H_WZC_BITS;
-		rx_csr &= ~MUSB_RXCSR_H_REQPKT;
-		musb_writew(epio, MUSB_RXCSR, rx_csr);
 		rx_csr &= ~MUSB_RXCSR_DATAERROR;
 		musb_writew(epio, MUSB_RXCSR, rx_csr);
 
@@ -1048,9 +1032,7 @@ static void musb_bulk_nak_timeout(struct musb *musb, struct musb_hw_ep *ep,
 			/* set tx_reinit and schedule the next qh */
 			ep->tx_reinit = 1;
 		}
-
-		if (next_qh)
-			musb_start_urb(musb, is_in, next_qh);
+		musb_start_urb(musb, is_in, next_qh);
 	}
 }
 
@@ -1559,7 +1541,7 @@ static int musb_rx_dma_iso_cppi41(struct dma_controller *dma,
 				  struct urb *urb,
 				  size_t len)
 {
-	struct dma_channel *channel = hw_ep->rx_channel;
+	struct dma_channel *channel = hw_ep->tx_channel;
 	void __iomem *epio = hw_ep->regs;
 	dma_addr_t *buf;
 	u32 length, res;
@@ -2011,8 +1993,10 @@ void musb_host_rx(struct musb *musb, u8 epnum)
 				qh->offset,
 				urb->transfer_buffer_length);
 
-			if (musb_rx_dma_in_inventra_cppi41(c, hw_ep, qh, urb,
-							   xfer_len, iso_err))
+			done = musb_rx_dma_in_inventra_cppi41(c, hw_ep, qh,
+							      urb, xfer_len,
+							      iso_err);
+			if (done)
 				goto finish;
 			else
 				dev_err(musb->controller, "error: rx_dma failed\n");
@@ -2393,11 +2377,12 @@ static int musb_cleanup_urb(struct urb *urb, struct musb_qh *qh)
 	int			is_in = usb_pipein(urb->pipe);
 	int			status = 0;
 	u16			csr;
-	struct dma_channel	*dma = NULL;
 
 	musb_ep_select(regs, hw_end);
 
 	if (is_dma_capable()) {
+		struct dma_channel	*dma;
+
 		dma = is_in ? ep->rx_channel : ep->tx_channel;
 		if (dma) {
 			status = ep->musb->dma_controller->channel_abort(dma);
@@ -2414,9 +2399,10 @@ static int musb_cleanup_urb(struct urb *urb, struct musb_qh *qh)
 		/* giveback saves bulk toggle */
 		csr = musb_h_flush_rxfifo(ep, 0);
 
-		/* clear the endpoint's irq status here to avoid bogus irqs */
-		if (is_dma_capable() && dma)
-			musb_platform_clear_ep_rxintr(musb, ep->epnum);
+		/* REVISIT we still get an irq; should likely clear the
+		 * endpoint's irq status here to avoid bogus irqs.
+		 * clearing that status is platform-specific...
+		 */
 	} else if (ep->epnum) {
 		musb_h_tx_flush_fifo(ep);
 		csr = musb_readw(epio, MUSB_TXCSR);

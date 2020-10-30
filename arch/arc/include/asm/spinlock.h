@@ -529,32 +529,38 @@ static inline void arch_write_unlock(arch_rwlock_t *rw)
 
 static inline void arch_spin_lock(arch_spinlock_t *lock)
 {
-	unsigned int val = __ARCH_SPIN_LOCK_LOCKED__;
+        unsigned int val = __ARCH_SPIN_LOCK_LOCKED__;
 
-	/*
-	 * This smp_mb() is technically superfluous, we only need the one
-	 * after the lock for providing the ACQUIRE semantics.
-	 * However doing the "right" thing was regressing hackbench
-	 * so keeping this, pending further investigation
-	 */
-	smp_mb();
+        /*
+         * This smp_mb() is technically superfluous, we only need the one
+         * after the lock for providing the ACQUIRE semantics.
+         * However doing the "right" thing was regressing hackbench
+         * so keeping this, pending further investigation
+         */
+        smp_mb();
 
-	__asm__ __volatile__(
-	"1:	ex  %0, [%1]		\n"
-	"	breq  %0, %2, 1b	\n"
-	: "+&r" (val)
-	: "r"(&(lock->slock)), "ir"(__ARCH_SPIN_LOCK_LOCKED__)
-	: "memory");
+        __asm__ __volatile__(
+        "1:     ex  %0, [%1]            \n"
+#ifdef CONFIG_EZNPS_MTM_EXT
+	"	.word %3		\n"
+#endif
+        "       breq  %0, %2, 1b        \n"
+        : "+&r" (val)
+        : "r"(&(lock->slock)), "ir"(__ARCH_SPIN_LOCK_LOCKED__)
+#ifdef CONFIG_EZNPS_MTM_EXT
+	, "i"(CTOP_INST_SCHD_RW)
+#endif
+        : "memory");
 
-	/*
-	 * ACQUIRE barrier to ensure load/store after taking the lock
-	 * don't "bleed-up" out of the critical section (leak-in is allowed)
-	 * http://www.spinics.net/lists/kernel/msg2010409.html
-	 *
-	 * ARCv2 only has load-load, store-store and all-all barrier
-	 * thus need the full all-all barrier
-	 */
-	smp_mb();
+        /*
+         * ACQUIRE barrier to ensure load/store after taking the lock
+         * don't "bleed-up" out of the critical section (leak-in is allowed)
+         * http://www.spinics.net/lists/kernel/msg2010409.html
+         *
+         * ARCv2 only has load-load, store-store and all-all barrier
+         * thus need the full all-all barrier
+         */
+        smp_mb();
 }
 
 /* 1 - lock taken successfully */
@@ -610,7 +616,9 @@ static inline void arch_spin_unlock(arch_spinlock_t *lock)
 static inline int arch_read_trylock(arch_rwlock_t *rw)
 {
 	int ret = 0;
+	unsigned long flags;
 
+	local_irq_save(flags);
 	arch_spin_lock(&(rw->lock_mutex));
 
 	/*
@@ -623,6 +631,7 @@ static inline int arch_read_trylock(arch_rwlock_t *rw)
 	}
 
 	arch_spin_unlock(&(rw->lock_mutex));
+	local_irq_restore(flags);
 
 	smp_mb();
 	return ret;
@@ -632,7 +641,9 @@ static inline int arch_read_trylock(arch_rwlock_t *rw)
 static inline int arch_write_trylock(arch_rwlock_t *rw)
 {
 	int ret = 0;
+	unsigned long flags;
 
+	local_irq_save(flags);
 	arch_spin_lock(&(rw->lock_mutex));
 
 	/*
@@ -646,6 +657,7 @@ static inline int arch_write_trylock(arch_rwlock_t *rw)
 		ret = 1;
 	}
 	arch_spin_unlock(&(rw->lock_mutex));
+	local_irq_restore(flags);
 
 	return ret;
 }
@@ -664,16 +676,24 @@ static inline void arch_write_lock(arch_rwlock_t *rw)
 
 static inline void arch_read_unlock(arch_rwlock_t *rw)
 {
+	unsigned long flags;
+
+	local_irq_save(flags);
 	arch_spin_lock(&(rw->lock_mutex));
 	rw->counter++;
 	arch_spin_unlock(&(rw->lock_mutex));
+	local_irq_restore(flags);
 }
 
 static inline void arch_write_unlock(arch_rwlock_t *rw)
 {
+	unsigned long flags;
+
+	local_irq_save(flags);
 	arch_spin_lock(&(rw->lock_mutex));
 	rw->counter = __ARCH_RW_LOCK_UNLOCKED__;
 	arch_spin_unlock(&(rw->lock_mutex));
+	local_irq_restore(flags);
 }
 
 #endif

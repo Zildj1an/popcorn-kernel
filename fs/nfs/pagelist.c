@@ -77,8 +77,8 @@ EXPORT_SYMBOL_GPL(nfs_pgheader_init);
 void nfs_set_pgio_error(struct nfs_pgio_header *hdr, int error, loff_t pos)
 {
 	spin_lock(&hdr->lock);
-	if (!test_and_set_bit(NFS_IOHDR_ERROR, &hdr->flags)
-	    || pos < hdr->io_start + hdr->good_bytes) {
+	if (pos < hdr->io_start + hdr->good_bytes) {
+		set_bit(NFS_IOHDR_ERROR, &hdr->flags);
 		clear_bit(NFS_IOHDR_EOF, &hdr->flags);
 		hdr->good_bytes = pos - hdr->io_start;
 		hdr->error = error;
@@ -129,7 +129,7 @@ __nfs_iocounter_wait(struct nfs_io_counter *c)
 		set_bit(NFS_IO_INPROGRESS, &c->flags);
 		if (atomic_read(&c->io_count) == 0)
 			break;
-		ret = nfs_wait_bit_killable(&q.key, TASK_KILLABLE);
+		ret = nfs_wait_bit_killable(&q.key);
 	} while (atomic_read(&c->io_count) != 0 && !ret);
 	finish_wait(wq, &q.wait);
 	return ret;
@@ -508,7 +508,7 @@ size_t nfs_generic_pg_test(struct nfs_pageio_descriptor *desc,
 	 * for it without upsetting the slab allocator.
 	 */
 	if (((mirror->pg_count + req->wb_bytes) >> PAGE_SHIFT) *
-			sizeof(struct page *) > PAGE_SIZE)
+			sizeof(struct page) > PAGE_SIZE)
 		return 0;
 
 	return min(mirror->pg_bsize - mirror->pg_count, (size_t)req->wb_bytes);
@@ -528,6 +528,16 @@ struct nfs_pgio_header *nfs_pgio_header_alloc(const struct nfs_rw_ops *ops)
 }
 EXPORT_SYMBOL_GPL(nfs_pgio_header_alloc);
 
+/*
+ * nfs_pgio_header_free - Free a read or write header
+ * @hdr: The header to free
+ */
+void nfs_pgio_header_free(struct nfs_pgio_header *hdr)
+{
+	hdr->rw_ops->rw_free_header(hdr);
+}
+EXPORT_SYMBOL_GPL(nfs_pgio_header_free);
+
 /**
  * nfs_pgio_data_destroy - make @hdr suitable for reuse
  *
@@ -536,24 +546,14 @@ EXPORT_SYMBOL_GPL(nfs_pgio_header_alloc);
  *
  * @hdr: A header that has had nfs_generic_pgio called
  */
-static void nfs_pgio_data_destroy(struct nfs_pgio_header *hdr)
+void nfs_pgio_data_destroy(struct nfs_pgio_header *hdr)
 {
 	if (hdr->args.context)
 		put_nfs_open_context(hdr->args.context);
 	if (hdr->page_array.pagevec != hdr->page_array.page_array)
 		kfree(hdr->page_array.pagevec);
 }
-
-/*
- * nfs_pgio_header_free - Free a read or write header
- * @hdr: The header to free
- */
-void nfs_pgio_header_free(struct nfs_pgio_header *hdr)
-{
-	nfs_pgio_data_destroy(hdr);
-	hdr->rw_ops->rw_free_header(hdr);
-}
-EXPORT_SYMBOL_GPL(nfs_pgio_header_free);
+EXPORT_SYMBOL_GPL(nfs_pgio_data_destroy);
 
 /**
  * nfs_pgio_rpcsetup - Set up arguments for a pageio call
@@ -671,6 +671,7 @@ static int nfs_pgio_error(struct nfs_pageio_descriptor *desc,
 	u32 midx;
 
 	set_bit(NFS_IOHDR_REDO, &hdr->flags);
+	nfs_pgio_data_destroy(hdr);
 	hdr->completion_ops->completion(hdr);
 	/* TODO: Make sure it's right to clean up all mirrors here
 	 *       and not just hdr->pgio_mirror_idx */
@@ -688,6 +689,7 @@ static int nfs_pgio_error(struct nfs_pageio_descriptor *desc,
 static void nfs_pgio_release(void *calldata)
 {
 	struct nfs_pgio_header *hdr = calldata;
+	nfs_pgio_data_destroy(hdr);
 	hdr->completion_ops->completion(hdr);
 }
 
@@ -1273,10 +1275,8 @@ void nfs_pageio_cond_complete(struct nfs_pageio_descriptor *desc, pgoff_t index)
 		mirror = &desc->pg_mirrors[midx];
 		if (!list_empty(&mirror->pg_list)) {
 			prev = nfs_list_entry(mirror->pg_list.prev);
-			if (index != prev->wb_index + 1) {
-				nfs_pageio_complete(desc);
-				break;
-			}
+			if (index != prev->wb_index + 1)
+				nfs_pageio_complete_mirror(desc, midx);
 		}
 	}
 }

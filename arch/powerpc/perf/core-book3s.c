@@ -48,12 +48,12 @@ struct cpu_hw_events {
 	unsigned long amasks[MAX_HWEVENTS][MAX_EVENT_ALTERNATIVES];
 	unsigned long avalues[MAX_HWEVENTS][MAX_EVENT_ALTERNATIVES];
 
-	unsigned int txn_flags;
+	unsigned int group_flag;
 	int n_txn_start;
 
 	/* BHRB bits */
 	u64				bhrb_filter;	/* BHRB HW branch filter */
-	unsigned int			bhrb_users;
+	int				bhrb_users;
 	void				*bhrb_context;
 	struct	perf_branch_stack	bhrb_stack;
 	struct	perf_branch_entry	bhrb_entries[BHRB_MAX_ENTRIES];
@@ -369,8 +369,8 @@ static void power_pmu_bhrb_disable(struct perf_event *event)
 	if (!ppmu->bhrb_nr)
 		return;
 
-	WARN_ON_ONCE(!cpuhw->bhrb_users);
 	cpuhw->bhrb_users--;
+	WARN_ON_ONCE(cpuhw->bhrb_users < 0);
 	perf_sched_cb_dec(event->ctx->pmu);
 
 	if (!cpuhw->disabled && !cpuhw->bhrb_users) {
@@ -401,12 +401,8 @@ static __u64 power_pmu_bhrb_to(u64 addr)
 	int ret;
 	__u64 target;
 
-	if (is_kernel_addr(addr)) {
-		if (probe_kernel_read(&instr, (void *)addr, sizeof(instr)))
-			return 0;
-
-		return branch_target(&instr);
-	}
+	if (is_kernel_addr(addr))
+		return branch_target((unsigned int *)addr);
 
 	/* Userspace: need copy instruction here then translate it */
 	pagefault_disable();
@@ -446,16 +442,6 @@ static void power_pmu_bhrb_read(struct cpu_hw_events *cpuhw)
 
 			if (!addr)
 				/* invalid entry */
-				continue;
-
-			/*
-			 * BHRB rolling buffer could very much contain the kernel
-			 * addresses at this point. Check the privileges before
-			 * exporting it to userspace (avoid exposure of regions
-			 * where we could have speculative execution)
-			 */
-			if (perf_paranoid_kernel() && !capable(CAP_SYS_ADMIN) &&
-				is_kernel_addr(addr))
 				continue;
 
 			/* Branches are read most recent first (ie. mfbhrb 0 is
@@ -1198,7 +1184,6 @@ static void power_pmu_disable(struct pmu *pmu)
 		 */
 		write_mmcr0(cpuhw, val);
 		mb();
-		isync();
 
 		/*
 		 * Disable instruction sampling if it was enabled
@@ -1207,26 +1192,12 @@ static void power_pmu_disable(struct pmu *pmu)
 			mtspr(SPRN_MMCRA,
 			      cpuhw->mmcr[2] & ~MMCRA_SAMPLE_ENABLE);
 			mb();
-			isync();
 		}
 
 		cpuhw->disabled = 1;
 		cpuhw->n_added = 0;
 
 		ebb_switch_out(mmcr0);
-
-#ifdef CONFIG_PPC64
-		/*
-		 * These are readable by userspace, may contain kernel
-		 * addresses and are not switched by context switch, so clear
-		 * them now to avoid leaking anything to userspace in general
-		 * including to another process.
-		 */
-		if (ppmu->flags & PPMU_ARCH_207S) {
-			mtspr(SPRN_SDAR, 0);
-			mtspr(SPRN_SIAR, 0);
-		}
-#endif
 	}
 
 	local_irq_restore(flags);
@@ -1406,7 +1377,7 @@ static int collect_events(struct perf_event *group, int max_count,
 	int n = 0;
 	struct perf_event *event;
 
-	if (group->pmu->task_ctx_nr == perf_hw_context) {
+	if (!is_software_event(group)) {
 		if (n >= max_count)
 			return -1;
 		ctrs[n] = group;
@@ -1414,7 +1385,7 @@ static int collect_events(struct perf_event *group, int max_count,
 		events[n++] = group->hw.config;
 	}
 	list_for_each_entry(event, &group->sibling_list, group_entry) {
-		if (event->pmu->task_ctx_nr == perf_hw_context &&
+		if (!is_software_event(event) &&
 		    event->state != PERF_EVENT_STATE_OFF) {
 			if (n >= max_count)
 				return -1;
@@ -1470,7 +1441,7 @@ static int power_pmu_add(struct perf_event *event, int ef_flags)
 	 * skip the schedulability test here, it will be performed
 	 * at commit time(->commit_txn) as a whole
 	 */
-	if (cpuhw->txn_flags & PERF_PMU_TXN_ADD)
+	if (cpuhw->group_flag & PERF_EVENT_TXN)
 		goto nocheck;
 
 	if (check_excludes(cpuhw->event, cpuhw->flags, n0, 1))
@@ -1615,22 +1586,13 @@ static void power_pmu_stop(struct perf_event *event, int ef_flags)
  * Start group events scheduling transaction
  * Set the flag to make pmu::enable() not perform the
  * schedulability test, it will be performed at commit time
- *
- * We only support PERF_PMU_TXN_ADD transactions. Save the
- * transaction flags but otherwise ignore non-PERF_PMU_TXN_ADD
- * transactions.
  */
-static void power_pmu_start_txn(struct pmu *pmu, unsigned int txn_flags)
+static void power_pmu_start_txn(struct pmu *pmu)
 {
 	struct cpu_hw_events *cpuhw = this_cpu_ptr(&cpu_hw_events);
 
-	WARN_ON_ONCE(cpuhw->txn_flags);		/* txn already in flight */
-
-	cpuhw->txn_flags = txn_flags;
-	if (txn_flags & ~PERF_PMU_TXN_ADD)
-		return;
-
 	perf_pmu_disable(pmu);
+	cpuhw->group_flag |= PERF_EVENT_TXN;
 	cpuhw->n_txn_start = cpuhw->n_events;
 }
 
@@ -1642,15 +1604,8 @@ static void power_pmu_start_txn(struct pmu *pmu, unsigned int txn_flags)
 static void power_pmu_cancel_txn(struct pmu *pmu)
 {
 	struct cpu_hw_events *cpuhw = this_cpu_ptr(&cpu_hw_events);
-	unsigned int txn_flags;
 
-	WARN_ON_ONCE(!cpuhw->txn_flags);	/* no txn in flight */
-
-	txn_flags = cpuhw->txn_flags;
-	cpuhw->txn_flags = 0;
-	if (txn_flags & ~PERF_PMU_TXN_ADD)
-		return;
-
+	cpuhw->group_flag &= ~PERF_EVENT_TXN;
 	perf_pmu_enable(pmu);
 }
 
@@ -1666,15 +1621,7 @@ static int power_pmu_commit_txn(struct pmu *pmu)
 
 	if (!ppmu)
 		return -EAGAIN;
-
 	cpuhw = this_cpu_ptr(&cpu_hw_events);
-	WARN_ON_ONCE(!cpuhw->txn_flags);	/* no txn in flight */
-
-	if (cpuhw->txn_flags & ~PERF_PMU_TXN_ADD) {
-		cpuhw->txn_flags = 0;
-		return 0;
-	}
-
 	n = cpuhw->n_events;
 	if (check_excludes(cpuhw->event, cpuhw->flags, 0, n))
 		return -EAGAIN;
@@ -1685,7 +1632,7 @@ static int power_pmu_commit_txn(struct pmu *pmu)
 	for (i = cpuhw->n_txn_start; i < n; ++i)
 		cpuhw->event[i]->hw.config = cpuhw->events[i];
 
-	cpuhw->txn_flags = 0;
+	cpuhw->group_flag &= ~PERF_EVENT_TXN;
 	perf_pmu_enable(pmu);
 	return 0;
 }

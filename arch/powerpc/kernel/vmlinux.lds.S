@@ -72,15 +72,6 @@ SECTIONS
 	/* Read-only data */
 	RODATA
 
-#ifdef CONFIG_PPC64
-	. = ALIGN(8);
-	__rfi_flush_fixup : AT(ADDR(__rfi_flush_fixup) - LOAD_OFFSET) {
-		__start___rfi_flush_fixup = .;
-		*(__rfi_flush_fixup)
-		__stop___rfi_flush_fixup = .;
-	}
-#endif
-
 	EXCEPTION_TABLE(0)
 
 	NOTES :kernel :notes
@@ -192,12 +183,6 @@ SECTIONS
 		*(.rela*)
 	}
 #endif
-	/* .exit.data is discarded at runtime, not link time,
-	 * to deal with references from .exit.text
-	 */
-	.exit.data : AT(ADDR(.exit.data) - LOAD_OFFSET) {
-		EXIT_DATA
-	}
 
 	/* freed after init ends here */
 	. = ALIGN(PAGE_SIZE);

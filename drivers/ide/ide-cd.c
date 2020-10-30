@@ -441,7 +441,7 @@ int ide_cd_queue_pc(ide_drive_t *drive, const unsigned char *cmd,
 		struct request *rq;
 		int error;
 
-		rq = blk_get_request(drive->queue, write, __GFP_RECLAIM);
+		rq = blk_get_request(drive->queue, write, __GFP_WAIT);
 
 		memcpy(rq->cmd, cmd, BLK_MAX_CDB);
 		rq->cmd_type = REQ_TYPE_ATA_PC;
@@ -1592,8 +1592,6 @@ static int idecd_open(struct block_device *bdev, fmode_t mode)
 {
 	struct cdrom_info *info;
 	int rc = -ENXIO;
-
-	check_disk_change(bdev);
 
 	mutex_lock(&ide_cd_mutex);
 	info = ide_cd_get(bdev->bd_disk);

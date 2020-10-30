@@ -231,7 +231,8 @@ static int pinctrl_register_one_pin(struct pinctrl_dev *pctldev,
 
 	pindesc = pin_desc_get(pctldev, number);
 	if (pindesc != NULL) {
-		dev_err(pctldev->dev, "pin %d already registered\n", number);
+		pr_err("pin %d already registered on %s\n", number,
+		       pctldev->desc->name);
 		return -EINVAL;
 	}
 
@@ -348,9 +349,6 @@ static bool pinctrl_ready_for_gpio_range(unsigned gpio)
 	struct pinctrl_dev *pctldev;
 	struct pinctrl_gpio_range *range = NULL;
 	struct gpio_chip *chip = gpio_to_chip(gpio);
-
-	if (WARN(!chip, "no gpio_chip for gpio%i?", gpio))
-		return false;
 
 	mutex_lock(&pinctrldev_list_mutex);
 
@@ -979,15 +977,18 @@ struct pinctrl_state *pinctrl_lookup_state(struct pinctrl *p,
 EXPORT_SYMBOL_GPL(pinctrl_lookup_state);
 
 /**
- * pinctrl_commit_state() - select/activate/program a pinctrl state to HW
+ * pinctrl_select_state() - select/activate/program a pinctrl state to HW
  * @p: the pinctrl handle for the device that requests configuration
  * @state: the state handle to select/activate/program
  */
-static int pinctrl_commit_state(struct pinctrl *p, struct pinctrl_state *state)
+int pinctrl_select_state(struct pinctrl *p, struct pinctrl_state *state)
 {
 	struct pinctrl_setting *setting, *setting2;
 	struct pinctrl_state *old_state = p->state;
 	int ret;
+
+	if (p->state == state)
+		return 0;
 
 	if (p->state) {
 		/*
@@ -1051,19 +1052,6 @@ unapply_new_state:
 		pinctrl_select_state(p, old_state);
 
 	return ret;
-}
-
-/**
- * pinctrl_select_state() - select/activate/program a pinctrl state to HW
- * @p: the pinctrl handle for the device that requests configuration
- * @state: the state handle to select/activate/program
- */
-int pinctrl_select_state(struct pinctrl *p, struct pinctrl_state *state)
-{
-	if (p->state == state)
-		return 0;
-
-	return pinctrl_commit_state(p, state);
 }
 EXPORT_SYMBOL_GPL(pinctrl_select_state);
 
@@ -1233,7 +1221,7 @@ void pinctrl_unregister_map(struct pinctrl_map const *map)
 int pinctrl_force_sleep(struct pinctrl_dev *pctldev)
 {
 	if (!IS_ERR(pctldev->p) && !IS_ERR(pctldev->hog_sleep))
-		return pinctrl_commit_state(pctldev->p, pctldev->hog_sleep);
+		return pinctrl_select_state(pctldev->p, pctldev->hog_sleep);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(pinctrl_force_sleep);
@@ -1245,42 +1233,10 @@ EXPORT_SYMBOL_GPL(pinctrl_force_sleep);
 int pinctrl_force_default(struct pinctrl_dev *pctldev)
 {
 	if (!IS_ERR(pctldev->p) && !IS_ERR(pctldev->hog_default))
-		return pinctrl_commit_state(pctldev->p, pctldev->hog_default);
+		return pinctrl_select_state(pctldev->p, pctldev->hog_default);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(pinctrl_force_default);
-
-/**
- * pinctrl_init_done() - tell pinctrl probe is done
- *
- * We'll use this time to switch the pins from "init" to "default" unless the
- * driver selected some other state.
- *
- * @dev: device to that's done probing
- */
-int pinctrl_init_done(struct device *dev)
-{
-	struct dev_pin_info *pins = dev->pins;
-	int ret;
-
-	if (!pins)
-		return 0;
-
-	if (IS_ERR(pins->init_state))
-		return 0; /* No such state */
-
-	if (pins->p->state != pins->init_state)
-		return 0; /* Not at init anyway */
-
-	if (IS_ERR(pins->default_state))
-		return 0; /* No default state */
-
-	ret = pinctrl_select_state(pins->p, pins->default_state);
-	if (ret)
-		dev_err(dev, "failed to activate default pinctrl state\n");
-
-	return ret;
-}
 
 #ifdef CONFIG_PM
 

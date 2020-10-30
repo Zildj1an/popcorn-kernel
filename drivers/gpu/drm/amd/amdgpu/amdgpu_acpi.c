@@ -25,6 +25,7 @@
 #include <linux/acpi.h>
 #include <linux/slab.h>
 #include <linux/power_supply.h>
+#include <linux/vga_switcheroo.h>
 #include <acpi/video.h>
 #include <drm/drmP.h>
 #include <drm/drm_crtc_helper.h>
@@ -584,9 +585,6 @@ int amdgpu_acpi_pcie_performance_request(struct amdgpu_device *adev,
 	struct acpi_buffer params;
 	size_t size;
 	u32 retry = 3;
-
-	if (amdgpu_acpi_pcie_notify_device_ready(adev))
-		return -EINVAL;
 
 	/* Get the device handle */
 	handle = ACPI_HANDLE(&adev->pdev->dev);

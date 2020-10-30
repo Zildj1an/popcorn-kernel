@@ -417,10 +417,8 @@ int mei_amthif_irq_read_msg(struct mei_cl *cl,
 
 	dev = cl->dev;
 
-	if (dev->iamthif_state != MEI_IAMTHIF_READING) {
-		mei_irq_discard_msg(dev, mei_hdr);
+	if (dev->iamthif_state != MEI_IAMTHIF_READING)
 		return 0;
-	}
 
 	ret = mei_cl_irq_read_msg(cl, mei_hdr, cmpl_list);
 	if (ret)
@@ -460,7 +458,7 @@ void mei_amthif_complete(struct mei_device *dev, struct mei_cl_cb *cb)
 		return;
 	}
 
-	if (!dev->iamthif_canceled) {
+	if (dev->iamthif_canceled != 1) {
 		dev->iamthif_state = MEI_IAMTHIF_READ_COMPLETE;
 		dev->iamthif_stall_timer = 0;
 		list_add_tail(&cb->list, &dev->amthif_rd_complete_list.list);

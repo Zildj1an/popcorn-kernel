@@ -219,7 +219,7 @@ void set_pgdat_percpu_threshold(pg_data_t *pgdat,
  * particular counter cannot be updated from interrupt context.
  */
 void __mod_zone_page_state(struct zone *zone, enum zone_stat_item item,
-			   long delta)
+				int delta)
 {
 	struct per_cpu_pageset __percpu *pcp = zone->pageset;
 	s8 __percpu *p = pcp->vm_stat_diff + item;
@@ -318,8 +318,8 @@ EXPORT_SYMBOL(__dec_zone_page_state);
  *     1       Overstepping half of threshold
  *     -1      Overstepping minus half of threshold
 */
-static inline void mod_state(struct zone *zone, enum zone_stat_item item,
-			     long delta, int overstep_mode)
+static inline void mod_state(struct zone *zone,
+       enum zone_stat_item item, int delta, int overstep_mode)
 {
 	struct per_cpu_pageset __percpu *pcp = zone->pageset;
 	s8 __percpu *p = pcp->vm_stat_diff + item;
@@ -357,7 +357,7 @@ static inline void mod_state(struct zone *zone, enum zone_stat_item item,
 }
 
 void mod_zone_page_state(struct zone *zone, enum zone_stat_item item,
-			 long delta)
+					int delta)
 {
 	mod_state(zone, item, delta, 0);
 }
@@ -384,7 +384,7 @@ EXPORT_SYMBOL(dec_zone_page_state);
  * Use interrupt disable to serialize counter updates
  */
 void mod_zone_page_state(struct zone *zone, enum zone_stat_item item,
-			 long delta)
+					int delta)
 {
 	unsigned long flags;
 
@@ -591,28 +591,6 @@ void zone_statistics(struct zone *preferred_zone, struct zone *z, gfp_t flags)
 	else
 		__inc_zone_state(z, NUMA_OTHER);
 }
-
-/*
- * Determine the per node value of a stat item.
- */
-unsigned long node_page_state(int node, enum zone_stat_item item)
-{
-	struct zone *zones = NODE_DATA(node)->node_zones;
-
-	return
-#ifdef CONFIG_ZONE_DMA
-		zone_page_state(&zones[ZONE_DMA], item) +
-#endif
-#ifdef CONFIG_ZONE_DMA32
-		zone_page_state(&zones[ZONE_DMA32], item) +
-#endif
-#ifdef CONFIG_HIGHMEM
-		zone_page_state(&zones[ZONE_HIGHMEM], item) +
-#endif
-		zone_page_state(&zones[ZONE_NORMAL], item) +
-		zone_page_state(&zones[ZONE_MOVABLE], item);
-}
-
 #endif
 
 #ifdef CONFIG_COMPACTION
@@ -736,7 +714,6 @@ const char * const vmstat_text[] = {
 	"nr_slab_unreclaimable",
 	"nr_page_table_pages",
 	"nr_kernel_stack",
-	"nr_overhead",
 	"nr_unstable",
 	"nr_bounce",
 	"nr_vmscan_write",
@@ -922,9 +899,9 @@ static void walk_zones_in_node(struct seq_file *m, pg_data_t *pgdat,
 #ifdef CONFIG_PROC_FS
 static char * const migratetype_names[MIGRATE_TYPES] = {
 	"Unmovable",
-	"Movable",
 	"Reclaimable",
-	"HighAtomic",
+	"Movable",
+	"Reserve",
 #ifdef CONFIG_CMA
 	"CMA",
 #endif
@@ -1092,8 +1069,6 @@ static void pagetypeinfo_showmixedcount_print(struct seq_file *m,
 				continue;
 
 			page_ext = lookup_page_ext(page);
-			if (unlikely(!page_ext))
-				continue;
 
 			if (!test_bit(PAGE_EXT_OWNER, &page_ext->flags))
 				continue;
@@ -1351,9 +1326,7 @@ static int vmstat_show(struct seq_file *m, void *arg)
 	unsigned long *l = arg;
 	unsigned long off = l - (unsigned long *)m->private;
 
-	seq_puts(m, vmstat_text[off]);
-	seq_put_decimal_ull(m, ' ', *l);
-	seq_putc(m, '\n');
+	seq_printf(m, "%s %lu\n", vmstat_text[off], *l);
 	return 0;
 }
 
@@ -1384,23 +1357,21 @@ static const struct file_operations proc_vmstat_file_operations = {
 #endif /* CONFIG_PROC_FS */
 
 #ifdef CONFIG_SMP
-static struct workqueue_struct *vmstat_wq;
 static DEFINE_PER_CPU(struct delayed_work, vmstat_work);
 int sysctl_stat_interval __read_mostly = HZ;
 static cpumask_var_t cpu_stat_off;
 
 static void vmstat_update(struct work_struct *w)
 {
-	if (refresh_cpu_vm_stats()) {
+	if (refresh_cpu_vm_stats())
 		/*
 		 * Counters were updated so we expect more updates
 		 * to occur in the future. Keep on running the
 		 * update worker thread.
 		 */
-		queue_delayed_work_on(smp_processor_id(), vmstat_wq,
-			this_cpu_ptr(&vmstat_work),
+		schedule_delayed_work(this_cpu_ptr(&vmstat_work),
 			round_jiffies_relative(sysctl_stat_interval));
-	} else {
+	else {
 		/*
 		 * We did not update any counters so the app may be in
 		 * a mode where it does not cause counter updates.
@@ -1420,6 +1391,20 @@ static void vmstat_update(struct work_struct *w)
 			cpu_stat_off);
 		VM_BUG_ON(r);
 	}
+}
+
+/*
+ * Switch off vmstat processing and then fold all the remaining differentials
+ * until the diffs stay at zero. The function is used by NOHZ and can only be
+ * invoked when tick processing is not active.
+ */
+void quiet_vmstat(void)
+{
+	do {
+		if (!cpumask_test_and_set_cpu(smp_processor_id(), cpu_stat_off))
+			cancel_delayed_work(this_cpu_ptr(&vmstat_work));
+
+	} while (refresh_cpu_vm_stats());
 }
 
 /*
@@ -1445,6 +1430,16 @@ static bool need_update(int cpu)
 	return false;
 }
 
+/*
+ * Report on whether vmstat processing is quiesced on the core currently:
+ * no vmstat worker running and no vmstat updates to perform.
+ */
+bool vmstat_idle(void)
+{
+	int cpu = smp_processor_id();
+	return cpumask_test_cpu(cpu, cpu_stat_off) && !need_update(cpu);
+}
+
 
 /*
  * Shepherd worker thread that checks the
@@ -1466,7 +1461,7 @@ static void vmstat_shepherd(struct work_struct *w)
 		if (need_update(cpu) &&
 			cpumask_test_and_clear_cpu(cpu, cpu_stat_off))
 
-			queue_delayed_work_on(cpu, vmstat_wq,
+			schedule_delayed_work_on(cpu,
 				&per_cpu(vmstat_work, cpu), 0);
 
 	put_online_cpus();
@@ -1488,7 +1483,6 @@ static void __init start_shepherd_timer(void)
 		BUG();
 	cpumask_copy(cpu_stat_off, cpu_online_mask);
 
-	vmstat_wq = alloc_workqueue("vmstat", WQ_FREEZABLE|WQ_MEM_RECLAIM, 0);
 	schedule_delayed_work(&shepherd,
 		round_jiffies_relative(sysctl_stat_interval));
 }

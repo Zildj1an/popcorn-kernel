@@ -271,12 +271,8 @@ static struct dentry *start_creating(const char *name, struct dentry *parent)
 		dput(dentry);
 		dentry = ERR_PTR(-EEXIST);
 	}
-
-	if (IS_ERR(dentry)) {
+	if (IS_ERR(dentry))
 		mutex_unlock(&d_inode(parent)->i_mutex);
-		simple_release_fs(&debugfs_mount, &debugfs_mount_count);
-	}
-
 	return dentry;
 }
 
@@ -457,7 +453,7 @@ struct dentry *debugfs_create_automount(const char *name,
 	if (unlikely(!inode))
 		return failed_creating(dentry);
 
-	make_empty_dir_inode(inode);
+	inode->i_mode = S_IFDIR | S_IRWXU | S_IRUGO | S_IXUGO;
 	inode->i_flags |= S_AUTOMOUNT;
 	inode->i_private = data;
 	dentry->d_fsdata = (void *)f;
@@ -537,8 +533,7 @@ static int __debugfs_remove(struct dentry *dentry, struct dentry *parent)
 /**
  * debugfs_remove - removes a file or directory from the debugfs filesystem
  * @dentry: a pointer to a the dentry of the file or directory to be
- *          removed.  If this parameter is NULL or an error value, nothing
- *          will be done.
+ *          removed.
  *
  * This function removes a file or directory in debugfs that was previously
  * created with a call to another debugfs function (like
@@ -570,8 +565,7 @@ EXPORT_SYMBOL_GPL(debugfs_remove);
 
 /**
  * debugfs_remove_recursive - recursively removes a directory
- * @dentry: a pointer to a the dentry of the directory to be removed.  If this
- *          parameter is NULL or an error value, nothing will be done.
+ * @dentry: a pointer to a the dentry of the directory to be removed.
  *
  * This function recursively removes a directory tree in debugfs that
  * was previously created with a call to another debugfs function
@@ -669,7 +663,7 @@ struct dentry *debugfs_rename(struct dentry *old_dir, struct dentry *old_dentry,
 {
 	int error;
 	struct dentry *dentry = NULL, *trap;
-	struct name_snapshot old_name;
+	const char *old_name;
 
 	trap = lock_rename(new_dir, old_dir);
 	/* Source or destination directories don't exist? */
@@ -684,19 +678,19 @@ struct dentry *debugfs_rename(struct dentry *old_dir, struct dentry *old_dentry,
 	if (IS_ERR(dentry) || dentry == trap || d_really_is_positive(dentry))
 		goto exit;
 
-	take_dentry_name_snapshot(&old_name, old_dentry);
+	old_name = fsnotify_oldname_init(old_dentry->d_name.name);
 
 	error = simple_rename(d_inode(old_dir), old_dentry, d_inode(new_dir),
 		dentry);
 	if (error) {
-		release_dentry_name_snapshot(&old_name);
+		fsnotify_oldname_free(old_name);
 		goto exit;
 	}
 	d_move(old_dentry, dentry);
-	fsnotify_move(d_inode(old_dir), d_inode(new_dir), old_name.name,
+	fsnotify_move(d_inode(old_dir), d_inode(new_dir), old_name,
 		d_is_dir(old_dentry),
 		NULL, old_dentry);
-	release_dentry_name_snapshot(&old_name);
+	fsnotify_oldname_free(old_name);
 	unlock_rename(new_dir, old_dir);
 	dput(dentry);
 	return old_dentry;

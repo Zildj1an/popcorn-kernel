@@ -627,7 +627,6 @@ static const struct dev_pm_ops nhi_pm_ops = {
 					    * we just disable hotplug, the
 					    * pci-tunnels stay alive.
 					    */
-	.thaw_noirq = nhi_resume_noirq,
 	.restore_noirq = nhi_resume_noirq,
 };
 
@@ -644,7 +643,7 @@ static struct pci_device_id nhi_ids[] = {
 	{
 		.class = PCI_CLASS_SYSTEM_OTHER << 8, .class_mask = ~0,
 		.vendor = PCI_VENDOR_ID_INTEL, .device = 0x156c,
-		.subvendor = PCI_ANY_ID, .subdevice = PCI_ANY_ID,
+		.subvendor = 0x2222, .subdevice = 0x1111,
 	},
 	{ 0,}
 };

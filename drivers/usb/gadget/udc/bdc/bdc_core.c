@@ -324,7 +324,8 @@ static void bdc_mem_free(struct bdc *bdc)
 				bdc->scratchpad.buff, bdc->scratchpad.sp_dma);
 
 	/* Destroy the dma pools */
-	dma_pool_destroy(bdc->bd_table_pool);
+	if (bdc->bd_table_pool)
+		dma_pool_destroy(bdc->bd_table_pool);
 
 	/* Free the bdc_ep array */
 	kfree(bdc->bdc_ep_array);
@@ -475,7 +476,7 @@ static int bdc_probe(struct platform_device *pdev)
 	bdc->dev = dev;
 	dev_dbg(bdc->dev, "bdc->regs: %p irq=%d\n", bdc->regs, bdc->irq);
 
-	temp = bdc_readl(bdc->regs, BDC_BDCCAP1);
+	temp = bdc_readl(bdc->regs, BDC_BDCSC);
 	if ((temp & BDC_P64) &&
 			!dma_set_mask_and_coherent(dev, DMA_BIT_MASK(64))) {
 		dev_dbg(bdc->dev, "Using 64-bit address\n");

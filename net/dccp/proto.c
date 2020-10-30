@@ -24,7 +24,6 @@
 #include <net/checksum.h>
 
 #include <net/inet_sock.h>
-#include <net/inet_common.h>
 #include <net/sock.h>
 #include <net/xfrm.h>
 
@@ -37,9 +36,6 @@
 #include "ccid.h"
 #include "dccp.h"
 #include "feat.h"
-
-#define CREATE_TRACE_POINTS
-#include "trace.h"
 
 DEFINE_SNMP_STAT(struct dccp_mib, dccp_statistics) __read_mostly;
 
@@ -113,7 +109,7 @@ void dccp_set_state(struct sock *sk, const int state)
 	/* Change state AFTER socket is unhashed to avoid closed
 	 * socket sitting in hash tables.
 	 */
-	inet_sk_set_state(sk, state);
+	sk->sk_state = state;
 }
 
 EXPORT_SYMBOL_GPL(dccp_set_state);
@@ -174,15 +170,6 @@ const char *dccp_packet_name(const int type)
 
 EXPORT_SYMBOL_GPL(dccp_packet_name);
 
-static void dccp_sk_destruct(struct sock *sk)
-{
-	struct dccp_sock *dp = dccp_sk(sk);
-
-	ccid_hc_tx_delete(dp->dccps_hc_tx_ccid, sk);
-	dp->dccps_hc_tx_ccid = NULL;
-	inet_sock_destruct(sk);
-}
-
 int dccp_init_sock(struct sock *sk, const __u8 ctl_sock_initialized)
 {
 	struct dccp_sock *dp = dccp_sk(sk);
@@ -192,7 +179,6 @@ int dccp_init_sock(struct sock *sk, const __u8 ctl_sock_initialized)
 	icsk->icsk_syn_retries	= sysctl_dccp_request_retries;
 	sk->sk_state		= DCCP_CLOSED;
 	sk->sk_write_space	= dccp_write_space;
-	sk->sk_destruct		= dccp_sk_destruct;
 	icsk->icsk_sync_mss	= dccp_sync_mss;
 	dp->dccps_mss_cache	= 536;
 	dp->dccps_rate_last	= jiffies;
@@ -215,7 +201,10 @@ void dccp_destroy_sock(struct sock *sk)
 {
 	struct dccp_sock *dp = dccp_sk(sk);
 
-	__skb_queue_purge(&sk->sk_write_queue);
+	/*
+	 * DCCP doesn't use sk_write_queue, just sk_send_head
+	 * for retransmissions
+	 */
 	if (sk->sk_send_head != NULL) {
 		kfree_skb(sk->sk_send_head);
 		sk->sk_send_head = NULL;
@@ -233,7 +222,8 @@ void dccp_destroy_sock(struct sock *sk)
 		dp->dccps_hc_rx_ackvec = NULL;
 	}
 	ccid_hc_rx_delete(dp->dccps_hc_rx_ccid, sk);
-	dp->dccps_hc_rx_ccid = NULL;
+	ccid_hc_tx_delete(dp->dccps_hc_tx_ccid, sk);
+	dp->dccps_hc_rx_ccid = dp->dccps_hc_tx_ccid = NULL;
 
 	/* clean up feature negotiation state */
 	dccp_feat_list_purge(&dp->dccps_featneg);
@@ -262,7 +252,6 @@ int dccp_disconnect(struct sock *sk, int flags)
 {
 	struct inet_connection_sock *icsk = inet_csk(sk);
 	struct inet_sock *inet = inet_sk(sk);
-	struct dccp_sock *dp = dccp_sk(sk);
 	int err = 0;
 	const int old_state = sk->sk_state;
 
@@ -282,8 +271,6 @@ int dccp_disconnect(struct sock *sk, int flags)
 		sk->sk_err = ECONNRESET;
 
 	dccp_clear_xmit_timers(sk);
-	ccid_hc_rx_delete(dp->dccps_hc_rx_ccid, sk);
-	dp->dccps_hc_rx_ccid = NULL;
 
 	__skb_queue_purge(&sk->sk_receive_queue);
 	__skb_queue_purge(&sk->sk_write_queue);
@@ -319,13 +306,13 @@ EXPORT_SYMBOL_GPL(dccp_disconnect);
  *	take care of normal races (between the test and the event) and we don't
  *	go look at any of the socket buffers directly.
  */
-__poll_t dccp_poll(struct file *file, struct socket *sock,
+unsigned int dccp_poll(struct file *file, struct socket *sock,
 		       poll_table *wait)
 {
-	__poll_t mask;
+	unsigned int mask;
 	struct sock *sk = sock->sk;
 
-	sock_poll_wait(file, sock, wait);
+	sock_poll_wait(file, sk_sleep(sk), wait);
 	if (sk->sk_state == DCCP_LISTEN)
 		return inet_csk_listen_poll(sk);
 
@@ -336,23 +323,24 @@ __poll_t dccp_poll(struct file *file, struct socket *sock,
 
 	mask = 0;
 	if (sk->sk_err)
-		mask = EPOLLERR;
+		mask = POLLERR;
 
 	if (sk->sk_shutdown == SHUTDOWN_MASK || sk->sk_state == DCCP_CLOSED)
-		mask |= EPOLLHUP;
+		mask |= POLLHUP;
 	if (sk->sk_shutdown & RCV_SHUTDOWN)
-		mask |= EPOLLIN | EPOLLRDNORM | EPOLLRDHUP;
+		mask |= POLLIN | POLLRDNORM | POLLRDHUP;
 
 	/* Connected? */
 	if ((1 << sk->sk_state) & ~(DCCPF_REQUESTING | DCCPF_RESPOND)) {
 		if (atomic_read(&sk->sk_rmem_alloc) > 0)
-			mask |= EPOLLIN | EPOLLRDNORM;
+			mask |= POLLIN | POLLRDNORM;
 
 		if (!(sk->sk_shutdown & SEND_SHUTDOWN)) {
 			if (sk_stream_is_writeable(sk)) {
-				mask |= EPOLLOUT | EPOLLWRNORM;
+				mask |= POLLOUT | POLLWRNORM;
 			} else {  /* send SIGIO later */
-				sk_set_bit(SOCKWQ_ASYNC_NOSPACE, sk);
+				set_bit(SOCK_ASYNC_NOSPACE,
+					&sk->sk_socket->flags);
 				set_bit(SOCK_NOSPACE, &sk->sk_socket->flags);
 
 				/* Race breaker. If space is freed after
@@ -360,7 +348,7 @@ __poll_t dccp_poll(struct file *file, struct socket *sock,
 				 * IO signal will be lost.
 				 */
 				if (sk_stream_is_writeable(sk))
-					mask |= EPOLLOUT | EPOLLWRNORM;
+					mask |= POLLOUT | POLLWRNORM;
 			}
 		}
 	}
@@ -762,8 +750,6 @@ int dccp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	int rc, size;
 	long timeo;
 
-	trace_dccp_probe(sk, len);
-
 	if (len > dp->dccps_mss_cache)
 		return -EMSGSIZE;
 
@@ -791,11 +777,6 @@ int dccp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	lock_sock(sk);
 	if (skb == NULL)
 		goto out_release;
-
-	if (sk->sk_state == DCCP_CLOSED) {
-		rc = -ENOTCONN;
-		goto out_discard;
-	}
 
 	skb_reserve(skb, sk->sk_prot->max_header);
 	rc = memcpy_from_msg(skb_put(skb, len), msg, len);
@@ -1028,10 +1009,6 @@ void dccp_close(struct sock *sk, long timeout)
 		data_was_unread += skb->len;
 		__kfree_skb(skb);
 	}
-
-	/* If socket has been already reset kill it. */
-	if (sk->sk_state == DCCP_CLOSED)
-		goto adjudge_to_death;
 
 	if (data_was_unread) {
 		/* Unread data was tossed, send an appropriate Reset Code */

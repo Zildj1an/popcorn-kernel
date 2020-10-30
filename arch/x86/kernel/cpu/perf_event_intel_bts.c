@@ -22,7 +22,6 @@
 #include <linux/debugfs.h>
 #include <linux/device.h>
 #include <linux/coredump.h>
-#include <linux/kaiser.h>
 
 #include <asm-generic/sizes.h>
 #include <asm/perf_event.h>
@@ -63,26 +62,12 @@ struct bts_buffer {
 
 struct pmu bts_pmu;
 
+void intel_pmu_enable_bts(u64 config);
+void intel_pmu_disable_bts(void);
+
 static size_t buf_size(struct page *page)
 {
 	return 1 << (PAGE_SHIFT + page_private(page));
-}
-
-static void bts_buffer_free_aux(void *data)
-{
-#ifdef CONFIG_PAGE_TABLE_ISOLATION
-	struct bts_buffer *buf = data;
-	int nbuf;
-
-	for (nbuf = 0; nbuf < buf->nr_bufs; nbuf++) {
-		struct page *page = buf->buf[nbuf].page;
-		void *kaddr = page_address(page);
-		size_t page_size = buf_size(page);
-
-		kaiser_remove_mapping((unsigned long)kaddr, page_size);
-	}
-#endif
-	kfree(data);
 }
 
 static void *
@@ -121,31 +106,27 @@ bts_buffer_setup_aux(int cpu, void **pages, int nr_pages, bool overwrite)
 	buf->real_size = size - size % BTS_RECORD_SIZE;
 
 	for (pg = 0, nbuf = 0, offset = 0, pad = 0; nbuf < buf->nr_bufs; nbuf++) {
-		void *kaddr = pages[pg];
-		size_t page_size;
+		unsigned int __nr_pages;
 
-		page = virt_to_page(kaddr);
-		page_size = buf_size(page);
-
-		if (kaiser_add_mapping((unsigned long)kaddr,
-					page_size, __PAGE_KERNEL) < 0) {
-			buf->nr_bufs = nbuf;
-			bts_buffer_free_aux(buf);
-			return NULL;
-		}
-
+		page = virt_to_page(pages[pg]);
+		__nr_pages = PagePrivate(page) ? 1 << page_private(page) : 1;
 		buf->buf[nbuf].page = page;
 		buf->buf[nbuf].offset = offset;
 		buf->buf[nbuf].displacement = (pad ? BTS_RECORD_SIZE - pad : 0);
-		buf->buf[nbuf].size = page_size - buf->buf[nbuf].displacement;
+		buf->buf[nbuf].size = buf_size(page) - buf->buf[nbuf].displacement;
 		pad = buf->buf[nbuf].size % BTS_RECORD_SIZE;
 		buf->buf[nbuf].size -= pad;
 
-		pg += page_size >> PAGE_SHIFT;
-		offset += page_size;
+		pg += __nr_pages;
+		offset += __nr_pages << PAGE_SHIFT;
 	}
 
 	return buf;
+}
+
+static void bts_buffer_free_aux(void *data)
+{
+	kfree(data);
 }
 
 static unsigned long bts_buffer_offset(struct bts_buffer *buf, unsigned int idx)
@@ -244,7 +225,6 @@ static void __bts_event_start(struct perf_event *event)
 	if (!buf || bts_buffer_is_full(buf, bts))
 		return;
 
-	event->hw.itrace_started = 1;
 	event->hw.state = 0;
 
 	if (!buf->snapshot)
@@ -516,19 +496,6 @@ static int bts_event_init(struct perf_event *event)
 
 	if (x86_add_exclusive(x86_lbr_exclusive_bts))
 		return -EBUSY;
-
-	/*
-	 * BTS leaks kernel addresses even when CPL0 tracing is
-	 * disabled, so disallow intel_bts driver for unprivileged
-	 * users on paranoid systems since it provides trace data
-	 * to the user in a zero-copy fashion.
-	 *
-	 * Note that the default paranoia setting permits unprivileged
-	 * users to profile the kernel.
-	 */
-	if (event->attr.exclude_kernel && perf_paranoid_kernel() &&
-	    !capable(CAP_SYS_ADMIN))
-		return -EACCES;
 
 	ret = x86_reserve_hardware();
 	if (ret) {

@@ -41,6 +41,7 @@ MODULE_ALIAS("ip_set_bitmap:ip");
 /* Type structure */
 struct bitmap_ip {
 	void *members;		/* the set members */
+	void *extensions;	/* data extensions */
 	u32 first_ip;		/* host byte order, included in range */
 	u32 last_ip;		/* host byte order, included in range */
 	u32 elements;		/* number of max elements in the set */
@@ -48,9 +49,6 @@ struct bitmap_ip {
 	size_t memsize;		/* members size */
 	u8 netmask;		/* subnet netmask */
 	struct timer_list gc;	/* garbage collection */
-	struct ip_set *set;	/* attached to this ip_set */
-	unsigned char extensions[0]	/* data extensions */
-		__aligned(__alignof__(u64));
 };
 
 /* ADT structure for generic function args */
@@ -226,6 +224,13 @@ init_map_ip(struct ip_set *set, struct bitmap_ip *map,
 	map->members = ip_set_alloc(map->memsize);
 	if (!map->members)
 		return false;
+	if (set->dsize) {
+		map->extensions = ip_set_alloc(set->dsize * elements);
+		if (!map->extensions) {
+			kfree(map->members);
+			return false;
+		}
+	}
 	map->first_ip = first_ip;
 	map->last_ip = last_ip;
 	map->elements = elements;
@@ -233,7 +238,6 @@ init_map_ip(struct ip_set *set, struct bitmap_ip *map,
 	map->netmask = netmask;
 	set->timeout = IPSET_NO_TIMEOUT;
 
-	map->set = set;
 	set->data = map;
 	set->family = NFPROTO_IPV4;
 
@@ -263,8 +267,12 @@ bitmap_ip_create(struct net *net, struct ip_set *set, struct nlattr *tb[],
 		ret = ip_set_get_hostipaddr4(tb[IPSET_ATTR_IP_TO], &last_ip);
 		if (ret)
 			return ret;
-		if (first_ip > last_ip)
-			swap(first_ip, last_ip);
+		if (first_ip > last_ip) {
+			u32 tmp = first_ip;
+
+			first_ip = last_ip;
+			last_ip = tmp;
+		}
 	} else if (tb[IPSET_ATTR_CIDR]) {
 		u8 cidr = nla_get_u8(tb[IPSET_ATTR_CIDR]);
 
@@ -308,13 +316,13 @@ bitmap_ip_create(struct net *net, struct ip_set *set, struct nlattr *tb[],
 	pr_debug("hosts %u, elements %llu\n",
 		 hosts, (unsigned long long)elements);
 
-	set->dsize = ip_set_elem_len(set, tb, 0, 0);
-	map = ip_set_alloc(sizeof(*map) + elements * set->dsize);
+	map = kzalloc(sizeof(*map), GFP_KERNEL);
 	if (!map)
 		return -ENOMEM;
 
 	map->memsize = bitmap_bytes(0, elements - 1);
 	set->variant = &bitmap_ip;
+	set->dsize = ip_set_elem_len(set, tb, 0);
 	if (!init_map_ip(set, map, first_ip, last_ip,
 			 elements, hosts, netmask)) {
 		kfree(map);

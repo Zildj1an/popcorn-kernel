@@ -14,7 +14,6 @@
 #include <linux/ieee80211.h>
 #include <net/mac80211.h>
 #include "rate.h"
-#include "sta_info.h"
 #include "rc80211_minstrel.h"
 #include "rc80211_minstrel_ht.h"
 
@@ -52,23 +51,22 @@
 	_streams - 1
 
 /* MCS rate information for an MCS group */
-#define MCS_GROUP(_streams, _sgi, _ht40, _s)				\
+#define MCS_GROUP(_streams, _sgi, _ht40)				\
 	[GROUP_IDX(_streams, _sgi, _ht40)] = {				\
 	.streams = _streams,						\
-	.shift = _s,							\
 	.flags =							\
 		IEEE80211_TX_RC_MCS |					\
 		(_sgi ? IEEE80211_TX_RC_SHORT_GI : 0) |			\
 		(_ht40 ? IEEE80211_TX_RC_40_MHZ_WIDTH : 0),		\
 	.duration = {							\
-		MCS_DURATION(_streams, _sgi, _ht40 ? 54 : 26) >> _s,	\
-		MCS_DURATION(_streams, _sgi, _ht40 ? 108 : 52) >> _s,	\
-		MCS_DURATION(_streams, _sgi, _ht40 ? 162 : 78) >> _s,	\
-		MCS_DURATION(_streams, _sgi, _ht40 ? 216 : 104) >> _s,	\
-		MCS_DURATION(_streams, _sgi, _ht40 ? 324 : 156) >> _s,	\
-		MCS_DURATION(_streams, _sgi, _ht40 ? 432 : 208) >> _s,	\
-		MCS_DURATION(_streams, _sgi, _ht40 ? 486 : 234) >> _s,	\
-		MCS_DURATION(_streams, _sgi, _ht40 ? 540 : 260) >> _s	\
+		MCS_DURATION(_streams, _sgi, _ht40 ? 54 : 26),		\
+		MCS_DURATION(_streams, _sgi, _ht40 ? 108 : 52),		\
+		MCS_DURATION(_streams, _sgi, _ht40 ? 162 : 78),		\
+		MCS_DURATION(_streams, _sgi, _ht40 ? 216 : 104),	\
+		MCS_DURATION(_streams, _sgi, _ht40 ? 324 : 156),	\
+		MCS_DURATION(_streams, _sgi, _ht40 ? 432 : 208),	\
+		MCS_DURATION(_streams, _sgi, _ht40 ? 486 : 234),	\
+		MCS_DURATION(_streams, _sgi, _ht40 ? 540 : 260)		\
 	}								\
 }
 
@@ -81,10 +79,9 @@
 #define BW2VBPS(_bw, r3, r2, r1)					\
 	(_bw == BW_80 ? r3 : _bw == BW_40 ? r2 : r1)
 
-#define VHT_GROUP(_streams, _sgi, _bw, _s)				\
+#define VHT_GROUP(_streams, _sgi, _bw)					\
 	[VHT_GROUP_IDX(_streams, _sgi, _bw)] = {			\
 	.streams = _streams,						\
-	.shift = _s,							\
 	.flags =							\
 		IEEE80211_TX_RC_VHT_MCS |				\
 		(_sgi ? IEEE80211_TX_RC_SHORT_GI : 0) |			\
@@ -92,25 +89,25 @@
 		 _bw == BW_40 ? IEEE80211_TX_RC_40_MHZ_WIDTH : 0),	\
 	.duration = {							\
 		MCS_DURATION(_streams, _sgi,				\
-			     BW2VBPS(_bw,  117,  54,  26)) >> _s,	\
+			     BW2VBPS(_bw,  117,  54,  26)),		\
 		MCS_DURATION(_streams, _sgi,				\
-			     BW2VBPS(_bw,  234, 108,  52)) >> _s,	\
+			     BW2VBPS(_bw,  234, 108,  52)),		\
 		MCS_DURATION(_streams, _sgi,				\
-			     BW2VBPS(_bw,  351, 162,  78)) >> _s,	\
+			     BW2VBPS(_bw,  351, 162,  78)),		\
 		MCS_DURATION(_streams, _sgi,				\
-			     BW2VBPS(_bw,  468, 216, 104)) >> _s,	\
+			     BW2VBPS(_bw,  468, 216, 104)),		\
 		MCS_DURATION(_streams, _sgi,				\
-			     BW2VBPS(_bw,  702, 324, 156)) >> _s,	\
+			     BW2VBPS(_bw,  702, 324, 156)),		\
 		MCS_DURATION(_streams, _sgi,				\
-			     BW2VBPS(_bw,  936, 432, 208)) >> _s,	\
+			     BW2VBPS(_bw,  936, 432, 208)),		\
 		MCS_DURATION(_streams, _sgi,				\
-			     BW2VBPS(_bw, 1053, 486, 234)) >> _s,	\
+			     BW2VBPS(_bw, 1053, 486, 234)),		\
 		MCS_DURATION(_streams, _sgi,				\
-			     BW2VBPS(_bw, 1170, 540, 260)) >> _s,	\
+			     BW2VBPS(_bw, 1170, 540, 260)),		\
 		MCS_DURATION(_streams, _sgi,				\
-			     BW2VBPS(_bw, 1404, 648, 312)) >> _s,	\
+			     BW2VBPS(_bw, 1404, 648, 312)),		\
 		MCS_DURATION(_streams, _sgi,				\
-			     BW2VBPS(_bw, 1560, 720, 346)) >> _s	\
+			     BW2VBPS(_bw, 1560, 720, 346))		\
 	}								\
 }
 
@@ -123,27 +120,28 @@
 	(CCK_DURATION((_bitrate > 10 ? 20 : 10), false, 60) +	\
 	 CCK_DURATION(_bitrate, _short, AVG_PKT_SIZE))
 
-#define CCK_DURATION_LIST(_short, _s)			\
-	CCK_ACK_DURATION(10, _short) >> _s,		\
-	CCK_ACK_DURATION(20, _short) >> _s,		\
-	CCK_ACK_DURATION(55, _short) >> _s,		\
-	CCK_ACK_DURATION(110, _short) >> _s
+#define CCK_DURATION_LIST(_short)			\
+	CCK_ACK_DURATION(10, _short),			\
+	CCK_ACK_DURATION(20, _short),			\
+	CCK_ACK_DURATION(55, _short),			\
+	CCK_ACK_DURATION(110, _short)
 
-#define CCK_GROUP(_s)					\
+#define CCK_GROUP					\
 	[MINSTREL_CCK_GROUP] = {			\
-		.streams = 1,				\
+		.streams = 0,				\
 		.flags = 0,				\
-		.shift = _s,				\
 		.duration = {				\
-			CCK_DURATION_LIST(false, _s),	\
-			CCK_DURATION_LIST(true, _s)	\
+			CCK_DURATION_LIST(false),	\
+			CCK_DURATION_LIST(true)		\
 		}					\
 	}
 
+#ifdef CONFIG_MAC80211_RC_MINSTREL_VHT
 static bool minstrel_vht_only = true;
 module_param(minstrel_vht_only, bool, 0644);
 MODULE_PARM_DESC(minstrel_vht_only,
 		 "Use only VHT rates when VHT is supported by sta.");
+#endif
 
 /*
  * To enable sufficiently targeted rate sampling, MCS rates are divided into
@@ -154,47 +152,69 @@ MODULE_PARM_DESC(minstrel_vht_only,
  * BW -> SGI -> #streams
  */
 const struct mcs_group minstrel_mcs_groups[] = {
-	MCS_GROUP(1, 0, BW_20, 5),
-	MCS_GROUP(2, 0, BW_20, 4),
-	MCS_GROUP(3, 0, BW_20, 4),
+	MCS_GROUP(1, 0, BW_20),
+	MCS_GROUP(2, 0, BW_20),
+#if MINSTREL_MAX_STREAMS >= 3
+	MCS_GROUP(3, 0, BW_20),
+#endif
 
-	MCS_GROUP(1, 1, BW_20, 5),
-	MCS_GROUP(2, 1, BW_20, 4),
-	MCS_GROUP(3, 1, BW_20, 4),
+	MCS_GROUP(1, 1, BW_20),
+	MCS_GROUP(2, 1, BW_20),
+#if MINSTREL_MAX_STREAMS >= 3
+	MCS_GROUP(3, 1, BW_20),
+#endif
 
-	MCS_GROUP(1, 0, BW_40, 4),
-	MCS_GROUP(2, 0, BW_40, 4),
-	MCS_GROUP(3, 0, BW_40, 4),
+	MCS_GROUP(1, 0, BW_40),
+	MCS_GROUP(2, 0, BW_40),
+#if MINSTREL_MAX_STREAMS >= 3
+	MCS_GROUP(3, 0, BW_40),
+#endif
 
-	MCS_GROUP(1, 1, BW_40, 4),
-	MCS_GROUP(2, 1, BW_40, 4),
-	MCS_GROUP(3, 1, BW_40, 4),
+	MCS_GROUP(1, 1, BW_40),
+	MCS_GROUP(2, 1, BW_40),
+#if MINSTREL_MAX_STREAMS >= 3
+	MCS_GROUP(3, 1, BW_40),
+#endif
 
-	CCK_GROUP(8),
+	CCK_GROUP,
 
-	VHT_GROUP(1, 0, BW_20, 5),
-	VHT_GROUP(2, 0, BW_20, 4),
-	VHT_GROUP(3, 0, BW_20, 4),
+#ifdef CONFIG_MAC80211_RC_MINSTREL_VHT
+	VHT_GROUP(1, 0, BW_20),
+	VHT_GROUP(2, 0, BW_20),
+#if MINSTREL_MAX_STREAMS >= 3
+	VHT_GROUP(3, 0, BW_20),
+#endif
 
-	VHT_GROUP(1, 1, BW_20, 5),
-	VHT_GROUP(2, 1, BW_20, 4),
-	VHT_GROUP(3, 1, BW_20, 4),
+	VHT_GROUP(1, 1, BW_20),
+	VHT_GROUP(2, 1, BW_20),
+#if MINSTREL_MAX_STREAMS >= 3
+	VHT_GROUP(3, 1, BW_20),
+#endif
 
-	VHT_GROUP(1, 0, BW_40, 4),
-	VHT_GROUP(2, 0, BW_40, 4),
-	VHT_GROUP(3, 0, BW_40, 4),
+	VHT_GROUP(1, 0, BW_40),
+	VHT_GROUP(2, 0, BW_40),
+#if MINSTREL_MAX_STREAMS >= 3
+	VHT_GROUP(3, 0, BW_40),
+#endif
 
-	VHT_GROUP(1, 1, BW_40, 4),
-	VHT_GROUP(2, 1, BW_40, 4),
-	VHT_GROUP(3, 1, BW_40, 4),
+	VHT_GROUP(1, 1, BW_40),
+	VHT_GROUP(2, 1, BW_40),
+#if MINSTREL_MAX_STREAMS >= 3
+	VHT_GROUP(3, 1, BW_40),
+#endif
 
-	VHT_GROUP(1, 0, BW_80, 4),
-	VHT_GROUP(2, 0, BW_80, 4),
-	VHT_GROUP(3, 0, BW_80, 4),
+	VHT_GROUP(1, 0, BW_80),
+	VHT_GROUP(2, 0, BW_80),
+#if MINSTREL_MAX_STREAMS >= 3
+	VHT_GROUP(3, 0, BW_80),
+#endif
 
-	VHT_GROUP(1, 1, BW_80, 4),
-	VHT_GROUP(2, 1, BW_80, 4),
-	VHT_GROUP(3, 1, BW_80, 4),
+	VHT_GROUP(1, 1, BW_80),
+	VHT_GROUP(2, 1, BW_80),
+#if MINSTREL_MAX_STREAMS >= 3
+	VHT_GROUP(3, 1, BW_80),
+#endif
+#endif
 };
 
 static u8 sample_table[SAMPLE_COLUMNS][MCS_GROUP_RATES] __read_mostly;
@@ -281,8 +301,7 @@ minstrel_ht_get_stats(struct minstrel_priv *mp, struct minstrel_ht_sta *mi,
 				break;
 
 		/* short preamble */
-		if ((mi->supported[group] & BIT(idx + 4)) &&
-		    (rate->flags & IEEE80211_TX_RC_USE_SHORT_PREAMBLE))
+		if (!(mi->groups[group].supported & BIT(idx)))
 			idx += 4;
 	}
 	return &mi->groups[group].rates[idx];
@@ -311,8 +330,7 @@ minstrel_ht_get_tp_avg(struct minstrel_ht_sta *mi, int group, int rate,
 	if (group != MINSTREL_CCK_GROUP)
 		nsecs = 1000 * mi->overhead / MINSTREL_TRUNC(mi->avg_ampdu_len);
 
-	nsecs += minstrel_mcs_groups[group].duration[rate] <<
-		 minstrel_mcs_groups[group].shift;
+	nsecs += minstrel_mcs_groups[group].duration[rate];
 
 	/*
 	 * For the throughput calculation, limit the probability value to 90% to
@@ -396,16 +414,15 @@ minstrel_ht_set_best_prob_rate(struct minstrel_ht_sta *mi, u16 index)
 	    (max_tp_group != MINSTREL_CCK_GROUP))
 		return;
 
-	max_gpr_group = mg->max_group_prob_rate / MCS_GROUP_RATES;
-	max_gpr_idx = mg->max_group_prob_rate % MCS_GROUP_RATES;
-	max_gpr_prob = mi->groups[max_gpr_group].rates[max_gpr_idx].prob_ewma;
-
 	if (mrs->prob_ewma > MINSTREL_FRAC(75, 100)) {
 		cur_tp_avg = minstrel_ht_get_tp_avg(mi, cur_group, cur_idx,
 						    mrs->prob_ewma);
 		if (cur_tp_avg > tmp_tp_avg)
 			mi->max_prob_rate = index;
 
+		max_gpr_group = mg->max_group_prob_rate / MCS_GROUP_RATES;
+		max_gpr_idx = mg->max_group_prob_rate %	MCS_GROUP_RATES;
+		max_gpr_prob = mi->groups[max_gpr_group].rates[max_gpr_idx].prob_ewma;
 		max_gpr_tp_avg = minstrel_ht_get_tp_avg(mi, max_gpr_group,
 							max_gpr_idx,
 							max_gpr_prob);
@@ -414,7 +431,7 @@ minstrel_ht_set_best_prob_rate(struct minstrel_ht_sta *mi, u16 index)
 	} else {
 		if (mrs->prob_ewma > tmp_prob)
 			mi->max_prob_rate = index;
-		if (mrs->prob_ewma > max_gpr_prob)
+		if (mrs->prob_ewma > mg->rates[mg->max_group_prob_rate].prob_ewma)
 			mg->max_group_prob_rate = index;
 	}
 }
@@ -468,7 +485,7 @@ minstrel_ht_prob_rate_reduce_streams(struct minstrel_ht_sta *mi)
 			  MCS_GROUP_RATES].streams;
 	for (group = 0; group < ARRAY_SIZE(minstrel_mcs_groups); group++) {
 		mg = &mi->groups[group];
-		if (!mi->supported[group] || group == MINSTREL_CCK_GROUP)
+		if (!mg->supported || group == MINSTREL_CCK_GROUP)
 			continue;
 
 		tmp_idx = mg->max_group_prob_rate % MCS_GROUP_RATES;
@@ -522,7 +539,7 @@ minstrel_ht_update_stats(struct minstrel_priv *mp, struct minstrel_ht_sta *mi)
 	for (group = 0; group < ARRAY_SIZE(minstrel_mcs_groups); group++) {
 
 		mg = &mi->groups[group];
-		if (!mi->supported[group])
+		if (!mg->supported)
 			continue;
 
 		mi->sample_count++;
@@ -532,7 +549,7 @@ minstrel_ht_update_stats(struct minstrel_priv *mp, struct minstrel_ht_sta *mi)
 			tmp_group_tp_rate[j] = group;
 
 		for (i = 0; i < MCS_GROUP_RATES; i++) {
-			if (!(mi->supported[group] & BIT(i)))
+			if (!(mg->supported & BIT(i)))
 				continue;
 
 			index = MCS_GROUP_RATES * group + i;
@@ -618,7 +635,7 @@ minstrel_set_next_sample_idx(struct minstrel_ht_sta *mi)
 		mi->sample_group %= ARRAY_SIZE(minstrel_mcs_groups);
 		mg = &mi->groups[mi->sample_group];
 
-		if (!mi->supported[mi->sample_group])
+		if (!mg->supported)
 			continue;
 
 		if (++mg->index >= MCS_GROUP_RATES) {
@@ -639,7 +656,7 @@ minstrel_downgrade_rate(struct minstrel_ht_sta *mi, u16 *idx, bool primary)
 	while (group > 0) {
 		group--;
 
-		if (!mi->supported[group])
+		if (!mi->groups[group].supported)
 			continue;
 
 		if (minstrel_mcs_groups[group].streams >
@@ -670,18 +687,18 @@ minstrel_aggr_check(struct ieee80211_sta *pubsta, struct sk_buff *skb)
 	if (unlikely(skb->protocol == cpu_to_be16(ETH_P_PAE)))
 		return;
 
-	tid = ieee80211_get_tid(hdr);
+	tid = *ieee80211_get_qos_ctl(hdr) & IEEE80211_QOS_CTL_TID_MASK;
 	if (likely(sta->ampdu_mlme.tid_tx[tid]))
 		return;
 
-	ieee80211_start_tx_ba_session(pubsta, tid, 0);
+	ieee80211_start_tx_ba_session(pubsta, tid, 5000);
 }
 
 static void
 minstrel_ht_tx_status(void *priv, struct ieee80211_supported_band *sband,
-                      void *priv_sta, struct ieee80211_tx_status *st)
+                      struct ieee80211_sta *sta, void *priv_sta,
+                      struct ieee80211_tx_info *info)
 {
-	struct ieee80211_tx_info *info = st->info;
 	struct minstrel_ht_sta_priv *msp = priv_sta;
 	struct minstrel_ht_sta *mi = &msp->ht;
 	struct ieee80211_tx_rate *ar = info->status.rates;
@@ -691,8 +708,8 @@ minstrel_ht_tx_status(void *priv, struct ieee80211_supported_band *sband,
 	int i;
 
 	if (!msp->is_ht)
-		return mac80211_minstrel.tx_status_ext(priv, sband,
-						       &msp->legacy, st);
+		return mac80211_minstrel.tx_status_noskb(priv, sband, sta,
+							 &msp->legacy, info);
 
 	/* This packet was aggregated but doesn't carry status info */
 	if ((info->flags & IEEE80211_TX_CTL_AMPDU) &&
@@ -760,19 +777,12 @@ minstrel_ht_tx_status(void *priv, struct ieee80211_supported_band *sband,
 		minstrel_ht_update_rates(mp, mi);
 }
 
-static inline int
-minstrel_get_duration(int index)
-{
-	const struct mcs_group *group = &minstrel_mcs_groups[index / MCS_GROUP_RATES];
-	unsigned int duration = group->duration[index % MCS_GROUP_RATES];
-	return duration << group->shift;
-}
-
 static void
 minstrel_calc_retransmit(struct minstrel_priv *mp, struct minstrel_ht_sta *mi,
                          int index)
 {
 	struct minstrel_rate_stats *mrs;
+	const struct mcs_group *group;
 	unsigned int tx_time, tx_time_rtscts, tx_time_data;
 	unsigned int cw = mp->cw_min;
 	unsigned int ctime = 0;
@@ -791,7 +801,8 @@ minstrel_calc_retransmit(struct minstrel_priv *mp, struct minstrel_ht_sta *mi,
 	mrs->retry_count_rtscts = 2;
 	mrs->retry_updated = true;
 
-	tx_time_data = minstrel_get_duration(index) * ampdu_len / 1000;
+	group = &minstrel_mcs_groups[index / MCS_GROUP_RATES];
+	tx_time_data = group->duration[index % MCS_GROUP_RATES] * ampdu_len / 1000;
 
 	/* Contention time for first 2 tries */
 	ctime = (t_slot * cw) >> 1;
@@ -856,76 +867,13 @@ minstrel_ht_set_rate(struct minstrel_priv *mp, struct minstrel_ht_sta *mi,
 	else
 		idx = index % MCS_GROUP_RATES + (group->streams - 1) * 8;
 
-	/* enable RTS/CTS if needed:
-	 *  - if station is in dynamic SMPS (and streams > 1)
-	 *  - for fallback rates, to increase chances of getting through
-	 */
-	if (offset > 0 ||
-	    (mi->sta->smps_mode == IEEE80211_SMPS_DYNAMIC &&
-	     group->streams > 1)) {
+	if (offset > 0) {
 		ratetbl->rate[offset].count = ratetbl->rate[offset].count_rts;
 		flags |= IEEE80211_TX_RC_USE_RTS_CTS;
 	}
 
 	ratetbl->rate[offset].idx = idx;
 	ratetbl->rate[offset].flags = flags;
-}
-
-static inline int
-minstrel_ht_get_prob_ewma(struct minstrel_ht_sta *mi, int rate)
-{
-	int group = rate / MCS_GROUP_RATES;
-	rate %= MCS_GROUP_RATES;
-	return mi->groups[group].rates[rate].prob_ewma;
-}
-
-static int
-minstrel_ht_get_max_amsdu_len(struct minstrel_ht_sta *mi)
-{
-	int group = mi->max_prob_rate / MCS_GROUP_RATES;
-	const struct mcs_group *g = &minstrel_mcs_groups[group];
-	int rate = mi->max_prob_rate % MCS_GROUP_RATES;
-	unsigned int duration;
-
-	/* Disable A-MSDU if max_prob_rate is bad */
-	if (mi->groups[group].rates[rate].prob_ewma < MINSTREL_FRAC(50, 100))
-		return 1;
-
-	duration = g->duration[rate];
-	duration <<= g->shift;
-
-	/* If the rate is slower than single-stream MCS1, make A-MSDU limit small */
-	if (duration > MCS_DURATION(1, 0, 52))
-		return 500;
-
-	/*
-	 * If the rate is slower than single-stream MCS4, limit A-MSDU to usual
-	 * data packet size
-	 */
-	if (duration > MCS_DURATION(1, 0, 104))
-		return 1600;
-
-	/*
-	 * If the rate is slower than single-stream MCS7, or if the max throughput
-	 * rate success probability is less than 75%, limit A-MSDU to twice the usual
-	 * data packet size
-	 */
-	if (duration > MCS_DURATION(1, 0, 260) ||
-	    (minstrel_ht_get_prob_ewma(mi, mi->max_tp_rate[0]) <
-	     MINSTREL_FRAC(75, 100)))
-		return 3200;
-
-	/*
-	 * HT A-MPDU limits maximum MPDU size under BA agreement to 4095 bytes.
-	 * Since aggregation sessions are started/stopped without txq flush, use
-	 * the limit here to avoid the complexity of having to de-aggregate
-	 * packets in the queue.
-	 */
-	if (!mi->sta->vht_cap.vht_supported)
-		return IEEE80211_MAX_MPDU_LEN_HT_BA;
-
-	/* unlimited */
-	return 0;
 }
 
 static void
@@ -952,9 +900,15 @@ minstrel_ht_update_rates(struct minstrel_priv *mp, struct minstrel_ht_sta *mi)
 		minstrel_ht_set_rate(mp, mi, rates, i++, mi->max_prob_rate);
 	}
 
-	mi->sta->max_rc_amsdu_len = minstrel_ht_get_max_amsdu_len(mi);
 	rates->rate[i].idx = -1;
 	rate_control_set_rates(mp->hw, mi->sta, rates);
+}
+
+static inline int
+minstrel_get_duration(int index)
+{
+	const struct mcs_group *group = &minstrel_mcs_groups[index / MCS_GROUP_RATES];
+	return group->duration[index % MCS_GROUP_RATES];
 }
 
 static int
@@ -963,7 +917,6 @@ minstrel_get_sample_rate(struct minstrel_priv *mp, struct minstrel_ht_sta *mi)
 	struct minstrel_rate_stats *mrs;
 	struct minstrel_mcs_group_data *mg;
 	unsigned int sample_dur, sample_group, cur_max_tp_streams;
-	int tp_rate1, tp_rate2;
 	int sample_idx = 0;
 
 	if (mi->sample_wait > 0) {
@@ -979,38 +932,27 @@ minstrel_get_sample_rate(struct minstrel_priv *mp, struct minstrel_ht_sta *mi)
 	sample_idx = sample_table[mg->column][mg->index];
 	minstrel_set_next_sample_idx(mi);
 
-	if (!(mi->supported[sample_group] & BIT(sample_idx)))
+	if (!(mg->supported & BIT(sample_idx)))
 		return -1;
 
 	mrs = &mg->rates[sample_idx];
 	sample_idx += sample_group * MCS_GROUP_RATES;
 
-	/* Set tp_rate1, tp_rate2 to the highest / second highest max_tp_rate */
-	if (minstrel_get_duration(mi->max_tp_rate[0]) >
-	    minstrel_get_duration(mi->max_tp_rate[1])) {
-		tp_rate1 = mi->max_tp_rate[1];
-		tp_rate2 = mi->max_tp_rate[0];
-	} else {
-		tp_rate1 = mi->max_tp_rate[0];
-		tp_rate2 = mi->max_tp_rate[1];
-	}
-
 	/*
 	 * Sampling might add some overhead (RTS, no aggregation)
-	 * to the frame. Hence, don't use sampling for the highest currently
-	 * used highest throughput or probability rate.
+	 * to the frame. Hence, don't use sampling for the currently
+	 * used rates.
 	 */
-	if (sample_idx == mi->max_tp_rate[0] || sample_idx == mi->max_prob_rate)
+	if (sample_idx == mi->max_tp_rate[0] ||
+	    sample_idx == mi->max_tp_rate[1] ||
+	    sample_idx == mi->max_prob_rate)
 		return -1;
 
 	/*
-	 * Do not sample if the probability is already higher than 95%,
-	 * or if the rate is 3 times slower than the current max probability
-	 * rate, to avoid wasting airtime.
+	 * Do not sample if the probability is already higher than 95%
+	 * to avoid wasting airtime.
 	 */
-	sample_dur = minstrel_get_duration(sample_idx);
-	if (mrs->prob_ewma > MINSTREL_FRAC(95, 100) ||
-	    minstrel_get_duration(mi->max_prob_rate) * 3 < sample_dur)
+	if (mrs->prob_ewma > MINSTREL_FRAC(95, 100))
 		return -1;
 
 	/*
@@ -1018,9 +960,10 @@ minstrel_get_sample_rate(struct minstrel_priv *mp, struct minstrel_ht_sta *mi)
 	 * if the link is working perfectly.
 	 */
 
-	cur_max_tp_streams = minstrel_mcs_groups[tp_rate1 /
+	cur_max_tp_streams = minstrel_mcs_groups[mi->max_tp_rate[0] /
 		MCS_GROUP_RATES].streams;
-	if (sample_dur >= minstrel_get_duration(tp_rate2) &&
+	sample_dur = minstrel_get_duration(sample_idx);
+	if (sample_dur >= minstrel_get_duration(mi->max_tp_rate[1]) &&
 	    (cur_max_tp_streams - 1 <
 	     minstrel_mcs_groups[sample_group].streams ||
 	     sample_dur >= minstrel_get_duration(mi->max_prob_rate))) {
@@ -1033,6 +976,22 @@ minstrel_get_sample_rate(struct minstrel_priv *mp, struct minstrel_ht_sta *mi)
 	mi->sample_tries--;
 
 	return sample_idx;
+}
+
+static void
+minstrel_ht_check_cck_shortpreamble(struct minstrel_priv *mp,
+				    struct minstrel_ht_sta *mi, bool val)
+{
+	u8 supported = mi->groups[MINSTREL_CCK_GROUP].supported;
+
+	if (!supported || !mi->cck_supported_short)
+		return;
+
+	if (supported & (mi->cck_supported_short << (val * 4)))
+		return;
+
+	supported ^= mi->cck_supported_short | (mi->cck_supported_short << 4);
+	mi->groups[MINSTREL_CCK_GROUP].supported = supported;
 }
 
 static void
@@ -1058,6 +1017,7 @@ minstrel_ht_get_rate(void *priv, struct ieee80211_sta *sta, void *priv_sta,
 		minstrel_aggr_check(sta, txrc->skb);
 
 	info->flags |= mi->tx_flags;
+	minstrel_ht_check_cck_shortpreamble(mp, mi, txrc->short_preamble);
 
 #ifdef CONFIG_MAC80211_DEBUGFS
 	if (mp->fixed_rate_idx != -1)
@@ -1083,23 +1043,18 @@ minstrel_ht_get_rate(void *priv, struct ieee80211_sta *sta, void *priv_sta,
 		return;
 
 	sample_group = &minstrel_mcs_groups[sample_idx / MCS_GROUP_RATES];
-	sample_idx %= MCS_GROUP_RATES;
-
-	if (sample_group == &minstrel_mcs_groups[MINSTREL_CCK_GROUP] &&
-	    (sample_idx >= 4) != txrc->short_preamble)
-		return;
-
 	info->flags |= IEEE80211_TX_CTL_RATE_CTRL_PROBE;
 	rate->count = 1;
 
-	if (sample_group == &minstrel_mcs_groups[MINSTREL_CCK_GROUP]) {
+	if (sample_idx / MCS_GROUP_RATES == MINSTREL_CCK_GROUP) {
 		int idx = sample_idx % ARRAY_SIZE(mp->cck_rates);
 		rate->idx = mp->cck_rates[idx];
 	} else if (sample_group->flags & IEEE80211_TX_RC_VHT_MCS) {
 		ieee80211_rate_set_vht(rate, sample_idx % MCS_GROUP_RATES,
 				       sample_group->streams);
 	} else {
-		rate->idx = sample_idx + (sample_group->streams - 1) * 8;
+		rate->idx = sample_idx % MCS_GROUP_RATES +
+			    (sample_group->streams - 1) * 8;
 	}
 
 	rate->flags = sample_group->flags;
@@ -1112,7 +1067,7 @@ minstrel_ht_update_cck(struct minstrel_priv *mp, struct minstrel_ht_sta *mi,
 {
 	int i;
 
-	if (sband->band != NL80211_BAND_2GHZ)
+	if (sband->band != IEEE80211_BAND_2GHZ)
 		return;
 
 	if (!ieee80211_hw_check(mp->hw, SUPPORTS_HT_CCK_RATES))
@@ -1129,7 +1084,7 @@ minstrel_ht_update_cck(struct minstrel_priv *mp, struct minstrel_ht_sta *mi,
 			mi->cck_supported_short |= BIT(i);
 	}
 
-	mi->supported[MINSTREL_CCK_GROUP] = mi->cck_supported;
+	mi->groups[MINSTREL_CCK_GROUP].supported = mi->cck_supported;
 }
 
 static void
@@ -1141,14 +1096,13 @@ minstrel_ht_update_caps(void *priv, struct ieee80211_supported_band *sband,
 	struct minstrel_ht_sta_priv *msp = priv_sta;
 	struct minstrel_ht_sta *mi = &msp->ht;
 	struct ieee80211_mcs_info *mcs = &sta->ht_cap.mcs;
-	u16 ht_cap = sta->ht_cap.cap;
+	u16 sta_cap = sta->ht_cap.cap;
 	struct ieee80211_sta_vht_cap *vht_cap = &sta->vht_cap;
 	int use_vht;
 	int n_supported = 0;
 	int ack_dur;
 	int stbc;
 	int i;
-	bool ldpc;
 
 	/* fall back to the old minstrel for legacy stations */
 	if (!sta->ht_cap.ht_supported)
@@ -1156,10 +1110,12 @@ minstrel_ht_update_caps(void *priv, struct ieee80211_supported_band *sband,
 
 	BUILD_BUG_ON(ARRAY_SIZE(minstrel_mcs_groups) != MINSTREL_GROUPS_NB);
 
+#ifdef CONFIG_MAC80211_RC_MINSTREL_VHT
 	if (vht_cap->vht_supported)
 		use_vht = vht_cap->vht_mcs.tx_mcs_map != cpu_to_le16(~0);
 	else
-		use_vht = 0;
+#endif
+	use_vht = 0;
 
 	msp->is_ht = true;
 	memset(mi, 0, sizeof(*mi));
@@ -1184,27 +1140,21 @@ minstrel_ht_update_caps(void *priv, struct ieee80211_supported_band *sband,
 	}
 	mi->sample_tries = 4;
 
+	/* TODO tx_flags for vht - ATM the RC API is not fine-grained enough */
 	if (!use_vht) {
-		stbc = (ht_cap & IEEE80211_HT_CAP_RX_STBC) >>
+		stbc = (sta_cap & IEEE80211_HT_CAP_RX_STBC) >>
 			IEEE80211_HT_CAP_RX_STBC_SHIFT;
+		mi->tx_flags |= stbc << IEEE80211_TX_CTL_STBC_SHIFT;
 
-		ldpc = ht_cap & IEEE80211_HT_CAP_LDPC_CODING;
-	} else {
-		stbc = (vht_cap->cap & IEEE80211_VHT_CAP_RXSTBC_MASK) >>
-			IEEE80211_VHT_CAP_RXSTBC_SHIFT;
-
-		ldpc = vht_cap->cap & IEEE80211_VHT_CAP_RXLDPC;
+		if (sta_cap & IEEE80211_HT_CAP_LDPC_CODING)
+			mi->tx_flags |= IEEE80211_TX_CTL_LDPC;
 	}
-
-	mi->tx_flags |= stbc << IEEE80211_TX_CTL_STBC_SHIFT;
-	if (ldpc)
-		mi->tx_flags |= IEEE80211_TX_CTL_LDPC;
 
 	for (i = 0; i < ARRAY_SIZE(mi->groups); i++) {
 		u32 gflags = minstrel_mcs_groups[i].flags;
 		int bw, nss;
 
-		mi->supported[i] = 0;
+		mi->groups[i].supported = 0;
 		if (i == MINSTREL_CCK_GROUP) {
 			minstrel_ht_update_cck(mp, mi, sband, sta);
 			continue;
@@ -1212,10 +1162,10 @@ minstrel_ht_update_caps(void *priv, struct ieee80211_supported_band *sband,
 
 		if (gflags & IEEE80211_TX_RC_SHORT_GI) {
 			if (gflags & IEEE80211_TX_RC_40_MHZ_WIDTH) {
-				if (!(ht_cap & IEEE80211_HT_CAP_SGI_40))
+				if (!(sta_cap & IEEE80211_HT_CAP_SGI_40))
 					continue;
 			} else {
-				if (!(ht_cap & IEEE80211_HT_CAP_SGI_20))
+				if (!(sta_cap & IEEE80211_HT_CAP_SGI_20))
 					continue;
 			}
 		}
@@ -1232,11 +1182,12 @@ minstrel_ht_update_caps(void *priv, struct ieee80211_supported_band *sband,
 
 		/* HT rate */
 		if (gflags & IEEE80211_TX_RC_MCS) {
+#ifdef CONFIG_MAC80211_RC_MINSTREL_VHT
 			if (use_vht && minstrel_vht_only)
 				continue;
-
-			mi->supported[i] = mcs->rx_mask[nss - 1];
-			if (mi->supported[i])
+#endif
+			mi->groups[i].supported = mcs->rx_mask[nss - 1];
+			if (mi->groups[i].supported)
 				n_supported++;
 			continue;
 		}
@@ -1262,17 +1213,15 @@ minstrel_ht_update_caps(void *priv, struct ieee80211_supported_band *sband,
 		else
 			bw = BW_20;
 
-		mi->supported[i] = minstrel_get_valid_vht_rates(bw, nss,
+		mi->groups[i].supported = minstrel_get_valid_vht_rates(bw, nss,
 				vht_cap->vht_mcs.tx_mcs_map);
 
-		if (mi->supported[i])
+		if (mi->groups[i].supported)
 			n_supported++;
 	}
 
 	if (!n_supported)
 		goto use_legacy;
-
-	mi->supported[MINSTREL_CCK_GROUP] |= mi->cck_supported_short << 4;
 
 	/* create an initial rate table with the lowest supported rates */
 	minstrel_ht_update_stats(mp, mi);
@@ -1316,7 +1265,7 @@ minstrel_ht_alloc_sta(void *priv, struct ieee80211_sta *sta, gfp_t gfp)
 	int max_rates = 0;
 	int i;
 
-	for (i = 0; i < NUM_NL80211_BANDS; i++) {
+	for (i = 0; i < IEEE80211_NUM_BANDS; i++) {
 		sband = hw->wiphy->bands[i];
 		if (sband && sband->n_bitrates > max_rates)
 			max_rates = sband->n_bitrates;
@@ -1326,11 +1275,11 @@ minstrel_ht_alloc_sta(void *priv, struct ieee80211_sta *sta, gfp_t gfp)
 	if (!msp)
 		return NULL;
 
-	msp->ratelist = kcalloc(max_rates, sizeof(struct minstrel_rate), gfp);
+	msp->ratelist = kzalloc(sizeof(struct minstrel_rate) * max_rates, gfp);
 	if (!msp->ratelist)
 		goto error;
 
-	msp->sample_table = kmalloc_array(max_rates, SAMPLE_COLUMNS, gfp);
+	msp->sample_table = kmalloc(SAMPLE_COLUMNS * max_rates, gfp);
 	if (!msp->sample_table)
 		goto error1;
 
@@ -1353,88 +1302,16 @@ minstrel_ht_free_sta(void *priv, struct ieee80211_sta *sta, void *priv_sta)
 	kfree(msp);
 }
 
-static void
-minstrel_ht_init_cck_rates(struct minstrel_priv *mp)
-{
-	static const int bitrates[4] = { 10, 20, 55, 110 };
-	struct ieee80211_supported_band *sband;
-	u32 rate_flags = ieee80211_chandef_rate_flags(&mp->hw->conf.chandef);
-	int i, j;
-
-	sband = mp->hw->wiphy->bands[NL80211_BAND_2GHZ];
-	if (!sband)
-		return;
-
-	for (i = 0; i < sband->n_bitrates; i++) {
-		struct ieee80211_rate *rate = &sband->bitrates[i];
-
-		if (rate->flags & IEEE80211_RATE_ERP_G)
-			continue;
-
-		if ((rate_flags & sband->bitrates[i].flags) != rate_flags)
-			continue;
-
-		for (j = 0; j < ARRAY_SIZE(bitrates); j++) {
-			if (rate->bitrate != bitrates[j])
-				continue;
-
-			mp->cck_rates[j] = i;
-			break;
-		}
-	}
-}
-
 static void *
 minstrel_ht_alloc(struct ieee80211_hw *hw, struct dentry *debugfsdir)
 {
-	struct minstrel_priv *mp;
-
-	mp = kzalloc(sizeof(struct minstrel_priv), GFP_ATOMIC);
-	if (!mp)
-		return NULL;
-
-	/* contention window settings
-	 * Just an approximation. Using the per-queue values would complicate
-	 * the calculations and is probably unnecessary */
-	mp->cw_min = 15;
-	mp->cw_max = 1023;
-
-	/* number of packets (in %) to use for sampling other rates
-	 * sample less often for non-mrr packets, because the overhead
-	 * is much higher than with mrr */
-	mp->lookaround_rate = 5;
-	mp->lookaround_rate_mrr = 10;
-
-	/* maximum time that the hw is allowed to stay in one MRR segment */
-	mp->segment_size = 6000;
-
-	if (hw->max_rate_tries > 0)
-		mp->max_retry = hw->max_rate_tries;
-	else
-		/* safe default, does not necessarily have to match hw properties */
-		mp->max_retry = 7;
-
-	if (hw->max_rates >= 4)
-		mp->has_mrr = true;
-
-	mp->hw = hw;
-	mp->update_interval = 100;
-
-#ifdef CONFIG_MAC80211_DEBUGFS
-	mp->fixed_rate_idx = (u32) -1;
-	debugfs_create_u32("fixed_rate_idx", S_IRUGO | S_IWUGO, debugfsdir,
-			   &mp->fixed_rate_idx);
-#endif
-
-	minstrel_ht_init_cck_rates(mp);
-
-	return mp;
+	return mac80211_minstrel.alloc(hw, debugfsdir);
 }
 
 static void
 minstrel_ht_free(void *priv)
 {
-	kfree(priv);
+	mac80211_minstrel.free(priv);
 }
 
 static u32 minstrel_ht_get_expected_throughput(void *priv_sta)
@@ -1451,15 +1328,14 @@ static u32 minstrel_ht_get_expected_throughput(void *priv_sta)
 	prob = mi->groups[i].rates[j].prob_ewma;
 
 	/* convert tp_avg from pkt per second in kbps */
-	tp_avg = minstrel_ht_get_tp_avg(mi, i, j, prob) * 10;
-	tp_avg = tp_avg * AVG_PKT_SIZE * 8 / 1024;
+	tp_avg = minstrel_ht_get_tp_avg(mi, i, j, prob) * AVG_PKT_SIZE * 8 / 1024;
 
 	return tp_avg;
 }
 
 static const struct rate_control_ops mac80211_minstrel_ht = {
 	.name = "minstrel_ht",
-	.tx_status_ext = minstrel_ht_tx_status,
+	.tx_status_noskb = minstrel_ht_tx_status,
 	.get_rate = minstrel_ht_get_rate,
 	.rate_init = minstrel_ht_rate_init,
 	.rate_update = minstrel_ht_rate_update,
@@ -1469,6 +1345,7 @@ static const struct rate_control_ops mac80211_minstrel_ht = {
 	.free = minstrel_ht_free,
 #ifdef CONFIG_MAC80211_DEBUGFS
 	.add_sta_debugfs = minstrel_ht_add_sta_debugfs,
+	.remove_sta_debugfs = minstrel_ht_remove_sta_debugfs,
 #endif
 	.get_expected_throughput = minstrel_ht_get_expected_throughput,
 };
@@ -1493,14 +1370,14 @@ static void __init init_sample_table(void)
 }
 
 int __init
-rc80211_minstrel_init(void)
+rc80211_minstrel_ht_init(void)
 {
 	init_sample_table();
 	return ieee80211_rate_control_register(&mac80211_minstrel_ht);
 }
 
 void
-rc80211_minstrel_exit(void)
+rc80211_minstrel_ht_exit(void)
 {
 	ieee80211_rate_control_unregister(&mac80211_minstrel_ht);
 }

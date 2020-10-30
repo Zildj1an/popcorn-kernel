@@ -316,27 +316,25 @@ atmel_hlcdc_plane_update_pos_and_size(struct atmel_hlcdc_plane *plane,
 			u32 *coeff_tab = heo_upscaling_ycoef;
 			u32 max_memsize;
 
-			if (state->crtc_h < state->src_h)
+			if (state->crtc_w < state->src_w)
 				coeff_tab = heo_downscaling_ycoef;
 			for (i = 0; i < ARRAY_SIZE(heo_upscaling_ycoef); i++)
 				atmel_hlcdc_layer_update_cfg(&plane->layer,
 							     33 + i,
 							     0xffffffff,
 							     coeff_tab[i]);
-			factor = ((8 * 256 * state->src_h) - (256 * 4)) /
-				 state->crtc_h;
+			factor = ((8 * 256 * state->src_w) - (256 * 4)) /
+				 state->crtc_w;
 			factor++;
-			max_memsize = ((factor * state->crtc_h) + (256 * 4)) /
+			max_memsize = ((factor * state->crtc_w) + (256 * 4)) /
 				      2048;
-			if (max_memsize > state->src_h)
+			if (max_memsize > state->src_w)
 				factor--;
 			factor_reg |= (factor << 16) | 0x80000000;
 		}
 
 		atmel_hlcdc_layer_update_cfg(&plane->layer, 13, 0xffffffff,
 					     factor_reg);
-	} else {
-		atmel_hlcdc_layer_update_cfg(&plane->layer, 13, 0xffffffff, 0);
 	}
 }
 
@@ -635,7 +633,7 @@ static int atmel_hlcdc_plane_atomic_check(struct drm_plane *p,
 		if (!state->bpp[i])
 			return -EINVAL;
 
-		switch (state->base.rotation & DRM_ROTATE_MASK) {
+		switch (state->base.rotation & 0xf) {
 		case BIT(DRM_ROTATE_90):
 			offset = ((y_offset + state->src_y + patched_src_w - 1) /
 				  ydiv) * fb->pitches[i];
@@ -714,12 +712,10 @@ static int atmel_hlcdc_plane_atomic_check(struct drm_plane *p,
 }
 
 static int atmel_hlcdc_plane_prepare_fb(struct drm_plane *p,
+					struct drm_framebuffer *fb,
 					const struct drm_plane_state *new_state)
 {
 	struct atmel_hlcdc_plane *plane = drm_plane_to_atmel_hlcdc_plane(p);
-
-	if (!new_state->fb)
-		return 0;
 
 	return atmel_hlcdc_layer_update_start(&plane->layer);
 }

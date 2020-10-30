@@ -21,14 +21,12 @@ CFLAGS += -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64
 
 RM = rm -f
 
+build  := -f $(srctree)/tools/build/Makefile.build dir=. obj
 API_IN := $(OUTPUT)libapi-in.o
 
-all:
-
 export srctree OUTPUT CC LD CFLAGS V
-include $(srctree)/tools/build/Makefile.include
 
-all: fixdep $(LIBFILE)
+all: $(LIBFILE)
 
 $(API_IN): FORCE
 	@$(MAKE) $(build)=libapi

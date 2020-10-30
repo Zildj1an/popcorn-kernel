@@ -81,14 +81,10 @@
 #define SECTOR_TO_BLOCK_SHIFT 3
 
 /*
- * For btree insert:
  *  3 for btree insert +
  *  2 for btree lookup used within space map
- * For btree remove:
- *  2 for shadow spine +
- *  4 for rebalance 3 child node
  */
-#define THIN_MAX_CONCURRENT_LOCKS 6
+#define THIN_MAX_CONCURRENT_LOCKS 5
 
 /* This should be plenty */
 #define SPACE_MAP_ROOT_SIZE 128
@@ -400,9 +396,7 @@ static int __superblock_all_zeroes(struct dm_block_manager *bm, int *result)
 		}
 	}
 
-	dm_bm_unlock(b);
-
-	return 0;
+	return dm_bm_unlock(b);
 }
 
 static void __setup_btree_details(struct dm_pool_metadata *pmd)
@@ -489,11 +483,11 @@ static int __write_initial_superblock(struct dm_pool_metadata *pmd)
 	if (r < 0)
 		return r;
 
-	r = dm_tm_pre_commit(pmd->tm);
+	r = save_sm_roots(pmd);
 	if (r < 0)
 		return r;
 
-	r = save_sm_roots(pmd);
+	r = dm_tm_pre_commit(pmd->tm);
 	if (r < 0)
 		return r;
 
@@ -656,9 +650,7 @@ static int __open_metadata(struct dm_pool_metadata *pmd)
 	}
 
 	__setup_btree_details(pmd);
-	dm_bm_unlock(sblock);
-
-	return 0;
+	return dm_bm_unlock(sblock);
 
 bad_cleanup_data_sm:
 	dm_sm_destroy(pmd->data_sm);
@@ -1211,12 +1203,6 @@ static int __reserve_metadata_snap(struct dm_pool_metadata *pmd)
 	dm_block_t held_root;
 
 	/*
-	 * We commit to ensure the btree roots which we increment in a
-	 * moment are up to date.
-	 */
-	__commit_transaction(pmd);
-
-	/*
 	 * Copy the superblock.
 	 */
 	dm_sm_inc_block(pmd->metadata_sm, THIN_SUPERBLOCK_LOCATION);
@@ -1311,9 +1297,7 @@ static int __release_metadata_snap(struct dm_pool_metadata *pmd)
 	dm_btree_del(&pmd->details_info, le64_to_cpu(disk_super->device_details_root));
 	dm_sm_dec_block(pmd->metadata_sm, held_root);
 
-	dm_tm_unlock(pmd->tm, copy);
-
-	return 0;
+	return dm_tm_unlock(pmd->tm, copy);
 }
 
 int dm_pool_release_metadata_snap(struct dm_pool_metadata *pmd)
@@ -1343,9 +1327,7 @@ static int __get_metadata_snap(struct dm_pool_metadata *pmd,
 	disk_super = dm_block_data(sblock);
 	*result = le64_to_cpu(disk_super->held_root);
 
-	dm_bm_unlock(sblock);
-
-	return 0;
+	return dm_bm_unlock(sblock);
 }
 
 int dm_pool_get_metadata_snap(struct dm_pool_metadata *pmd,
@@ -1548,7 +1530,7 @@ static int __remove(struct dm_thin_device *td, dm_block_t block)
 static int __remove_range(struct dm_thin_device *td, dm_block_t begin, dm_block_t end)
 {
 	int r;
-	unsigned count, total_count = 0;
+	unsigned count;
 	struct dm_pool_metadata *pmd = td->pmd;
 	dm_block_t keys[1] = { td->id };
 	__le64 value;
@@ -1571,29 +1553,11 @@ static int __remove_range(struct dm_thin_device *td, dm_block_t begin, dm_block_
 	if (r)
 		return r;
 
-	/*
-	 * Remove leaves stops at the first unmapped entry, so we have to
-	 * loop round finding mapped ranges.
-	 */
-	while (begin < end) {
-		r = dm_btree_lookup_next(&pmd->bl_info, mapping_root, &begin, &begin, &value);
-		if (r == -ENODATA)
-			break;
+	r = dm_btree_remove_leaves(&pmd->bl_info, mapping_root, &begin, end, &mapping_root, &count);
+	if (r)
+		return r;
 
-		if (r)
-			return r;
-
-		if (begin >= end)
-			break;
-
-		r = dm_btree_remove_leaves(&pmd->bl_info, mapping_root, &begin, end, &mapping_root, &count);
-		if (r)
-			return r;
-
-		total_count += count;
-	}
-
-	td->mapped_blocks -= total_count;
+	td->mapped_blocks -= count;
 	td->changed = 1;
 
 	/*
@@ -1947,8 +1911,5 @@ bool dm_pool_metadata_needs_check(struct dm_pool_metadata *pmd)
 
 void dm_pool_issue_prefetches(struct dm_pool_metadata *pmd)
 {
-	down_read(&pmd->root_lock);
-	if (!pmd->fail_io)
-		dm_tm_issue_prefetches(pmd->tm);
-	up_read(&pmd->root_lock);
+	dm_tm_issue_prefetches(pmd->tm);
 }

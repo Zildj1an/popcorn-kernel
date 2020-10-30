@@ -253,13 +253,10 @@ struct ib_cq *mlx4_ib_create_cq(struct ib_device *ibdev,
 	if (context)
 		if (ib_copy_to_udata(udata, &cq->mcq.cqn, sizeof (__u32))) {
 			err = -EFAULT;
-			goto err_cq_free;
+			goto err_dbmap;
 		}
 
 	return &cq->ibcq;
-
-err_cq_free:
-	mlx4_cq_free(dev->dev, &cq->mcq);
 
 err_dbmap:
 	if (context)
@@ -641,7 +638,7 @@ static void mlx4_ib_poll_sw_comp(struct mlx4_ib_cq *cq, int num_entries,
 	 * simulated FLUSH_ERR completions
 	 */
 	list_for_each_entry(qp, &cq->send_qp_list, cq_send_list) {
-		mlx4_ib_qp_sw_comp(qp, num_entries, wc + *npolled, npolled, 1);
+		mlx4_ib_qp_sw_comp(qp, num_entries, wc, npolled, 1);
 		if (*npolled >= num_entries)
 			goto out;
 	}
@@ -821,7 +818,7 @@ repoll:
 			wc->opcode    = IB_WC_LSO;
 			break;
 		case MLX4_OPCODE_FMR:
-			wc->opcode    = IB_WC_REG_MR;
+			wc->opcode    = IB_WC_FAST_REG_MR;
 			break;
 		case MLX4_OPCODE_LOCAL_INVAL:
 			wc->opcode    = IB_WC_LOCAL_INV;
@@ -874,7 +871,7 @@ repoll:
 		if (is_eth) {
 			wc->sl  = be16_to_cpu(cqe->sl_vid) >> 13;
 			if (be32_to_cpu(cqe->vlan_my_qpn) &
-					MLX4_CQE_CVLAN_PRESENT_MASK) {
+					MLX4_CQE_VLAN_PRESENT_MASK) {
 				wc->vlan_id = be16_to_cpu(cqe->sl_vid) &
 					MLX4_CQE_VID_MASK;
 			} else {

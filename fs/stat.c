@@ -18,11 +18,6 @@
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
 
-#ifdef CONFIG_POPCORN
-#include <popcorn/types.h>
-#include <popcorn/syscall_server.h>
-#endif
-
 void generic_fillattr(struct inode *inode, struct kstat *stat)
 {
 	stat->dev = inode->i_sb->s_dev;
@@ -36,7 +31,7 @@ void generic_fillattr(struct inode *inode, struct kstat *stat)
 	stat->atime = inode->i_atime;
 	stat->mtime = inode->i_mtime;
 	stat->ctime = inode->i_ctime;
-	stat->blksize = i_blocksize(inode);
+	stat->blksize = (1 << inode->i_blkbits);
 	stat->blocks = inode->i_blocks;
 }
 
@@ -208,7 +203,6 @@ SYSCALL_DEFINE2(lstat, const char __user *, filename,
 SYSCALL_DEFINE2(fstat, unsigned int, fd, struct __old_kernel_stat __user *, statbuf)
 {
 	struct kstat stat;
-
 	int error = vfs_fstat(fd, &stat);
 
 	if (!error)
@@ -299,12 +293,7 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
 {
 	struct kstat stat;
 	int error;
-#ifdef CONFIG_POPCORN
-	if (distributed_remote_process(current)) {
-		error = redirect_fstatat(dfd,filename,statbuf,flag);
-		return error;
-	}
-#endif
+
 	error = vfs_fstatat(dfd, filename, &stat, flag);
 	if (error)
 		return error;
@@ -315,15 +304,8 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
 SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)
 {
 	struct kstat stat;
-	int error;
+	int error = vfs_fstat(fd, &stat);
 
-#ifdef CONFIG_POPCORN
-	if (distributed_remote_process(current)) {
-		error = redirect_fstat(fd, statbuf);
-		return error;
-	}
-#endif
-	error = vfs_fstat(fd, &stat);
 	if (!error)
 		error = cp_new_stat(&stat, statbuf);
 
@@ -385,6 +367,8 @@ static long cp_new_stat64(struct kstat *stat, struct stat64 __user *statbuf)
 	INIT_STRUCT_STAT64_PADDING(tmp);
 #ifdef CONFIG_MIPS
 	/* mips has weird padding, so we don't get 64 bits there */
+	if (!new_valid_dev(stat->dev) || !new_valid_dev(stat->rdev))
+		return -EOVERFLOW;
 	tmp.st_dev = new_encode_dev(stat->dev);
 	tmp.st_rdev = new_encode_dev(stat->rdev);
 #else
@@ -472,7 +456,6 @@ void __inode_add_bytes(struct inode *inode, loff_t bytes)
 		inode->i_bytes -= 512;
 	}
 }
-EXPORT_SYMBOL(__inode_add_bytes);
 
 void inode_add_bytes(struct inode *inode, loff_t bytes)
 {

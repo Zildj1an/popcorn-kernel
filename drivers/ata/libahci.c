@@ -467,7 +467,6 @@ void ahci_save_initial_config(struct device *dev, struct ahci_host_priv *hpriv)
 		dev_info(dev, "forcing port_map 0x%x -> 0x%x\n",
 			 port_map, hpriv->force_port_map);
 		port_map = hpriv->force_port_map;
-		hpriv->saved_port_map = port_map;
 	}
 
 	if (hpriv->mask_port_map) {
@@ -496,8 +495,8 @@ void ahci_save_initial_config(struct device *dev, struct ahci_host_priv *hpriv)
 		}
 	}
 
-	/* fabricate port_map from cap.nr_ports for < AHCI 1.3 */
-	if (!port_map && vers < 0x10300) {
+	/* fabricate port_map from cap.nr_ports */
+	if (!port_map) {
 		port_map = (1 << ahci_nr_ports(cap)) - 1;
 		dev_warn(dev, "forcing PORTS_IMPL to 0x%x\n", port_map);
 
@@ -1118,7 +1117,6 @@ static void ahci_port_init(struct device *dev, struct ata_port *ap,
 			   int port_no, void __iomem *mmio,
 			   void __iomem *port_mmio)
 {
-	struct ahci_host_priv *hpriv = ap->host->private_data;
 	const char *emsg = NULL;
 	int rc;
 	u32 tmp;
@@ -1140,11 +1138,6 @@ static void ahci_port_init(struct device *dev, struct ata_port *ap,
 		writel(tmp, port_mmio + PORT_IRQ_STAT);
 
 	writel(1 << port_no, mmio + HOST_IRQ_STAT);
-
-	/* mark esata ports */
-	tmp = readl(port_mmio + PORT_CMD);
-	if ((tmp & PORT_CMD_ESP) && (hpriv->cap & HOST_CAP_SXS))
-		ap->pflags |= ATA_PFLAG_EXTERNAL;
 }
 
 void ahci_init_controller(struct ata_host *host)
@@ -1272,15 +1265,6 @@ static int ahci_exec_polled_cmd(struct ata_port *ap, int pmp,
 	/* prep the command */
 	ata_tf_to_fis(tf, pmp, is_cmd, fis);
 	ahci_fill_cmd_slot(pp, 0, cmd_fis_len | flags | (pmp << 12));
-
-	/* set port value for softreset of Port Multiplier */
-	if (pp->fbs_enabled && pp->fbs_last_dev != pmp) {
-		tmp = readl(port_mmio + PORT_FBS);
-		tmp &= ~(PORT_FBS_DEV_MASK | PORT_FBS_DEC);
-		tmp |= pmp << PORT_FBS_DEV_OFFSET;
-		writel(tmp, port_mmio + PORT_FBS);
-		pp->fbs_last_dev = pmp;
-	}
 
 	/* issue & wait */
 	writel(1, port_mmio + PORT_CMD_ISSUE);
@@ -2502,13 +2486,28 @@ static int ahci_host_activate_multi_irqs(struct ata_host *host, int irq,
 
 		rc = devm_request_threaded_irq(host->dev, irq + i,
 					       ahci_multi_irqs_intr,
-					       ahci_port_thread_fn, 0,
+					       ahci_port_thread_fn, IRQF_SHARED,
 					       pp->irq_desc, host->ports[i]);
 		if (rc)
-			return rc;
-		ata_port_desc(host->ports[i], "irq %d", irq + i);
+			goto out_free_irqs;
 	}
-	return ata_host_register(host, sht);
+
+	for (i = 0; i < host->n_ports; i++)
+		ata_port_desc(host->ports[i], "irq %d", irq + i);
+
+	rc = ata_host_register(host, sht);
+	if (rc)
+		goto out_free_all_irqs;
+
+	return 0;
+
+out_free_all_irqs:
+	i = host->n_ports;
+out_free_irqs:
+	for (i--; i >= 0; i--)
+		devm_free_irq(host->dev, irq + i, host->ports[i]);
+
+	return rc;
 }
 
 /**

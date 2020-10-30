@@ -125,9 +125,8 @@ int amdgpu_gart_table_vram_alloc(struct amdgpu_device *adev)
 
 	if (adev->gart.robj == NULL) {
 		r = amdgpu_bo_create(adev, adev->gart.table_size,
-				     PAGE_SIZE, true, AMDGPU_GEM_DOMAIN_VRAM,
-				     AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED,
-				     NULL, NULL, &adev->gart.robj);
+				     PAGE_SIZE, true, AMDGPU_GEM_DOMAIN_VRAM, 0,
+				     NULL, &adev->gart.robj);
 		if (r) {
 			return r;
 		}
@@ -221,7 +220,7 @@ void amdgpu_gart_table_vram_free(struct amdgpu_device *adev)
  * Unbinds the requested pages from the gart page table and
  * replaces them with the dummy page (all asics).
  */
-void amdgpu_gart_unbind(struct amdgpu_device *adev, uint64_t offset,
+void amdgpu_gart_unbind(struct amdgpu_device *adev, unsigned offset,
 			int pages)
 {
 	unsigned t;
@@ -269,7 +268,7 @@ void amdgpu_gart_unbind(struct amdgpu_device *adev, uint64_t offset,
  * (all asics).
  * Returns 0 for success, -EINVAL for failure.
  */
-int amdgpu_gart_bind(struct amdgpu_device *adev, uint64_t offset,
+int amdgpu_gart_bind(struct amdgpu_device *adev, unsigned offset,
 		     int pages, struct page **pagelist, dma_addr_t *dma_addr,
 		     uint32_t flags)
 {

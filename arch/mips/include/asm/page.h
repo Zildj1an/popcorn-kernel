@@ -200,9 +200,8 @@ static inline int pfn_valid(unsigned long pfn)
 {
 	/* avoid <linux/mm.h> include hell */
 	extern unsigned long max_mapnr;
-	unsigned long pfn_offset = ARCH_PFN_OFFSET;
 
-	return pfn >= pfn_offset && pfn < max_mapnr;
+	return pfn >= ARCH_PFN_OFFSET && pfn < max_mapnr;
 }
 
 #elif defined(CONFIG_SPARSEMEM)

@@ -1773,12 +1773,12 @@ static int validate_params(uint cmd, struct dm_ioctl *param)
 	    cmd == DM_LIST_VERSIONS_CMD)
 		return 0;
 
-	if (cmd == DM_DEV_CREATE_CMD) {
+	if ((cmd == DM_DEV_CREATE_CMD)) {
 		if (!*param->name) {
 			DMWARN("name not supplied when creating device");
 			return -EINVAL;
 		}
-	} else if (*param->uuid && *param->name) {
+	} else if ((*param->uuid && *param->name)) {
 		DMWARN("only supply one of name or uuid, cmd(%u)", cmd);
 		return -EINVAL;
 	}
@@ -1843,7 +1843,7 @@ static int ctl_ioctl(uint command, struct dm_ioctl __user *user)
 	if (r)
 		goto out;
 
-	param->data_size = offsetof(struct dm_ioctl, data);
+	param->data_size = sizeof(*param);
 	r = fn(param, input_param_size);
 
 	if (unlikely(param->flags & DM_BUFFER_FULL_FLAG) &&
@@ -1919,7 +1919,9 @@ int __init dm_interface_init(void)
 
 void dm_interface_exit(void)
 {
-	misc_deregister(&_dm_misc);
+	if (misc_deregister(&_dm_misc) < 0)
+		DMERR("misc_deregister failed for control device");
+
 	dm_hash_exit();
 }
 

@@ -27,7 +27,6 @@
 #include <linux/module.h>
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
-#include <linux/sched/signal.h>
 
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
@@ -73,9 +72,9 @@ struct sco_pinfo {
 #define SCO_CONN_TIMEOUT	(HZ * 40)
 #define SCO_DISCONN_TIMEOUT	(HZ * 2)
 
-static void sco_sock_timeout(struct timer_list *t)
+static void sco_sock_timeout(unsigned long arg)
 {
-	struct sock *sk = from_timer(sk, t, sk_timer);
+	struct sock *sk = (struct sock *) arg;
 
 	BT_DBG("sock %p state %d", sk, sk->sk_state);
 
@@ -155,13 +154,13 @@ static void sco_chan_del(struct sock *sk, int err)
 	sock_set_flag(sk, SOCK_ZAPPED);
 }
 
-static void sco_conn_del(struct hci_conn *hcon, int err)
+static int sco_conn_del(struct hci_conn *hcon, int err)
 {
 	struct sco_conn *conn = hcon->sco_data;
 	struct sock *sk;
 
 	if (!conn)
-		return;
+		return 0;
 
 	BT_DBG("hcon %p conn %p, err %d", hcon, conn, err);
 
@@ -171,21 +170,19 @@ static void sco_conn_del(struct hci_conn *hcon, int err)
 	sco_conn_unlock(conn);
 
 	if (sk) {
-		sock_hold(sk);
 		bh_lock_sock(sk);
 		sco_sock_clear_timer(sk);
 		sco_chan_del(sk, err);
 		bh_unlock_sock(sk);
 		sco_sock_kill(sk);
-		sock_put(sk);
 	}
 
 	hcon->sco_data = NULL;
 	kfree(conn);
+	return 0;
 }
 
-static void __sco_chan_add(struct sco_conn *conn, struct sock *sk,
-			   struct sock *parent)
+static void __sco_chan_add(struct sco_conn *conn, struct sock *sk, struct sock *parent)
 {
 	BT_DBG("conn %p", conn);
 
@@ -193,7 +190,7 @@ static void __sco_chan_add(struct sco_conn *conn, struct sock *sk,
 	conn->sk = sk;
 
 	if (parent)
-		bt_accept_enqueue(parent, sk, true);
+		bt_accept_enqueue(parent, sk);
 }
 
 static int sco_chan_add(struct sco_conn *conn, struct sock *sk,
@@ -220,7 +217,7 @@ static int sco_connect(struct sock *sk)
 
 	BT_DBG("%pMR -> %pMR", &sco_pi(sk)->src, &sco_pi(sk)->dst);
 
-	hdev = hci_get_route(&sco_pi(sk)->dst, &sco_pi(sk)->src, BDADDR_BREDR);
+	hdev = hci_get_route(&sco_pi(sk)->dst, &sco_pi(sk)->src);
 	if (!hdev)
 		return -EHOSTUNREACH;
 
@@ -393,8 +390,7 @@ static void sco_sock_cleanup_listen(struct sock *parent)
  */
 static void sco_sock_kill(struct sock *sk)
 {
-	if (!sock_flag(sk, SOCK_ZAPPED) || sk->sk_socket ||
-	    sock_flag(sk, SOCK_DEAD))
+	if (!sock_flag(sk, SOCK_ZAPPED) || sk->sk_socket)
 		return;
 
 	BT_DBG("sk %p state %d", sk, sk->sk_state);
@@ -419,10 +415,8 @@ static void __sco_sock_close(struct sock *sk)
 		if (sco_pi(sk)->conn->hcon) {
 			sk->sk_state = BT_DISCONN;
 			sco_sock_set_timer(sk, SCO_DISCONN_TIMEOUT);
-			sco_conn_lock(sco_pi(sk)->conn);
 			hci_conn_drop(sco_pi(sk)->conn->hcon);
 			sco_pi(sk)->conn->hcon = NULL;
-			sco_conn_unlock(sco_pi(sk)->conn);
 		} else
 			sco_chan_del(sk, ECONNRESET);
 		break;
@@ -466,8 +460,7 @@ static struct proto sco_proto = {
 	.obj_size	= sizeof(struct sco_pinfo)
 };
 
-static struct sock *sco_sock_alloc(struct net *net, struct socket *sock,
-				   int proto, gfp_t prio, int kern)
+static struct sock *sco_sock_alloc(struct net *net, struct socket *sock, int proto, gfp_t prio, int kern)
 {
 	struct sock *sk;
 
@@ -488,7 +481,7 @@ static struct sock *sco_sock_alloc(struct net *net, struct socket *sock,
 
 	sco_pi(sk)->setting = BT_VOICE_CVSD_16BIT;
 
-	timer_setup(&sk->sk_timer, sco_sock_timeout, 0);
+	setup_timer(&sk->sk_timer, sco_sock_timeout, (unsigned long)sk);
 
 	bt_sock_link(&sco_sk_list, sk);
 	return sk;
@@ -516,8 +509,7 @@ static int sco_sock_create(struct net *net, struct socket *sock, int protocol,
 	return 0;
 }
 
-static int sco_sock_bind(struct socket *sock, struct sockaddr *addr,
-			 int addr_len)
+static int sco_sock_bind(struct socket *sock, struct sockaddr *addr, int addr_len)
 {
 	struct sockaddr_sco *sa = (struct sockaddr_sco *) addr;
 	struct sock *sk = sock->sk;
@@ -525,8 +517,7 @@ static int sco_sock_bind(struct socket *sock, struct sockaddr *addr,
 
 	BT_DBG("sk %p %pMR", sk, &sa->sco_bdaddr);
 
-	if (!addr || addr_len < sizeof(struct sockaddr_sco) ||
-	    addr->sa_family != AF_BLUETOOTH)
+	if (!addr || addr->sa_family != AF_BLUETOOTH)
 		return -EINVAL;
 
 	lock_sock(sk);
@@ -625,8 +616,7 @@ done:
 	return err;
 }
 
-static int sco_sock_accept(struct socket *sock, struct socket *newsock,
-			   int flags, bool kern)
+static int sco_sock_accept(struct socket *sock, struct socket *newsock, int flags)
 {
 	DEFINE_WAIT_FUNC(wait, woken_wake_function);
 	struct sock *sk = sock->sk, *ch;
@@ -680,8 +670,7 @@ done:
 	return err;
 }
 
-static int sco_sock_getname(struct socket *sock, struct sockaddr *addr,
-			    int peer)
+static int sco_sock_getname(struct socket *sock, struct sockaddr *addr, int *len, int peer)
 {
 	struct sockaddr_sco *sa = (struct sockaddr_sco *) addr;
 	struct sock *sk = sock->sk;
@@ -689,13 +678,14 @@ static int sco_sock_getname(struct socket *sock, struct sockaddr *addr,
 	BT_DBG("sock %p, sk %p", sock, sk);
 
 	addr->sa_family = AF_BLUETOOTH;
+	*len = sizeof(struct sockaddr_sco);
 
 	if (peer)
 		bacpy(&sa->sco_bdaddr, &sco_pi(sk)->dst);
 	else
 		bacpy(&sa->sco_bdaddr, &sco_pi(sk)->src);
 
-	return sizeof(struct sockaddr_sco);
+	return 0;
 }
 
 static int sco_sock_sendmsg(struct socket *sock, struct msghdr *msg,
@@ -790,8 +780,7 @@ static int sco_sock_recvmsg(struct socket *sock, struct msghdr *msg,
 	return bt_sock_recvmsg(sock, msg, len, flags);
 }
 
-static int sco_sock_setsockopt(struct socket *sock, int level, int optname,
-			       char __user *optval, unsigned int optlen)
+static int sco_sock_setsockopt(struct socket *sock, int level, int optname, char __user *optval, unsigned int optlen)
 {
 	struct sock *sk = sock->sk;
 	int len, err = 0;
@@ -831,7 +820,7 @@ static int sco_sock_setsockopt(struct socket *sock, int level, int optname,
 		voice.setting = sco_pi(sk)->setting;
 
 		len = min_t(unsigned int, sizeof(voice), optlen);
-		if (copy_from_user((char *)&voice, optval, len)) {
+		if (copy_from_user((char *) &voice, optval, len)) {
 			err = -EFAULT;
 			break;
 		}
@@ -855,8 +844,7 @@ static int sco_sock_setsockopt(struct socket *sock, int level, int optname,
 	return err;
 }
 
-static int sco_sock_getsockopt_old(struct socket *sock, int optname,
-				   char __user *optval, int __user *optlen)
+static int sco_sock_getsockopt_old(struct socket *sock, int optname, char __user *optval, int __user *optlen)
 {
 	struct sock *sk = sock->sk;
 	struct sco_options opts;
@@ -916,8 +904,7 @@ static int sco_sock_getsockopt_old(struct socket *sock, int optname,
 	return err;
 }
 
-static int sco_sock_getsockopt(struct socket *sock, int level, int optname,
-			       char __user *optval, int __user *optlen)
+static int sco_sock_getsockopt(struct socket *sock, int level, int optname, char __user *optval, int __user *optlen)
 {
 	struct sock *sk = sock->sk;
 	int len, err = 0;
@@ -942,7 +929,7 @@ static int sco_sock_getsockopt(struct socket *sock, int level, int optname,
 		}
 
 		if (put_user(test_bit(BT_SK_DEFER_SETUP, &bt_sk(sk)->flags),
-			     (u32 __user *)optval))
+			     (u32 __user *) optval))
 			err = -EFAULT;
 
 		break;
@@ -975,9 +962,7 @@ static int sco_sock_shutdown(struct socket *sock, int how)
 	if (!sk)
 		return 0;
 
-	sock_hold(sk);
 	lock_sock(sk);
-
 	if (!sk->sk_shutdown) {
 		sk->sk_shutdown = SHUTDOWN_MASK;
 		sco_sock_clear_timer(sk);
@@ -988,10 +973,7 @@ static int sco_sock_shutdown(struct socket *sock, int how)
 			err = bt_sock_wait_state(sk, BT_CLOSED,
 						 sk->sk_lingertime);
 	}
-
 	release_sock(sk);
-	sock_put(sk);
-
 	return err;
 }
 
@@ -1034,11 +1016,6 @@ static void sco_conn_ready(struct sco_conn *conn)
 		bh_unlock_sock(sk);
 	} else {
 		sco_conn_lock(conn);
-
-		if (!conn->hcon) {
-			sco_conn_unlock(conn);
-			return;
-		}
 
 		parent = sco_get_sock_listen(&conn->hcon->src);
 		if (!parent) {

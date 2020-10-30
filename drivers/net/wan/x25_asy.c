@@ -33,6 +33,7 @@
 #include <linux/lapb.h>
 #include <linux/init.h>
 #include <linux/rtnetlink.h>
+#include <linux/compat.h>
 #include <linux/slab.h>
 #include <net/x25device.h>
 #include "x25_asy.h"
@@ -123,6 +124,9 @@ static int x25_asy_change_mtu(struct net_device *dev, int newmtu)
 	unsigned char *xbuff, *rbuff;
 	int len;
 
+	if (newmtu > 65534)
+		return -EINVAL;
+
 	len = 2 * newmtu;
 	xbuff = kmalloc(len + 4, GFP_ATOMIC);
 	rbuff = kmalloc(len + 4, GFP_ATOMIC);
@@ -201,7 +205,7 @@ static void x25_asy_bump(struct x25_asy *sl)
 		return;
 	}
 	skb_push(skb, 1);	/* LAPB internal control */
-	skb_put_data(skb, sl->rbuff, count);
+	memcpy(skb_put(skb, count), sl->rbuff, count);
 	skb->protocol = x25_type_trans(skb, sl->dev);
 	err = lapb_data_received(skb->dev, skb);
 	if (err != LAPB_OK) {
@@ -323,7 +327,6 @@ static netdev_tx_t x25_asy_xmit(struct sk_buff *skb,
 		if (err != LAPB_OK)
 			netdev_err(dev, "lapb_disconnect_request error: %d\n",
 				   err);
-		/* fall through */
 	default:
 		kfree_skb(skb);
 		return NETDEV_TX_OK;
@@ -485,10 +488,8 @@ static int x25_asy_open(struct net_device *dev)
 
 	/* Cleanup */
 	kfree(sl->xbuff);
-	sl->xbuff = NULL;
 noxbuff:
 	kfree(sl->rbuff);
-	sl->rbuff = NULL;
 norbuff:
 	return -ENOMEM;
 }
@@ -548,11 +549,15 @@ static void x25_asy_receive_buf(struct tty_struct *tty,
 
 static int x25_asy_open_tty(struct tty_struct *tty)
 {
-	struct x25_asy *sl;
+	struct x25_asy *sl = tty->disc_data;
 	int err;
 
 	if (tty->ops->write == NULL)
 		return -EOPNOTSUPP;
+
+	/* First make sure we're not already connected. */
+	if (sl && sl->magic == X25_ASY_MAGIC)
+		return -EEXIST;
 
 	/* OK.  Find a free X.25 channel to use. */
 	sl = x25_asy_alloc();
@@ -570,10 +575,8 @@ static int x25_asy_open_tty(struct tty_struct *tty)
 
 	/* Perform the low-level X.25 async init */
 	err = x25_asy_open(sl->dev);
-	if (err) {
-		x25_asy_free(sl);
+	if (err)
 		return err;
-	}
 	/* Done.  We have linked the TTY line to a channel. */
 	return 0;
 }
@@ -704,6 +707,21 @@ static int x25_asy_ioctl(struct tty_struct *tty, struct file *file,
 	}
 }
 
+#ifdef CONFIG_COMPAT
+static long x25_asy_compat_ioctl(struct tty_struct *tty, struct file *file,
+			 unsigned int cmd,  unsigned long arg)
+{
+	switch (cmd) {
+	case SIOCGIFNAME:
+	case SIOCSIFHWADDR:
+		return x25_asy_ioctl(tty, file, cmd,
+				     (unsigned long)compat_ptr(arg));
+	}
+
+	return -ENOIOCTLCMD;
+}
+#endif
+
 static int x25_asy_open_dev(struct net_device *dev)
 {
 	struct x25_asy *sl = netdev_priv(dev);
@@ -735,8 +753,6 @@ static void x25_asy_setup(struct net_device *dev)
 	 */
 
 	dev->mtu		= SL_MTU;
-	dev->min_mtu		= 0;
-	dev->max_mtu		= 65534;
 	dev->netdev_ops		= &x25_asy_netdev_ops;
 	dev->watchdog_timeo	= HZ*20;
 	dev->hard_header_len	= 0;
@@ -755,6 +771,9 @@ static struct tty_ldisc_ops x25_ldisc = {
 	.open		= x25_asy_open_tty,
 	.close		= x25_asy_close_tty,
 	.ioctl		= x25_asy_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl	= x25_asy_compat_ioctl,
+#endif
 	.receive_buf	= x25_asy_receive_buf,
 	.write_wakeup	= x25_asy_write_wakeup,
 };

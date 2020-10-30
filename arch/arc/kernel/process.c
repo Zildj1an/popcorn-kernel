@@ -19,6 +19,11 @@
 #include <linux/syscalls.h>
 #include <linux/elf.h>
 #include <linux/tick.h>
+#include <linux/hw_breakpoint.h>
+
+#ifdef CONFIG_ARC_PLAT_EZNPS
+DECLARE_PER_CPU(pid_t, dp_running_pid);
+#endif
 
 SYSCALL_DEFINE1(arc_settls, void *, user_tls_data_ptr)
 {
@@ -43,11 +48,16 @@ SYSCALL_DEFINE0(arc_gettls)
 
 void arch_cpu_idle(void)
 {
+#ifdef CONFIG_EZNPS_HAS_SCHD_WFT
+	__asm__("nop\n	schd.wft.ie12");
+#else
 	/* sleep, but enable all interrupts before committing */
-	__asm__ __volatile__(
-		"sleep %0	\n"
-		:
-		:"I"(ISA_SLEEP_ARG)); /* can't be "r" has to be embedded const */
+	if (is_isa_arcompact()) {
+		__asm__("sleep 0x3");
+	} else {
+		__asm__("sleep 0x10");
+	}
+#endif
 }
 
 asmlinkage void ret_from_fork(void);
@@ -64,7 +74,7 @@ asmlinkage void ret_from_fork(void);
  * ------------------
  * |     r25        |   <==== top of Stack (thread.ksp)
  * ~                ~
- * |    --to--      |   (CALLEE Regs of kernel mode)
+ * |    --to--      |   (CALLEE Regs of user mode)
  * |     r13        |
  * ------------------
  * |     fp         |
@@ -141,6 +151,8 @@ int copy_thread(unsigned long clone_flags,
 	parent_callee = ((struct callee_regs *)regs) - 1;
 	*c_callee = *parent_callee;
 
+	clear_ptrace_hw_breakpoint(p);
+
 	if (unlikely(clone_flags & CLONE_SETTLS)) {
 		/*
 		 * set task's userland tls data ptr from 4th arg
@@ -171,6 +183,10 @@ void start_thread(struct pt_regs * regs, unsigned long pc, unsigned long usp)
 	 */
 	regs->status32 = STATUS_U_MASK | STATUS_L_MASK | ISA_INIT_STATUS_BITS;
 
+#ifdef CONFIG_EZNPS_MTM_EXT
+	regs->eflags = 0;
+#endif
+
 	/* bogus seed values for debugging */
 	regs->lp_start = 0x10;
 	regs->lp_end = 0x80;
@@ -188,6 +204,13 @@ void flush_thread(void)
  */
 void exit_thread(void)
 {
+#ifdef CONFIG_ARC_PLAT_EZNPS
+	/*
+	 * unlocking current cpu for other dp processes, if the current process
+	 * locked it earlier
+	 */
+	this_cpu_cmpxchg(dp_running_pid, current->pid, 0);
+#endif
 }
 
 int dump_fpu(struct pt_regs *regs, elf_fpregset_t *fpu)

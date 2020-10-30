@@ -691,9 +691,8 @@ lpfc_work_done(struct lpfc_hba *phba)
 	    (phba->hba_flag & HBA_SP_QUEUE_EVT)) {
 		if (pring->flag & LPFC_STOP_IOCB_EVENT) {
 			pring->flag |= LPFC_DEFERRED_RING_EVENT;
-			/* Preserve legacy behavior. */
-			if (!(phba->hba_flag & HBA_SP_QUEUE_EVT))
-				set_bit(LPFC_DATA_READY, &phba->data_flags);
+			/* Set the lpfc data pending flag */
+			set_bit(LPFC_DATA_READY, &phba->data_flags);
 		} else {
 			if (phba->link_state >= LPFC_LINK_UP) {
 				pring->flag &= ~LPFC_DEFERRED_RING_EVENT;
@@ -702,7 +701,7 @@ lpfc_work_done(struct lpfc_hba *phba)
 								HA_RXMASK));
 			}
 		}
-		if ((phba->sli_rev == LPFC_SLI_REV4) &&
+		if ((phba->sli_rev == LPFC_SLI_REV4) &
 				 (!list_empty(&pring->txq)))
 			lpfc_drain_txq(phba);
 		/*
@@ -801,6 +800,7 @@ lpfc_cleanup_rpis(struct lpfc_vport *vport, int remove)
 	struct Scsi_Host *shost = lpfc_shost_from_vport(vport);
 	struct lpfc_hba  *phba = vport->phba;
 	struct lpfc_nodelist *ndlp, *next_ndlp;
+	int  rc;
 
 	list_for_each_entry_safe(ndlp, next_ndlp, &vport->fc_nodes, nlp_listp) {
 		if (!NLP_CHK_NODE_ACT(ndlp))
@@ -816,10 +816,10 @@ lpfc_cleanup_rpis(struct lpfc_vport *vport, int remove)
 		if ((phba->sli_rev < LPFC_SLI_REV4) &&
 		    (!remove && ndlp->nlp_type & NLP_FABRIC))
 			continue;
-		lpfc_disc_state_machine(vport, ndlp, NULL,
-					remove
-					? NLP_EVT_DEVICE_RM
-					: NLP_EVT_DEVICE_RECOVERY);
+		rc = lpfc_disc_state_machine(vport, ndlp, NULL,
+					     remove
+					     ? NLP_EVT_DEVICE_RM
+					     : NLP_EVT_DEVICE_RECOVERY);
 	}
 	if (phba->sli3_options & LPFC_SLI3_VPORT_TEARDOWN) {
 		if (phba->sli_rev == LPFC_SLI_REV4)
@@ -1084,7 +1084,7 @@ out:
 }
 
 
-void
+static void
 lpfc_mbx_cmpl_local_config_link(struct lpfc_hba *phba, LPFC_MBOXQ_t *pmb)
 {
 	struct lpfc_vport *vport = pmb->vport;
@@ -1114,10 +1114,8 @@ lpfc_mbx_cmpl_local_config_link(struct lpfc_hba *phba, LPFC_MBOXQ_t *pmb)
 	/* Start discovery by sending a FLOGI. port_state is identically
 	 * LPFC_FLOGI while waiting for FLOGI cmpl
 	 */
-	if (vport->port_state != LPFC_FLOGI)
+	if (vport->port_state != LPFC_FLOGI || vport->fc_flag & FC_PT2PT_PLOGI)
 		lpfc_initial_flogi(vport);
-	else if (vport->fc_flag & FC_PT2PT)
-		lpfc_disc_start(vport);
 	return;
 
 out:
@@ -1776,6 +1774,7 @@ lpfc_sli4_fcf_rec_mbox_parse(struct lpfc_hba *phba, LPFC_MBOXQ_t *mboxq,
 			     uint16_t *next_fcf_index)
 {
 	void *virt_addr;
+	dma_addr_t phys_addr;
 	struct lpfc_mbx_sge sge;
 	struct lpfc_mbx_read_fcf_tbl *read_fcf;
 	uint32_t shdr_status, shdr_add_status, if_type;
@@ -1786,6 +1785,7 @@ lpfc_sli4_fcf_rec_mbox_parse(struct lpfc_hba *phba, LPFC_MBOXQ_t *mboxq,
 	 * routine only uses a single SGE.
 	 */
 	lpfc_sli4_mbx_sge_get(mboxq, 0, &sge);
+	phys_addr = getPaddr(sge.pa_hi, sge.pa_lo);
 	if (unlikely(!mboxq->sge_array)) {
 		lpfc_printf_log(phba, KERN_ERR, LOG_MBOX,
 				"2524 Failed to get the non-embedded SGE "
@@ -2966,10 +2966,8 @@ lpfc_mbx_cmpl_reg_vfi(struct lpfc_hba *phba, LPFC_MBOXQ_t *mboxq)
 
 out_free_mem:
 	mempool_free(mboxq, phba->mbox_mem_pool);
-	if (dmabuf) {
-		lpfc_mbuf_free(phba, dmabuf->virt, dmabuf->phys);
-		kfree(dmabuf);
-	}
+	lpfc_mbuf_free(phba, dmabuf->virt, dmabuf->phys);
+	kfree(dmabuf);
 	return;
 }
 
@@ -2979,8 +2977,7 @@ lpfc_mbx_cmpl_read_sparam(struct lpfc_hba *phba, LPFC_MBOXQ_t *pmb)
 	MAILBOX_t *mb = &pmb->u.mb;
 	struct lpfc_dmabuf *mp = (struct lpfc_dmabuf *) pmb->context1;
 	struct lpfc_vport  *vport = pmb->vport;
-	struct serv_parm *sp = &vport->fc_sparam;
-	uint32_t ed_tov;
+
 
 	/* Check for error */
 	if (mb->mbxStatus) {
@@ -2995,18 +2992,6 @@ lpfc_mbx_cmpl_read_sparam(struct lpfc_hba *phba, LPFC_MBOXQ_t *pmb)
 
 	memcpy((uint8_t *) &vport->fc_sparam, (uint8_t *) mp->virt,
 	       sizeof (struct serv_parm));
-
-	ed_tov = be32_to_cpu(sp->cmn.e_d_tov);
-	if (sp->cmn.edtovResolution)	/* E_D_TOV ticks are in nanoseconds */
-		ed_tov = (ed_tov + 999999) / 1000000;
-
-	phba->fc_edtov = ed_tov;
-	phba->fc_ratov = (2 * ed_tov) / 1000;
-	if (phba->fc_ratov < FF_DEF_RATOV) {
-		/* RA_TOV should be atleast 10sec for initial flogi */
-		phba->fc_ratov = FF_DEF_RATOV;
-	}
-
 	lpfc_update_vport_wwn(vport);
 	if (vport->port_type == LPFC_PHYSICAL_PORT) {
 		memcpy(&phba->wwnn, &vport->fc_nodename, sizeof(phba->wwnn));
@@ -3047,7 +3032,6 @@ lpfc_mbx_process_link_up(struct lpfc_hba *phba, struct lpfc_mbx_read_top *la)
 	case LPFC_LINK_SPEED_8GHZ:
 	case LPFC_LINK_SPEED_10GHZ:
 	case LPFC_LINK_SPEED_16GHZ:
-	case LPFC_LINK_SPEED_32GHZ:
 		phba->fc_linkspeed = bf_get(lpfc_mbx_read_top_link_spd, la);
 		break;
 	default:
@@ -3453,10 +3437,10 @@ lpfc_mbx_cmpl_reg_login(struct lpfc_hba *phba, LPFC_MBOXQ_t *pmb)
 		spin_lock_irq(shost->host_lock);
 		ndlp->nlp_flag &= ~NLP_IGNR_REG_CMPL;
 		spin_unlock_irq(shost->host_lock);
-	}
-
-	/* Call state machine */
-	lpfc_disc_state_machine(vport, ndlp, pmb, NLP_EVT_CMPL_REG_LOGIN);
+	} else
+		/* Good status, call state machine */
+		lpfc_disc_state_machine(vport, ndlp, pmb,
+				NLP_EVT_CMPL_REG_LOGIN);
 
 	lpfc_mbuf_free(phba, mp->virt, mp->phys);
 	kfree(mp);
@@ -4778,8 +4762,7 @@ lpfc_nlp_remove(struct lpfc_vport *vport, struct lpfc_nodelist *ndlp)
 	lpfc_cancel_retry_delay_tmo(vport, ndlp);
 	if ((ndlp->nlp_flag & NLP_DEFER_RM) &&
 	    !(ndlp->nlp_flag & NLP_REG_LOGIN_SEND) &&
-	    !(ndlp->nlp_flag & NLP_RPI_REGISTERED) &&
-	    phba->sli_rev != LPFC_SLI_REV4) {
+	    !(ndlp->nlp_flag & NLP_RPI_REGISTERED)) {
 		/* For this case we need to cleanup the default rpi
 		 * allocated by the firmware.
 		 */

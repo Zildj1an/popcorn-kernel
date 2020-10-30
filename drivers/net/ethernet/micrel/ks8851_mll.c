@@ -30,7 +30,6 @@
 #include <linux/ethtool.h>
 #include <linux/cache.h>
 #include <linux/crc32.h>
-#include <linux/crc32poly.h>
 #include <linux/mii.h>
 #include <linux/platform_device.h>
 #include <linux/delay.h>
@@ -1021,9 +1020,9 @@ static void ks_write_qmu(struct ks_net *ks, u8 *pdata, u16 len)
  * spin_lock_irqsave is required because tx and rx should be mutual exclusive.
  * So while tx is in-progress, prevent IRQ interrupt from happenning.
  */
-static netdev_tx_t ks_start_xmit(struct sk_buff *skb, struct net_device *netdev)
+static int ks_start_xmit(struct sk_buff *skb, struct net_device *netdev)
 {
-	netdev_tx_t retv = NETDEV_TX_OK;
+	int retv = NETDEV_TX_OK;
 	struct ks_net *ks = netdev_priv(netdev);
 
 	disable_irq(netdev->irq);
@@ -1079,7 +1078,7 @@ static void ks_stop_rx(struct ks_net *ks)
 
 }  /* ks_stop_rx */
 
-static unsigned long const ethernet_polynomial = CRC32_POLY_BE;
+static unsigned long const ethernet_polynomial = 0x04c11db7U;
 
 static unsigned long ether_gen_crc(int length, u8 *data)
 {
@@ -1286,6 +1285,7 @@ static const struct net_device_ops ks_netdev_ops = {
 	.ndo_start_xmit		= ks_start_xmit,
 	.ndo_set_mac_address	= ks_set_mac_address,
 	.ndo_set_rx_mode	= ks_set_rx_mode,
+	.ndo_change_mtu		= eth_change_mtu,
 	.ndo_validate_addr	= eth_validate_addr,
 };
 
@@ -1312,21 +1312,16 @@ static void ks_set_msglevel(struct net_device *netdev, u32 to)
 	ks->msg_enable = to;
 }
 
-static int ks_get_link_ksettings(struct net_device *netdev,
-				 struct ethtool_link_ksettings *cmd)
+static int ks_get_settings(struct net_device *netdev, struct ethtool_cmd *cmd)
 {
 	struct ks_net *ks = netdev_priv(netdev);
-
-	mii_ethtool_get_link_ksettings(&ks->mii, cmd);
-
-	return 0;
+	return mii_ethtool_gset(&ks->mii, cmd);
 }
 
-static int ks_set_link_ksettings(struct net_device *netdev,
-				 const struct ethtool_link_ksettings *cmd)
+static int ks_set_settings(struct net_device *netdev, struct ethtool_cmd *cmd)
 {
 	struct ks_net *ks = netdev_priv(netdev);
-	return mii_ethtool_set_link_ksettings(&ks->mii, cmd);
+	return mii_ethtool_sset(&ks->mii, cmd);
 }
 
 static u32 ks_get_link(struct net_device *netdev)
@@ -1345,10 +1340,10 @@ static const struct ethtool_ops ks_ethtool_ops = {
 	.get_drvinfo	= ks_get_drvinfo,
 	.get_msglevel	= ks_get_msglevel,
 	.set_msglevel	= ks_set_msglevel,
+	.get_settings	= ks_get_settings,
+	.set_settings	= ks_set_settings,
 	.get_link	= ks_get_link,
 	.nway_reset	= ks_nway_reset,
-	.get_link_ksettings = ks_get_link_ksettings,
-	.set_link_ksettings = ks_set_link_ksettings,
 };
 
 /* MII interface controls */

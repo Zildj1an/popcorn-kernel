@@ -42,21 +42,58 @@ static inline unsigned long mpx_bt_size_bytes(struct mm_struct *mm)
  */
 static unsigned long mpx_mmap(unsigned long len)
 {
+	unsigned long ret;
+	unsigned long addr, pgoff;
 	struct mm_struct *mm = current->mm;
-	unsigned long addr, populate;
+	vm_flags_t vm_flags;
+	struct vm_area_struct *vma;
 
 	/* Only bounds table can be allocated here */
 	if (len != mpx_bt_size_bytes(mm))
 		return -EINVAL;
 
 	down_write(&mm->mmap_sem);
-	addr = do_mmap(NULL, 0, len, PROT_READ | PROT_WRITE,
-			MAP_ANONYMOUS | MAP_PRIVATE, VM_MPX, 0, &populate);
-	up_write(&mm->mmap_sem);
-	if (populate)
-		mm_populate(addr, populate);
 
-	return addr;
+	/* Too many mappings? */
+	if (mm->map_count > sysctl_max_map_count) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	/* Obtain the address to map to. we verify (or select) it and ensure
+	 * that it represents a valid section of the address space.
+	 */
+	addr = get_unmapped_area(NULL, 0, len, 0, MAP_ANONYMOUS | MAP_PRIVATE);
+	if (addr & ~PAGE_MASK) {
+		ret = addr;
+		goto out;
+	}
+
+	vm_flags = VM_READ | VM_WRITE | VM_MPX |
+			mm->def_flags | VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC;
+
+	/* Set pgoff according to addr for anon_vma */
+	pgoff = addr >> PAGE_SHIFT;
+
+	ret = mmap_region(NULL, addr, len, vm_flags, pgoff);
+	if (IS_ERR_VALUE(ret))
+		goto out;
+
+	vma = find_vma(mm, ret);
+	if (!vma) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	if (vm_flags & VM_LOCKED) {
+		up_write(&mm->mmap_sem);
+		mm_populate(ret, len);
+		return ret;
+	}
+
+out:
+	up_write(&mm->mmap_sem);
+	return ret;
 }
 
 enum reg_type {
@@ -101,19 +138,19 @@ static int get_reg_offset(struct insn *insn, struct pt_regs *regs,
 	switch (type) {
 	case REG_TYPE_RM:
 		regno = X86_MODRM_RM(insn->modrm.value);
-		if (X86_REX_B(insn->rex_prefix.value))
+		if (X86_REX_B(insn->rex_prefix.value) == 1)
 			regno += 8;
 		break;
 
 	case REG_TYPE_INDEX:
 		regno = X86_SIB_INDEX(insn->sib.value);
-		if (X86_REX_X(insn->rex_prefix.value))
+		if (X86_REX_X(insn->rex_prefix.value) == 1)
 			regno += 8;
 		break;
 
 	case REG_TYPE_BASE:
 		regno = X86_SIB_BASE(insn->sib.value);
-		if (X86_REX_B(insn->rex_prefix.value))
+		if (X86_REX_B(insn->rex_prefix.value) == 1)
 			regno += 8;
 		break;
 
@@ -123,7 +160,7 @@ static int get_reg_offset(struct insn *insn, struct pt_regs *regs,
 		break;
 	}
 
-	if (regno >= nr_registers) {
+	if (regno > nr_registers) {
 		WARN_ONCE(1, "decoded an instruction with an invalid register");
 		return -EINVAL;
 	}
@@ -237,8 +274,7 @@ bad_opcode:
  */
 siginfo_t *mpx_generate_siginfo(struct pt_regs *regs)
 {
-	const struct mpx_bndreg_state *bndregs;
-	const struct mpx_bndreg *bndreg;
+	const struct bndreg *bndregs, *bndreg;
 	siginfo_t *info = NULL;
 	struct insn insn;
 	uint8_t bndregno;
@@ -259,13 +295,13 @@ siginfo_t *mpx_generate_siginfo(struct pt_regs *regs)
 		goto err_out;
 	}
 	/* get bndregs field from current task's xsave area */
-	bndregs = get_xsave_field_ptr(XFEATURE_MASK_BNDREGS);
+	bndregs = get_xsave_field_ptr(XSTATE_BNDREGS);
 	if (!bndregs) {
 		err = -EINVAL;
 		goto err_out;
 	}
 	/* now go select the individual register in the set of 4 */
-	bndreg = &bndregs->bndreg[bndregno];
+	bndreg = &bndregs[bndregno];
 
 	info = kzalloc(sizeof(*info), GFP_KERNEL);
 	if (!info) {
@@ -293,7 +329,7 @@ siginfo_t *mpx_generate_siginfo(struct pt_regs *regs)
 	 * We were not able to extract an address from the instruction,
 	 * probably because there was something invalid in it.
 	 */
-	if (info->si_addr == (void __user *)-1) {
+	if (info->si_addr == (void *)-1) {
 		err = -EINVAL;
 		goto err_out;
 	}
@@ -307,7 +343,7 @@ err_out:
 
 static __user void *mpx_get_bounds_dir(void)
 {
-	const struct mpx_bndcsr *bndcsr;
+	const struct bndcsr *bndcsr;
 
 	if (!cpu_feature_enabled(X86_FEATURE_MPX))
 		return MPX_INVALID_BOUNDS_DIR;
@@ -316,7 +352,7 @@ static __user void *mpx_get_bounds_dir(void)
 	 * The bounds directory pointer is stored in a register
 	 * only accessible if we first do an xsave.
 	 */
-	bndcsr = get_xsave_field_ptr(XFEATURE_MASK_BNDCSR);
+	bndcsr = get_xsave_field_ptr(XSTATE_BNDCSR);
 	if (!bndcsr)
 		return MPX_INVALID_BOUNDS_DIR;
 
@@ -490,10 +526,10 @@ out_unmap:
 static int do_mpx_bt_fault(void)
 {
 	unsigned long bd_entry, bd_base;
-	const struct mpx_bndcsr *bndcsr;
+	const struct bndcsr *bndcsr;
 	struct mm_struct *mm = current->mm;
 
-	bndcsr = get_xsave_field_ptr(XFEATURE_MASK_BNDCSR);
+	bndcsr = get_xsave_field_ptr(XSTATE_BNDCSR);
 	if (!bndcsr)
 		return -EINVAL;
 	/*
@@ -525,7 +561,15 @@ int mpx_handle_bd_fault(void)
 	if (!kernel_managing_mpx_tables(current->mm))
 		return -EINVAL;
 
-	return do_mpx_bt_fault();
+	if (do_mpx_bt_fault()) {
+		force_sig(SIGSEGV, current);
+		/*
+		 * The force_sig() is essentially "handling" this
+		 * exception, so we do not pass up the error
+		 * from do_mpx_bt_fault().
+		 */
+	}
+	return 0;
 }
 
 /*
@@ -578,29 +622,6 @@ static unsigned long mpx_bd_entry_to_bt_addr(struct mm_struct *mm,
 }
 
 /*
- * We only want to do a 4-byte get_user() on 32-bit.  Otherwise,
- * we might run off the end of the bounds table if we are on
- * a 64-bit kernel and try to get 8 bytes.
- */
-int get_user_bd_entry(struct mm_struct *mm, unsigned long *bd_entry_ret,
-		long __user *bd_entry_ptr)
-{
-	u32 bd_entry_32;
-	int ret;
-
-	if (is_64bit_mm(mm))
-		return get_user(*bd_entry_ret, bd_entry_ptr);
-
-	/*
-	 * Note that get_user() uses the type of the *pointer* to
-	 * establish the size of the get, not the destination.
-	 */
-	ret = get_user(bd_entry_32, (u32 __user *)bd_entry_ptr);
-	*bd_entry_ret = bd_entry_32;
-	return ret;
-}
-
-/*
  * Get the base of bounds tables pointed by specific bounds
  * directory entry.
  */
@@ -620,7 +641,7 @@ static int get_bt_addr(struct mm_struct *mm,
 		int need_write = 0;
 
 		pagefault_disable();
-		ret = get_user_bd_entry(mm, &bd_entry, bd_entry_ptr);
+		ret = get_user(bd_entry, bd_entry_ptr);
 		pagefault_enable();
 		if (!ret)
 			break;
@@ -715,23 +736,11 @@ static unsigned long mpx_get_bt_entry_offset_bytes(struct mm_struct *mm,
  */
 static inline unsigned long bd_entry_virt_space(struct mm_struct *mm)
 {
-	unsigned long long virt_space;
-	unsigned long long GB = (1ULL << 30);
-
-	/*
-	 * This covers 32-bit emulation as well as 32-bit kernels
-	 * running on 64-bit harware.
-	 */
-	if (!is_64bit_mm(mm))
-		return (4ULL * GB) / MPX_BD_NR_ENTRIES_32;
-
-	/*
-	 * 'x86_virt_bits' returns what the hardware is capable
-	 * of, and returns the full >32-bit adddress space when
-	 * running 32-bit kernels on 64-bit hardware.
-	 */
-	virt_space = (1ULL << boot_cpu_data.x86_virt_bits);
-	return virt_space / MPX_BD_NR_ENTRIES_64;
+	unsigned long long virt_space = (1ULL << boot_cpu_data.x86_virt_bits);
+	if (is_64bit_mm(mm))
+		return virt_space / MPX_BD_NR_ENTRIES_64;
+	else
+		return virt_space / MPX_BD_NR_ENTRIES_32;
 }
 
 /*

@@ -141,7 +141,6 @@ struct nfs_fsinfo {
 	__u32			lease_time; /* in seconds */
 	__u32			layouttype; /* supported pnfs layout driver */
 	__u32			blksize; /* preferred pnfs io block size */
-	__u32			clone_blksize; /* granularity of a CLONE operation */
 };
 
 struct nfs_fsstat {
@@ -251,7 +250,6 @@ struct nfs4_layoutget {
 	struct nfs4_layoutget_res res;
 	struct rpc_cred *cred;
 	gfp_t gfp_flags;
-	long timeout;
 };
 
 struct nfs4_getdeviceinfo_args {
@@ -361,25 +359,6 @@ struct nfs42_layoutstat_data {
 	struct nfs42_layoutstat_res res;
 };
 
-struct nfs42_clone_args {
-	struct nfs4_sequence_args	seq_args;
-	struct nfs_fh			*src_fh;
-	struct nfs_fh			*dst_fh;
-	nfs4_stateid			src_stateid;
-	nfs4_stateid			dst_stateid;
-	__u64				src_offset;
-	__u64				dst_offset;
-	__u64				count;
-	const u32			*dst_bitmask;
-};
-
-struct nfs42_clone_res {
-	struct nfs4_sequence_res	seq_res;
-	unsigned int			rpc_status;
-	struct nfs_fattr		*dst_fattr;
-	const struct nfs_server		*server;
-};
-
 struct stateowner_id {
 	__u64	create_time;
 	__u32	uniquifier;
@@ -400,7 +379,7 @@ struct nfs_openargs {
 	struct stateowner_id	id;
 	union {
 		struct {
-			struct iattr *  attrs;    /* UNCHECKED, GUARDED, EXCLUSIVE4_1 */
+			struct iattr *  attrs;    /* UNCHECKED, GUARDED */
 			nfs4_verifier   verifier; /* EXCLUSIVE */
 		};
 		nfs4_stateid	delegation;		/* CLAIM_DELEGATE_CUR */
@@ -410,7 +389,7 @@ struct nfs_openargs {
 	const struct nfs_server *server;	 /* Needed for ID mapping */
 	const u32 *		bitmask;
 	const u32 *		open_bitmap;
-	enum open_claim_type4	claim;
+	__u32			claim;
 	enum createmode4	createmode;
 	const struct nfs4_label *label;
 };
@@ -427,8 +406,8 @@ struct nfs_openres {
 	const struct nfs_server *server;
 	fmode_t			delegation_type;
 	nfs4_stateid		delegation;
-	unsigned long		pagemod_limit;
 	__u32			do_recall;
+	__u64			maxsize;
 	__u32			attrset[NFS4_BITMAP_SIZE];
 	struct nfs4_string	*owner;
 	struct nfs4_string	*group_owner;
@@ -549,7 +528,7 @@ struct nfs4_delegreturnargs {
 struct nfs4_delegreturnres {
 	struct nfs4_sequence_res	seq_res;
 	struct nfs_fattr * fattr;
-	struct nfs_server *server;
+	const struct nfs_server *server;
 };
 
 /*
@@ -622,7 +601,7 @@ struct nfs_removeargs {
 
 struct nfs_removeres {
 	struct nfs4_sequence_res 	seq_res;
-	struct nfs_server *server;
+	const struct nfs_server *server;
 	struct nfs_fattr	*dir_attr;
 	struct nfs4_change_info	cinfo;
 };
@@ -640,7 +619,7 @@ struct nfs_renameargs {
 
 struct nfs_renameres {
 	struct nfs4_sequence_res	seq_res;
-	struct nfs_server		*server;
+	const struct nfs_server		*server;
 	struct nfs4_change_info		old_cinfo;
 	struct nfs_fattr		*old_fattr;
 	struct nfs4_change_info		new_cinfo;
@@ -706,6 +685,7 @@ struct nfs_setaclargs {
 	struct nfs4_sequence_args	seq_args;
 	struct nfs_fh *			fh;
 	size_t				acl_len;
+	unsigned int			acl_pgbase;
 	struct page **			acl_pages;
 };
 
@@ -717,6 +697,7 @@ struct nfs_getaclargs {
 	struct nfs4_sequence_args 	seq_args;
 	struct nfs_fh *			fh;
 	size_t				acl_len;
+	unsigned int			acl_pgbase;
 	struct page **			acl_pages;
 };
 
@@ -1076,13 +1057,11 @@ struct nfs4_statfs_res {
 struct nfs4_server_caps_arg {
 	struct nfs4_sequence_args	seq_args;
 	struct nfs_fh		       *fhandle;
-	const u32 *			bitmask;
 };
 
 struct nfs4_server_caps_res {
 	struct nfs4_sequence_res	seq_res;
 	u32				attr_bitmask[3];
-	u32				exclcreat_bitmask[3];
 	u32				acl_bitmask;
 	u32				has_links;
 	u32				has_symlinks;

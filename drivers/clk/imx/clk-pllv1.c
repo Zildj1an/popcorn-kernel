@@ -1,3 +1,4 @@
+#include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/io.h>
 #include <linux/slab.h>
@@ -52,7 +53,7 @@ static unsigned long clk_pllv1_recalc_rate(struct clk_hw *hw,
 		unsigned long parent_rate)
 {
 	struct clk_pllv1 *pll = to_clk_pllv1(hw);
-	unsigned long long ull;
+	long long ll;
 	int mfn_abs;
 	unsigned int mfi, mfn, mfd, pd;
 	u32 reg;
@@ -94,16 +95,16 @@ static unsigned long clk_pllv1_recalc_rate(struct clk_hw *hw,
 	rate = parent_rate * 2;
 	rate /= pd + 1;
 
-	ull = (unsigned long long)rate * mfn_abs;
+	ll = (unsigned long long)rate * mfn_abs;
 
-	do_div(ull, mfd + 1);
+	do_div(ll, mfd + 1);
 
 	if (mfn_is_negative(pll, mfn))
-		ull = (rate * mfi) - ull;
-	else
-		ull = (rate * mfi) + ull;
+		ll = -ll;
 
-	return ull;
+	ll = (rate * mfi) + ll;
+
+	return ll;
 }
 
 static struct clk_ops clk_pllv1_ops = {

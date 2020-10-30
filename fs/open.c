@@ -34,11 +34,6 @@
 
 #include "internal.h"
 
-#ifdef CONFIG_POPCORN
-#include <popcorn/syscall_server.h>
-#include <popcorn/types.h>
-#endif
-
 int do_truncate(struct dentry *dentry, loff_t length, unsigned int time_attrs,
 	struct file *filp)
 {
@@ -382,7 +377,7 @@ retry:
 		 * with the "noexec" flag.
 		 */
 		res = -EACCES;
-		if (path_noexec(&path))
+		if (path.mnt->mnt_flags & MNT_NOEXEC)
 			goto out_path_release;
 	}
 
@@ -845,12 +840,16 @@ EXPORT_SYMBOL(file_path);
 int vfs_open(const struct path *path, struct file *file,
 	     const struct cred *cred)
 {
-	struct inode *inode = vfs_select_inode(path->dentry, file->f_flags);
-
-	if (IS_ERR(inode))
-		return PTR_ERR(inode);
+	struct dentry *dentry = path->dentry;
+	struct inode *inode = dentry->d_inode;
 
 	file->f_path = *path;
+	if (dentry->d_flags & DCACHE_OP_SELECT_INODE) {
+		inode = dentry->d_op->d_select_inode(dentry, file->f_flags);
+		if (IS_ERR(inode))
+			return PTR_ERR(inode);
+	}
+
 	return do_dentry_open(file, inode, NULL, cred);
 }
 
@@ -889,12 +888,6 @@ static inline int build_open_flags(int flags, umode_t mode, struct open_flags *o
 {
 	int lookup_flags = 0;
 	int acc_mode;
-
-	/*
-	 * Clear out all open flags we don't know about so that we don't report
-	 * them in fcntl(F_GETFD) or similar interfaces.
-	 */
-	flags &= VALID_OPEN_FLAGS;
 
 	if (flags & (O_CREAT | __O_TMPFILE))
 		op->mode = (mode & S_IALLUGO) | S_IFREG;
@@ -1002,12 +995,14 @@ struct file *filp_open(const char *filename, int flags, umode_t mode)
 EXPORT_SYMBOL(filp_open);
 
 struct file *file_open_root(struct dentry *dentry, struct vfsmount *mnt,
-			    const char *filename, int flags, umode_t mode)
+			    const char *filename, int flags)
 {
 	struct open_flags op;
-	int err = build_open_flags(flags, mode, &op);
+	int err = build_open_flags(flags, 0, &op);
 	if (err)
 		return ERR_PTR(err);
+	if (flags & O_CREAT)
+		return ERR_PTR(-EINVAL);
 	return do_file_open_root(dentry, mnt, filename, &op);
 }
 EXPORT_SYMBOL(file_open_root);
@@ -1040,16 +1035,8 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
 	return fd;
 }
 
-
 SYSCALL_DEFINE3(open, const char __user *, filename, int, flags, umode_t, mode)
 {
-	int ret;
-#ifdef CONFIG_POPCORN
-	if (distributed_remote_process(current)) {
-		ret = redirect_open(filename, flags, mode);
-		return ret;
-	}
-#endif
 	if (force_o_largefile())
 		flags |= O_LARGEFILE;
 
@@ -1059,13 +1046,6 @@ SYSCALL_DEFINE3(open, const char __user *, filename, int, flags, umode_t, mode)
 SYSCALL_DEFINE4(openat, int, dfd, const char __user *, filename, int, flags,
 		umode_t, mode)
 {
-	int ret;
-#ifdef CONFIG_POPCORN
-	if (distributed_remote_process(current)) {
-		ret = redirect_open(filename, flags, mode);
-		return ret;
-	}
-#endif
 	if (force_o_largefile())
 		flags |= O_LARGEFILE;
 
@@ -1118,15 +1098,7 @@ EXPORT_SYMBOL(filp_close);
  */
 SYSCALL_DEFINE1(close, unsigned int, fd)
 {
-	int retval;
-
-#ifdef CONFIG_POPCORN
-	if (distributed_remote_process(current)) {
-		retval = redirect_close(fd);
-		return retval;
-	}
-#endif
-	retval = __close_fd(current->files, fd);
+	int retval = __close_fd(current->files, fd);
 
 	/* can't restart close syscall because file table entry was cleared */
 	if (unlikely(retval == -ERESTARTSYS ||

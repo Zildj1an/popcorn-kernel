@@ -1072,7 +1072,6 @@ static void nfs_increment_seqid(int status, struct nfs_seqid *seqid)
 		case -NFS4ERR_BADXDR:
 		case -NFS4ERR_RESOURCE:
 		case -NFS4ERR_NOFILEHANDLE:
-		case -NFS4ERR_MOVED:
 			/* Non-seqid mutating errors */
 			return;
 	};
@@ -1386,7 +1385,6 @@ static int nfs4_reclaim_locks(struct nfs4_state *state, const struct nfs4_state_
 	struct inode *inode = state->inode;
 	struct nfs_inode *nfsi = NFS_I(inode);
 	struct file_lock *fl;
-	struct nfs4_lock_state *lsp;
 	int status = 0;
 	struct file_lock_context *flctx = inode->i_flctx;
 	struct list_head *list;
@@ -1427,9 +1425,7 @@ restart:
 		case -NFS4ERR_DENIED:
 		case -NFS4ERR_RECLAIM_BAD:
 		case -NFS4ERR_RECLAIM_CONFLICT:
-			lsp = fl->fl_u.nfs4_fl.owner;
-			if (lsp)
-				set_bit(NFS_LOCK_LOST, &lsp->ls_flags);
+			/* kill_proc(fl->fl_pid, SIGLOST, 1); */
 			status = 0;
 		}
 		spin_lock(&flctx->flc_lock);
@@ -1485,7 +1481,7 @@ restart:
 					spin_unlock(&state->state_lock);
 				}
 				nfs4_put_open_state(state);
-				clear_bit(NFS_STATE_RECLAIM_NOGRACE,
+				clear_bit(NFS4CLNT_RECLAIM_NOGRACE,
 					&state->flags);
 				spin_lock(&sp->so_lock);
 				goto restart;
@@ -1497,9 +1493,6 @@ restart:
 					__func__, status);
 			case -ENOENT:
 			case -ENOMEM:
-			case -EACCES:
-			case -EROFS:
-			case -EIO:
 			case -ESTALE:
 				/* Open state on this file cannot be recovered */
 				nfs4_state_mark_recovery_failed(state, status);
@@ -1596,14 +1589,13 @@ static void nfs4_state_start_reclaim_reboot(struct nfs_client *clp)
 	nfs4_state_mark_reclaim_helper(clp, nfs4_state_mark_reclaim_reboot);
 }
 
-static int nfs4_reclaim_complete(struct nfs_client *clp,
+static void nfs4_reclaim_complete(struct nfs_client *clp,
 				 const struct nfs4_state_recovery_ops *ops,
 				 struct rpc_cred *cred)
 {
 	/* Notify the server we're done reclaiming our state */
 	if (ops->reclaim_complete)
-		return ops->reclaim_complete(clp, cred);
-	return 0;
+		(void)ops->reclaim_complete(clp, cred);
 }
 
 static void nfs4_clear_reclaim_server(struct nfs_server *server)
@@ -1650,16 +1642,13 @@ static void nfs4_state_end_reclaim_reboot(struct nfs_client *clp)
 {
 	const struct nfs4_state_recovery_ops *ops;
 	struct rpc_cred *cred;
-	int err;
 
 	if (!nfs4_state_clear_reclaim_reboot(clp))
 		return;
 	ops = clp->cl_mvops->reboot_recovery_ops;
 	cred = nfs4_get_clid_cred(clp);
-	err = nfs4_reclaim_complete(clp, ops, cred);
+	nfs4_reclaim_complete(clp, ops, cred);
 	put_rpccred(cred);
-	if (err == -NFS4ERR_CONN_NOT_BOUND_TO_SESSION)
-		set_bit(NFS4CLNT_RECLAIM_REBOOT, &clp->cl_state);
 }
 
 static void nfs_delegation_clear_all(struct nfs_client *clp)
@@ -1687,6 +1676,7 @@ static int nfs4_recovery_handle_error(struct nfs_client *clp, int error)
 			break;
 		case -NFS4ERR_STALE_CLIENTID:
 			set_bit(NFS4CLNT_LEASE_EXPIRED, &clp->cl_state);
+			nfs4_state_clear_reclaim_reboot(clp);
 			nfs4_state_start_reclaim_reboot(clp);
 			break;
 		case -NFS4ERR_EXPIRED:
@@ -1735,8 +1725,7 @@ restart:
 			if (!test_and_clear_bit(ops->owner_flag_bit,
 							&sp->so_flags))
 				continue;
-			if (!atomic_inc_not_zero(&sp->so_count))
-				continue;
+			atomic_inc(&sp->so_count);
 			spin_unlock(&clp->cl_lock);
 			rcu_read_unlock();
 
@@ -2163,11 +2152,21 @@ void nfs4_schedule_session_recovery(struct nfs4_session *session, int err)
 }
 EXPORT_SYMBOL_GPL(nfs4_schedule_session_recovery);
 
-void nfs41_notify_server(struct nfs_client *clp)
+static void nfs41_ping_server(struct nfs_client *clp)
 {
 	/* Use CHECK_LEASE to ping the server with a SEQUENCE */
 	set_bit(NFS4CLNT_CHECK_LEASE, &clp->cl_state);
 	nfs4_schedule_state_manager(clp);
+}
+
+void nfs41_server_notify_target_slotid_update(struct nfs_client *clp)
+{
+	nfs41_ping_server(clp);
+}
+
+void nfs41_server_notify_highest_slotid_update(struct nfs_client *clp)
+{
+	nfs41_ping_server(clp);
 }
 
 static void nfs4_reset_all_state(struct nfs_client *clp)

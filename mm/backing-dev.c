@@ -55,13 +55,13 @@ static int bdi_debug_stats_show(struct seq_file *m, void *v)
 
 	nr_dirty = nr_io = nr_more_io = nr_dirty_time = 0;
 	spin_lock(&wb->list_lock);
-	list_for_each_entry(inode, &wb->b_dirty, i_io_list)
+	list_for_each_entry(inode, &wb->b_dirty, i_wb_list)
 		nr_dirty++;
-	list_for_each_entry(inode, &wb->b_io, i_io_list)
+	list_for_each_entry(inode, &wb->b_io, i_wb_list)
 		nr_io++;
-	list_for_each_entry(inode, &wb->b_more_io, i_io_list)
+	list_for_each_entry(inode, &wb->b_more_io, i_wb_list)
 		nr_more_io++;
-	list_for_each_entry(inode, &wb->b_dirty_time, i_io_list)
+	list_for_each_entry(inode, &wb->b_dirty_time, i_wb_list)
 		if (inode->i_state & I_DIRTY_TIME)
 			nr_dirty_time++;
 	spin_unlock(&wb->list_lock);
@@ -480,10 +480,6 @@ static void cgwb_release_workfn(struct work_struct *work)
 						release_work);
 	struct backing_dev_info *bdi = wb->bdi;
 
-	spin_lock_irq(&cgwb_lock);
-	list_del_rcu(&wb->bdi_node);
-	spin_unlock_irq(&cgwb_lock);
-
 	wb_shutdown(wb);
 
 	css_put(wb->memcg_css);
@@ -527,7 +523,7 @@ static int cgwb_create(struct backing_dev_info *bdi,
 	int ret = 0;
 
 	memcg = mem_cgroup_from_css(memcg_css);
-	blkcg_css = cgroup_get_e_css(memcg_css->cgroup, &io_cgrp_subsys);
+	blkcg_css = cgroup_get_e_css(memcg_css->cgroup, &blkio_cgrp_subsys);
 	blkcg = css_to_blkcg(blkcg_css);
 	memcg_cgwb_list = mem_cgroup_cgwb_list(memcg);
 	blkcg_cgwb_list = &blkcg->cgwb_list;
@@ -579,7 +575,6 @@ static int cgwb_create(struct backing_dev_info *bdi,
 		ret = radix_tree_insert(&bdi->cgwb_tree, memcg_css->id, wb);
 		if (!ret) {
 			atomic_inc(&bdi->usage_cnt);
-			list_add_tail_rcu(&wb->bdi_node, &bdi->wb_list);
 			list_add(&wb->memcg_node, memcg_cgwb_list);
 			list_add(&wb->blkcg_node, blkcg_cgwb_list);
 			css_get(memcg_css);
@@ -637,7 +632,7 @@ struct bdi_writeback *wb_get_create(struct backing_dev_info *bdi,
 {
 	struct bdi_writeback *wb;
 
-	might_sleep_if(gfpflags_allow_blocking(gfp));
+	might_sleep_if(gfp & __GFP_WAIT);
 
 	if (!memcg_css->parent)
 		return &bdi->wb;
@@ -650,7 +645,7 @@ struct bdi_writeback *wb_get_create(struct backing_dev_info *bdi,
 
 			/* see whether the blkcg association has changed */
 			blkcg_css = cgroup_get_e_css(memcg_css->cgroup,
-						     &io_cgrp_subsys);
+						     &blkio_cgrp_subsys);
 			if (unlikely(wb->blkcg_css != blkcg_css ||
 				     !wb_tryget(wb)))
 				wb = NULL;
@@ -681,7 +676,7 @@ static int cgwb_bdi_init(struct backing_dev_info *bdi)
 static void cgwb_bdi_destroy(struct backing_dev_info *bdi)
 {
 	struct radix_tree_iter iter;
-	struct rb_node *rbn;
+	struct bdi_writeback_congested *congested, *congested_n;
 	void **slot;
 
 	WARN_ON(test_bit(WB_registered, &bdi->wb.state));
@@ -691,11 +686,9 @@ static void cgwb_bdi_destroy(struct backing_dev_info *bdi)
 	radix_tree_for_each_slot(slot, &bdi->cgwb_tree, &iter, 0)
 		cgwb_kill(*slot);
 
-	while ((rbn = rb_first(&bdi->cgwb_congested_tree))) {
-		struct bdi_writeback_congested *congested =
-			rb_entry(rbn, struct bdi_writeback_congested, rb_node);
-
-		rb_erase(rbn, &bdi->cgwb_congested_tree);
+	rbtree_postorder_for_each_entry_safe(congested, congested_n,
+					&bdi->cgwb_congested_tree, rb_node) {
+		rb_erase(&congested->rb_node, &bdi->cgwb_congested_tree);
 		congested->bdi = NULL;	/* mark @congested unlinked */
 	}
 
@@ -757,41 +750,29 @@ static int cgwb_bdi_init(struct backing_dev_info *bdi)
 	if (!bdi->wb_congested)
 		return -ENOMEM;
 
-	atomic_set(&bdi->wb_congested->refcnt, 1);
-
 	err = wb_init(&bdi->wb, bdi, 1, GFP_KERNEL);
 	if (err) {
-		wb_congested_put(bdi->wb_congested);
+		kfree(bdi->wb_congested);
 		return err;
 	}
 	return 0;
 }
 
-static void cgwb_bdi_destroy(struct backing_dev_info *bdi)
-{
-	wb_congested_put(bdi->wb_congested);
-}
+static void cgwb_bdi_destroy(struct backing_dev_info *bdi) { }
 
 #endif	/* CONFIG_CGROUP_WRITEBACK */
 
 int bdi_init(struct backing_dev_info *bdi)
 {
-	int ret;
-
 	bdi->dev = NULL;
 
 	bdi->min_ratio = 0;
 	bdi->max_ratio = 100;
 	bdi->max_prop_frac = FPROP_FRAC_BASE;
 	INIT_LIST_HEAD(&bdi->bdi_list);
-	INIT_LIST_HEAD(&bdi->wb_list);
 	init_waitqueue_head(&bdi->wb_waitq);
 
-	ret = cgwb_bdi_init(bdi);
-
-	list_add_tail_rcu(&bdi->wb.bdi_node, &bdi->wb_list);
-
-	return ret;
+	return cgwb_bdi_init(bdi);
 }
 EXPORT_SYMBOL(bdi_init);
 
@@ -830,20 +811,6 @@ int bdi_register_dev(struct backing_dev_info *bdi, dev_t dev)
 }
 EXPORT_SYMBOL(bdi_register_dev);
 
-int bdi_register_owner(struct backing_dev_info *bdi, struct device *owner)
-{
-	int rc;
-
-	rc = bdi_register(bdi, NULL, "%u:%u", MAJOR(owner->devt),
-			MINOR(owner->devt));
-	if (rc)
-		return rc;
-	bdi->owner = owner;
-	get_device(owner);
-	return 0;
-}
-EXPORT_SYMBOL(bdi_register_owner);
-
 /*
  * Remove bdi from bdi_list, and ensure that it is no longer visible
  */
@@ -856,7 +823,7 @@ static void bdi_remove_from_list(struct backing_dev_info *bdi)
 	synchronize_rcu_expedited();
 }
 
-void bdi_unregister(struct backing_dev_info *bdi)
+void bdi_destroy(struct backing_dev_info *bdi)
 {
 	/* make sure nobody finds us on the bdi_list anymore */
 	bdi_remove_from_list(bdi);
@@ -869,22 +836,7 @@ void bdi_unregister(struct backing_dev_info *bdi)
 		bdi->dev = NULL;
 	}
 
-	if (bdi->owner) {
-		put_device(bdi->owner);
-		bdi->owner = NULL;
-	}
-}
-
-void bdi_exit(struct backing_dev_info *bdi)
-{
-	WARN_ON_ONCE(bdi->dev);
 	wb_exit(&bdi->wb);
-}
-
-void bdi_destroy(struct backing_dev_info *bdi)
-{
-	bdi_unregister(bdi);
-	bdi_exit(bdi);
 }
 EXPORT_SYMBOL(bdi_destroy);
 
@@ -922,7 +874,7 @@ static atomic_t nr_wb_congested[2];
 void clear_wb_congested(struct bdi_writeback_congested *congested, int sync)
 {
 	wait_queue_head_t *wqh = &congestion_wqh[sync];
-	enum wb_congested_state bit;
+	enum wb_state bit;
 
 	bit = sync ? WB_sync_congested : WB_async_congested;
 	if (test_and_clear_bit(bit, &congested->state))
@@ -935,7 +887,7 @@ EXPORT_SYMBOL(clear_wb_congested);
 
 void set_wb_congested(struct bdi_writeback_congested *congested, int sync)
 {
-	enum wb_congested_state bit;
+	enum wb_state bit;
 
 	bit = sync ? WB_sync_congested : WB_async_congested;
 	if (!test_and_set_bit(bit, &congested->state))
@@ -981,9 +933,8 @@ EXPORT_SYMBOL(congestion_wait);
  * jiffies for either a BDI to exit congestion of the given @sync queue
  * or a write to complete.
  *
- * In the absence of zone congestion, a short sleep or a cond_resched is
- * performed to yield the processor and to allow other subsystems to make
- * a forward progress.
+ * In the absence of zone congestion, cond_resched() is called to yield
+ * the processor if necessary but otherwise does not sleep.
  *
  * The return value is 0 if the sleep is for the full timeout. Otherwise,
  * it is the number of jiffies that were still remaining when the function
@@ -1003,19 +954,7 @@ long wait_iff_congested(struct zone *zone, int sync, long timeout)
 	 */
 	if (atomic_read(&nr_wb_congested[sync]) == 0 ||
 	    !test_bit(ZONE_CONGESTED, &zone->flags)) {
-
-		/*
-		 * Memory allocation/reclaim might be called from a WQ
-		 * context and the current implementation of the WQ
-		 * concurrency control doesn't recognize that a particular
-		 * WQ is congested if the worker thread is looping without
-		 * ever sleeping. Therefore we have to do a short sleep
-		 * here rather than calling cond_resched().
-		 */
-		if (current->flags & PF_WQ_WORKER)
-			schedule_timeout_uninterruptible(1);
-		else
-			cond_resched();
+		cond_resched();
 
 		/* In case we scheduled, work out time remaining */
 		ret = timeout - (jiffies - start);

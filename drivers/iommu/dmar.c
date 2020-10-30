@@ -326,13 +326,10 @@ static int dmar_pci_bus_notifier(struct notifier_block *nb,
 	struct pci_dev *pdev = to_pci_dev(data);
 	struct dmar_pci_notify_info *info;
 
-	/* Only care about add/remove events for physical functions.
-	 * For VFs we actually do the lookup based on the corresponding
-	 * PF in device_to_iommu() anyway. */
+	/* Only care about add/remove events for physical functions */
 	if (pdev->is_virtfn)
 		return NOTIFY_DONE;
-	if (action != BUS_NOTIFY_ADD_DEVICE &&
-	    action != BUS_NOTIFY_REMOVED_DEVICE)
+	if (action != BUS_NOTIFY_ADD_DEVICE && action != BUS_NOTIFY_DEL_DEVICE)
 		return NOTIFY_DONE;
 
 	info = dmar_alloc_pci_notify_info(pdev, action);
@@ -342,7 +339,7 @@ static int dmar_pci_bus_notifier(struct notifier_block *nb,
 	down_write(&dmar_global_lock);
 	if (action == BUS_NOTIFY_ADD_DEVICE)
 		dmar_pci_bus_add_dev(info);
-	else if (action == BUS_NOTIFY_REMOVED_DEVICE)
+	else if (action == BUS_NOTIFY_DEL_DEVICE)
 		dmar_pci_bus_del_dev(info);
 	up_write(&dmar_global_lock);
 
@@ -1071,7 +1068,7 @@ static int alloc_iommu(struct dmar_drhd_unit *drhd)
 	if (intel_iommu_enabled)
 		iommu->iommu_dev = iommu_device_create(NULL, iommu,
 						       intel_iommu_groups,
-						       "%s", iommu->name);
+						       iommu->name);
 
 	return 0;
 
@@ -1089,11 +1086,6 @@ static void free_iommu(struct intel_iommu *iommu)
 	iommu_device_destroy(iommu->iommu_dev);
 
 	if (iommu->irq) {
-		if (iommu->pr_irq) {
-			free_irq(iommu->pr_irq, iommu);
-			dmar_free_hwirq(iommu->pr_irq);
-			iommu->pr_irq = 0;
-		}
 		free_irq(iommu->irq, iommu);
 		dmar_free_hwirq(iommu->irq);
 		iommu->irq = 0;
@@ -1350,7 +1342,7 @@ void dmar_disable_qi(struct intel_iommu *iommu)
 
 	raw_spin_lock_irqsave(&iommu->register_lock, flags);
 
-	sts =  readl(iommu->reg + DMAR_GSTS_REG);
+	sts =  dmar_readq(iommu->reg + DMAR_GSTS_REG);
 	if (!(sts & DMA_GSTS_QIES))
 		goto end;
 
@@ -1501,68 +1493,53 @@ static const char *dmar_get_fault_reason(u8 fault_reason, int *fault_type)
 	}
 }
 
-
-static inline int dmar_msi_reg(struct intel_iommu *iommu, int irq)
-{
-	if (iommu->irq == irq)
-		return DMAR_FECTL_REG;
-	else if (iommu->pr_irq == irq)
-		return DMAR_PECTL_REG;
-	else
-		BUG();
-}
-
 void dmar_msi_unmask(struct irq_data *data)
 {
 	struct intel_iommu *iommu = irq_data_get_irq_handler_data(data);
-	int reg = dmar_msi_reg(iommu, data->irq);
 	unsigned long flag;
 
 	/* unmask it */
 	raw_spin_lock_irqsave(&iommu->register_lock, flag);
-	writel(0, iommu->reg + reg);
+	writel(0, iommu->reg + DMAR_FECTL_REG);
 	/* Read a reg to force flush the post write */
-	readl(iommu->reg + reg);
+	readl(iommu->reg + DMAR_FECTL_REG);
 	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
 }
 
 void dmar_msi_mask(struct irq_data *data)
 {
-	struct intel_iommu *iommu = irq_data_get_irq_handler_data(data);
-	int reg = dmar_msi_reg(iommu, data->irq);
 	unsigned long flag;
+	struct intel_iommu *iommu = irq_data_get_irq_handler_data(data);
 
 	/* mask it */
 	raw_spin_lock_irqsave(&iommu->register_lock, flag);
-	writel(DMA_FECTL_IM, iommu->reg + reg);
+	writel(DMA_FECTL_IM, iommu->reg + DMAR_FECTL_REG);
 	/* Read a reg to force flush the post write */
-	readl(iommu->reg + reg);
+	readl(iommu->reg + DMAR_FECTL_REG);
 	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
 }
 
 void dmar_msi_write(int irq, struct msi_msg *msg)
 {
 	struct intel_iommu *iommu = irq_get_handler_data(irq);
-	int reg = dmar_msi_reg(iommu, irq);
 	unsigned long flag;
 
 	raw_spin_lock_irqsave(&iommu->register_lock, flag);
-	writel(msg->data, iommu->reg + reg + 4);
-	writel(msg->address_lo, iommu->reg + reg + 8);
-	writel(msg->address_hi, iommu->reg + reg + 12);
+	writel(msg->data, iommu->reg + DMAR_FEDATA_REG);
+	writel(msg->address_lo, iommu->reg + DMAR_FEADDR_REG);
+	writel(msg->address_hi, iommu->reg + DMAR_FEUADDR_REG);
 	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
 }
 
 void dmar_msi_read(int irq, struct msi_msg *msg)
 {
 	struct intel_iommu *iommu = irq_get_handler_data(irq);
-	int reg = dmar_msi_reg(iommu, irq);
 	unsigned long flag;
 
 	raw_spin_lock_irqsave(&iommu->register_lock, flag);
-	msg->data = readl(iommu->reg + reg + 4);
-	msg->address_lo = readl(iommu->reg + reg + 8);
-	msg->address_hi = readl(iommu->reg + reg + 12);
+	msg->data = readl(iommu->reg + DMAR_FEDATA_REG);
+	msg->address_lo = readl(iommu->reg + DMAR_FEADDR_REG);
+	msg->address_hi = readl(iommu->reg + DMAR_FEUADDR_REG);
 	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
 }
 
@@ -1860,11 +1837,10 @@ static int dmar_hp_remove_drhd(struct acpi_dmar_header *header, void *arg)
 	/*
 	 * All PCI devices managed by this unit should have been destroyed.
 	 */
-	if (!dmaru->include_all && dmaru->devices && dmaru->devices_cnt) {
+	if (!dmaru->include_all && dmaru->devices && dmaru->devices_cnt)
 		for_each_active_dev_scope(dmaru->devices,
 					  dmaru->devices_cnt, i, dev)
 			return -EBUSY;
-	}
 
 	ret = dmar_ir_hotplug(dmaru, false);
 	if (ret == 0)

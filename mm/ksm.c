@@ -283,8 +283,7 @@ static inline struct rmap_item *alloc_rmap_item(void)
 {
 	struct rmap_item *rmap_item;
 
-	rmap_item = kmem_cache_zalloc(rmap_item_cache, GFP_KERNEL |
-						__GFP_NORETRY | __GFP_NOWARN);
+	rmap_item = kmem_cache_zalloc(rmap_item_cache, GFP_KERNEL);
 	if (rmap_item)
 		ksm_rmap_items++;
 	return rmap_item;
@@ -476,8 +475,7 @@ static struct page *get_mergeable_page(struct rmap_item *rmap_item)
 		flush_dcache_page(page);
 	} else {
 		put_page(page);
-out:
-		page = NULL;
+out:		page = NULL;
 	}
 	up_read(&mm->mmap_sem);
 	return page;
@@ -627,7 +625,7 @@ static void remove_rmap_item_from_tree(struct rmap_item *rmap_item)
 		unlock_page(page);
 		put_page(page);
 
-		if (!hlist_empty(&stable_node->hlist))
+		if (stable_node->hlist.first)
 			ksm_pages_sharing--;
 		else
 			ksm_pages_shared--;
@@ -1023,6 +1021,8 @@ static int try_to_merge_one_page(struct vm_area_struct *vma,
 	if (page == kpage)			/* ksm page forked */
 		return 0;
 
+	if (!(vma->vm_flags & VM_MERGEABLE))
+		goto out;
 	if (PageTransCompound(page) && page_trans_compound_anon_split(page))
 		goto out;
 	BUG_ON(PageTransCompound(page));
@@ -1087,8 +1087,10 @@ static int try_to_merge_with_ksm_page(struct rmap_item *rmap_item,
 	int err = -EFAULT;
 
 	down_read(&mm->mmap_sem);
-	vma = find_mergeable_vma(mm, rmap_item->address);
-	if (!vma)
+	if (ksm_test_exit(mm))
+		goto out;
+	vma = find_vma(mm, rmap_item->address);
+	if (!vma || vma->vm_start > rmap_item->address)
 		goto out;
 
 	err = try_to_merge_one_page(vma, page, kpage);
@@ -1175,18 +1177,8 @@ again:
 		cond_resched();
 		stable_node = rb_entry(*new, struct stable_node, node);
 		tree_page = get_ksm_page(stable_node, false);
-		if (!tree_page) {
-			/*
-			 * If we walked over a stale stable_node,
-			 * get_ksm_page() will call rb_erase() and it
-			 * may rebalance the tree from under us. So
-			 * restart the search from scratch. Returning
-			 * NULL would be safe too, but we'd generate
-			 * false negative insertions just because some
-			 * stable_node was stale.
-			 */
-			goto again;
-		}
+		if (!tree_page)
+			return NULL;
 
 		ret = memcmp_pages(page, tree_page);
 		put_page(tree_page);
@@ -1262,14 +1254,12 @@ static struct stable_node *stable_tree_insert(struct page *kpage)
 	unsigned long kpfn;
 	struct rb_root *root;
 	struct rb_node **new;
-	struct rb_node *parent;
+	struct rb_node *parent = NULL;
 	struct stable_node *stable_node;
 
 	kpfn = page_to_pfn(kpage);
 	nid = get_kpfn_nid(kpfn);
 	root = root_stable_tree + nid;
-again:
-	parent = NULL;
 	new = &root->rb_node;
 
 	while (*new) {
@@ -1279,18 +1269,8 @@ again:
 		cond_resched();
 		stable_node = rb_entry(*new, struct stable_node, node);
 		tree_page = get_ksm_page(stable_node, false);
-		if (!tree_page) {
-			/*
-			 * If we walked over a stale stable_node,
-			 * get_ksm_page() will call rb_erase() and it
-			 * may rebalance the tree from under us. So
-			 * restart the search from scratch. Returning
-			 * NULL would be safe too, but we'd generate
-			 * false negative insertions just because some
-			 * stable_node was stale.
-			 */
-			goto again;
-		}
+		if (!tree_page)
+			return NULL;
 
 		ret = memcmp_pages(kpage, tree_page);
 		put_page(tree_page);
@@ -1360,7 +1340,7 @@ struct rmap_item *unstable_tree_search_insert(struct rmap_item *rmap_item,
 		cond_resched();
 		tree_rmap_item = rb_entry(*new, struct rmap_item, node);
 		tree_page = get_mergeable_page(tree_rmap_item);
-		if (!tree_page)
+		if (IS_ERR_OR_NULL(tree_page))
 			return NULL;
 
 		/*
@@ -1494,22 +1474,8 @@ static void cmp_and_merge_page(struct page *page, struct rmap_item *rmap_item)
 	tree_rmap_item =
 		unstable_tree_search_insert(rmap_item, page, &tree_page);
 	if (tree_rmap_item) {
-		bool split;
-
 		kpage = try_to_merge_two_pages(rmap_item, page,
 						tree_rmap_item, tree_page);
-		/*
-		 * If both pages we tried to merge belong to the same compound
-		 * page, then we actually ended up increasing the reference
-		 * count of the same compound page twice, and split_huge_page
-		 * failed.
-		 * Here we set a flag if that happened, and we use it later to
-		 * try split_huge_page again. Since we call put_page right
-		 * afterwards, the reference count will be correct and
-		 * split_huge_page should succeed.
-		 */
-		split = PageTransCompound(page)
-			&& compound_head(page) == compound_head(tree_page);
 		put_page(tree_page);
 		if (kpage) {
 			/*
@@ -1534,20 +1500,6 @@ static void cmp_and_merge_page(struct page *page, struct rmap_item *rmap_item)
 				break_cow(tree_rmap_item);
 				break_cow(rmap_item);
 			}
-		} else if (split) {
-			/*
-			 * We are here if we tried to merge two pages and
-			 * failed because they both belonged to the same
-			 * compound page. We will split the page now, but no
-			 * merging will take place.
-			 * We do not want to add the cost of a full lock; if
-			 * the page is locked, it is better to skip it and
-			 * perhaps try again later.
-			 */
-			if (!trylock_page(page))
-				return;
-			split_huge_page(page);
-			unlock_page(page);
 		}
 	}
 }
@@ -1962,11 +1914,9 @@ again:
 		struct anon_vma_chain *vmac;
 		struct vm_area_struct *vma;
 
-		cond_resched();
 		anon_vma_lock_read(anon_vma);
 		anon_vma_interval_tree_foreach(vmac, &anon_vma->rb_root,
 					       0, ULONG_MAX) {
-			cond_resched();
 			vma = vmac->vma;
 			if (rmap_item->address < vma->vm_start ||
 			    rmap_item->address >= vma->vm_end)

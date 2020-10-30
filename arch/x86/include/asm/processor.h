@@ -6,12 +6,12 @@
 /* Forward declaration, a strange C thing */
 struct task_struct;
 struct mm_struct;
-struct vm86;
 
+#include <asm/vm86.h>
 #include <asm/math_emu.h>
 #include <asm/segment.h>
 #include <asm/types.h>
-#include <uapi/asm/sigcontext.h>
+#include <asm/sigcontext.h>
 #include <asm/current.h>
 #include <asm/cpufeature.h>
 #include <asm/page.h>
@@ -113,7 +113,7 @@ struct cpuinfo_x86 {
 	char			x86_vendor_id[16];
 	char			x86_model_id[64];
 	/* in KB - valid for CPUS which support this call: */
-	unsigned int		x86_cache_size;
+	int			x86_cache_size;
 	int			x86_cache_alignment;	/* In bytes */
 	/* Cache QoS architectural values: */
 	int			x86_cache_max_rmid;	/* max index */
@@ -156,8 +156,8 @@ extern struct cpuinfo_x86	boot_cpu_data;
 extern struct cpuinfo_x86	new_cpu_data;
 
 extern struct tss_struct	doublefault_tss;
-extern __u32			cpu_caps_cleared[NCAPINTS + NBUGINTS];
-extern __u32			cpu_caps_set[NCAPINTS + NBUGINTS];
+extern __u32			cpu_caps_cleared[NCAPINTS];
+extern __u32			cpu_caps_set[NCAPINTS];
 
 #ifdef CONFIG_SMP
 DECLARE_PER_CPU_READ_MOSTLY(struct cpuinfo_x86, cpu_info);
@@ -305,7 +305,7 @@ struct tss_struct {
 
 } ____cacheline_aligned;
 
-DECLARE_PER_CPU_SHARED_ALIGNED_USER_MAPPED(struct tss_struct, cpu_tss);
+DECLARE_PER_CPU_SHARED_ALIGNED(struct tss_struct, cpu_tss);
 
 #ifdef CONFIG_X86_32
 DECLARE_PER_CPU(unsigned long, cpu_current_top_of_stack);
@@ -400,9 +400,15 @@ struct thread_struct {
 	unsigned long		cr2;
 	unsigned long		trap_nr;
 	unsigned long		error_code;
-#ifdef CONFIG_VM86
+#ifdef CONFIG_X86_32
 	/* Virtual 86 mode info */
-	struct vm86		*vm86;
+	struct vm86_struct __user *vm86_info;
+	unsigned long		screen_bitmap;
+	unsigned long		v86flags;
+	unsigned long		v86mask;
+	unsigned long		saved_sp0;
+	unsigned int		saved_fs;
+	unsigned int		saved_gs;
 #endif
 	/* IO permissions: */
 	unsigned long		*io_bitmap_ptr;
@@ -472,7 +478,6 @@ static inline unsigned long current_top_of_stack(void)
 #else
 #define __cpuid			native_cpuid
 #define paravirt_enabled()	0
-#define paravirt_has(x) 	0
 
 static inline void load_sp0(struct tss_struct *tss,
 			    struct thread_struct *thread)
@@ -557,12 +562,12 @@ static inline unsigned int cpuid_edx(unsigned int op)
 }
 
 /* REP NOP (PAUSE) is a good thing to insert into busy-wait loops. */
-static __always_inline void rep_nop(void)
+static inline void rep_nop(void)
 {
 	asm volatile("rep; nop" ::: "memory");
 }
 
-static __always_inline void cpu_relax(void)
+static inline void cpu_relax(void)
 {
 	rep_nop();
 }
@@ -574,7 +579,7 @@ static inline void sync_core(void)
 {
 	int tmp;
 
-#ifdef CONFIG_X86_32
+#ifdef CONFIG_M486
 	/*
 	 * Do a CPUID if available, otherwise do a jump.  The jump
 	 * can conveniently enough be the jump around CPUID.
@@ -646,6 +651,14 @@ static inline void update_debugctlmsr(unsigned long debugctlmsr)
 
 extern void set_task_blockstep(struct task_struct *task, bool on);
 
+/*
+ * from system description table in BIOS. Mostly for MCA use, but
+ * others may find it useful:
+ */
+extern unsigned int		machine_id;
+extern unsigned int		machine_submodel_id;
+extern unsigned int		BIOS_revision;
+
 /* Boot loader type from the setup header: */
 extern int			bootloader_type;
 extern int			bootloader_version;
@@ -707,6 +720,7 @@ static inline void spin_lock_prefetch(const void *x)
 
 #define INIT_THREAD  {							  \
 	.sp0			= TOP_OF_INIT_STACK,			  \
+	.vm86_info		= NULL,					  \
 	.sysenter_cs		= __KERNEL_CS,				  \
 	.io_bitmap_ptr		= NULL,					  \
 }

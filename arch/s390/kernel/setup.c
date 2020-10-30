@@ -62,9 +62,6 @@
 #include <asm/os_info.h>
 #include <asm/sclp.h>
 #include <asm/sysinfo.h>
-#include <asm/numa.h>
-#include <asm/alternative.h>
-#include <asm/nospec-branch.h>
 #include "entry.h"
 
 /*
@@ -79,7 +76,7 @@ EXPORT_SYMBOL(console_devno);
 unsigned int console_irq = -1;
 EXPORT_SYMBOL(console_irq);
 
-unsigned long elf_hwcap __read_mostly = 0;
+unsigned long elf_hwcap = 0;
 char elf_platform[ELF_PLATFORM_SIZE];
 
 int __initdata memory_end_set;
@@ -331,13 +328,10 @@ static void __init setup_lowcore(void)
 		+ PAGE_SIZE - STACK_FRAME_OVERHEAD - sizeof(struct pt_regs);
 	lc->current_task = (unsigned long) init_thread_union.thread_info.task;
 	lc->thread_info = (unsigned long) &init_thread_union;
-	lc->lpp = LPP_MAGIC;
 	lc->machine_flags = S390_lowcore.machine_flags;
 	lc->stfl_fac_list = S390_lowcore.stfl_fac_list;
 	memcpy(lc->stfle_fac_list, S390_lowcore.stfle_fac_list,
-	       sizeof(lc->stfle_fac_list));
-	memcpy(lc->alt_stfle_fac_list, S390_lowcore.alt_stfle_fac_list,
-	       sizeof(lc->alt_stfle_fac_list));
+	       MAX_FACILITY_BIT/8);
 	if (MACHINE_HAS_VX)
 		lc->vector_save_area_addr =
 			(unsigned long) &lc->vector_save_area;
@@ -374,7 +368,6 @@ static void __init setup_lowcore(void)
 #ifdef CONFIG_SMP
 	lc->spinlock_lockval = arch_spin_lockval(0);
 #endif
-	lc->br_r1_trampoline = 0x07f1;	/* br %r1 */
 
 	set_prefix((u32)(unsigned long) lc);
 	lowcore_ptr[0] = lc;
@@ -695,7 +688,7 @@ static void __init setup_memory(void)
 /*
  * Setup hardware capabilities.
  */
-static int __init setup_hwcaps(void)
+static void __init setup_hwcaps(void)
 {
 	static const int stfl_bits[6] = { 0, 2, 7, 17, 19, 21 };
 	struct cpuid cpu_id;
@@ -761,15 +754,16 @@ static int __init setup_hwcaps(void)
 		elf_hwcap |= HWCAP_S390_TE;
 
 	/*
-	 * Vector extension HWCAP_S390_VXRS is bit 11. The Vector extension
-	 * can be disabled with the "novx" parameter. Use MACHINE_HAS_VX
-	 * instead of facility bit 129.
+	 * Vector extension HWCAP_S390_VXRS is bit 11.
 	 */
-	if (MACHINE_HAS_VX)
+	if (test_facility(129))
 		elf_hwcap |= HWCAP_S390_VXRS;
 	get_cpu_id(&cpu_id);
 	add_device_randomness(&cpu_id, sizeof(cpu_id));
 	switch (cpu_id.machine) {
+	case 0x9672:
+		strcpy(elf_platform, "g5");
+		break;
 	case 0x2064:
 	case 0x2066:
 	default:	/* Use "z900" as default for 64 bit kernels. */
@@ -799,9 +793,7 @@ static int __init setup_hwcaps(void)
 		strcpy(elf_platform, "z13");
 		break;
 	}
-	return 0;
 }
-arch_initcall(setup_hwcaps);
 
 /*
  * Add system information as device randomness
@@ -810,10 +802,10 @@ static void __init setup_randomness(void)
 {
 	struct sysinfo_3_2_2 *vmms;
 
-	vmms = (struct sysinfo_3_2_2 *) memblock_alloc(PAGE_SIZE, PAGE_SIZE);
-	if (stsi(vmms, 3, 2, 2) == 0 && vmms->count)
-		add_device_randomness(&vmms->vm, sizeof(vmms->vm[0]) * vmms->count);
-	memblock_free((unsigned long) vmms, PAGE_SIZE);
+	vmms = (struct sysinfo_3_2_2 *) alloc_page(GFP_KERNEL);
+	if (vmms && stsi(vmms, 3, 2, 2) == 0 && vmms->count)
+		add_device_randomness(&vmms, vmms->count);
+	free_page((unsigned long) vmms);
 }
 
 /*
@@ -845,9 +837,6 @@ void __init setup_arch(char **cmdline_p)
 	init_mm.end_code = (unsigned long) &_etext;
 	init_mm.end_data = (unsigned long) &_edata;
 	init_mm.brk = (unsigned long) &_end;
-
-	if (IS_ENABLED(CONFIG_EXPOLINE_AUTO))
-		nospec_auto_detect();
 
 	parse_early_param();
 	os_info_init();
@@ -890,7 +879,11 @@ void __init setup_arch(char **cmdline_p)
 	setup_lowcore();
 	smp_fill_possible_mask();
         cpu_init();
-	numa_setup();
+
+	/*
+	 * Setup capabilities (ELF_HWCAP & ELF_PLATFORM).
+	 */
+	setup_hwcaps();
 
 	/*
 	 * Create kernel page tables and switch to virtual addressing.
@@ -900,10 +893,6 @@ void __init setup_arch(char **cmdline_p)
         /* Setup default console */
 	conmode_default();
 	set_preferred_console();
-
-	apply_alternative_instructions();
-	if (IS_ENABLED(CONFIG_EXPOLINE))
-		nospec_init_branches();
 
 	/* Setup zfcpdump support */
 	setup_zfcpdump();

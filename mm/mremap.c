@@ -29,11 +29,6 @@
 
 #include "internal.h"
 
-#ifdef CONFIG_POPCORN
-#include <popcorn/types.h>
-#include <popcorn/vma_server.h>
-#endif
-
 static pmd_t *get_old_pmd(struct mm_struct *mm, unsigned long addr)
 {
 	pgd_t *pgd;
@@ -140,7 +135,6 @@ static void move_ptes(struct vm_area_struct *vma, pmd_t *old_pmd,
 	new_ptl = pte_lockptr(mm, new_pmd);
 	if (new_ptl != old_ptl)
 		spin_lock_nested(new_ptl, SINGLE_DEPTH_NESTING);
-	flush_tlb_batched_pending(vma->vm_mm);
 	arch_enter_lazy_mmu_mode();
 
 	for (; old_addr < old_end; old_pte++, old_addr += PAGE_SIZE,
@@ -282,12 +276,6 @@ static unsigned long move_vma(struct vm_area_struct *vma,
 	moved_len = move_page_tables(vma, old_addr, new_vma, new_addr, old_len,
 				     need_rmap_locks);
 	if (moved_len < old_len) {
-		err = -ENOMEM;
-	} else if (vma->vm_ops && vma->vm_ops->mremap) {
-		err = vma->vm_ops->mremap(new_vma);
-	}
-
-	if (unlikely(err)) {
 		/*
 		 * On error, move entries back from new area to old,
 		 * which will succeed since page tables still there,
@@ -298,8 +286,16 @@ static unsigned long move_vma(struct vm_area_struct *vma,
 		vma = new_vma;
 		old_len = new_len;
 		old_addr = new_addr;
-		new_addr = err;
+		new_addr = -ENOMEM;
 	} else {
+		if (vma->vm_file && vma->vm_file->f_op->mremap) {
+			err = vma->vm_file->f_op->mremap(vma->vm_file, new_vma);
+			if (err < 0) {
+				move_page_tables(new_vma, new_addr, vma,
+						 old_addr, moved_len, true);
+				return err;
+			}
+		}
 		arch_remap(mm, old_addr, old_addr + old_len,
 			   new_addr, new_addr + new_len);
 	}
@@ -352,7 +348,6 @@ static struct vm_area_struct *vma_to_resize(unsigned long addr,
 {
 	struct mm_struct *mm = current->mm;
 	struct vm_area_struct *vma = find_vma(mm, addr);
-	unsigned long pgoff;
 
 	if (!vma || vma->vm_start > addr)
 		return ERR_PTR(-EFAULT);
@@ -364,17 +359,17 @@ static struct vm_area_struct *vma_to_resize(unsigned long addr,
 	if (old_len > vma->vm_end - addr)
 		return ERR_PTR(-EFAULT);
 
-	if (new_len == old_len)
-		return vma;
-
 	/* Need to be careful about a growing mapping */
-	pgoff = (addr - vma->vm_start) >> PAGE_SHIFT;
-	pgoff += vma->vm_pgoff;
-	if (pgoff + (new_len >> PAGE_SHIFT) < pgoff)
-		return ERR_PTR(-EINVAL);
+	if (new_len > old_len) {
+		unsigned long pgoff;
 
-	if (vma->vm_flags & (VM_DONTEXPAND | VM_PFNMAP))
-		return ERR_PTR(-EFAULT);
+		if (vma->vm_flags & (VM_DONTEXPAND | VM_PFNMAP))
+			return ERR_PTR(-EFAULT);
+		pgoff = (addr - vma->vm_start) >> PAGE_SHIFT;
+		pgoff += vma->vm_pgoff;
+		if (pgoff + (new_len >> PAGE_SHIFT) < pgoff)
+			return ERR_PTR(-EINVAL);
+	}
 
 	if (vma->vm_flags & VM_LOCKED) {
 		unsigned long locked, lock_limit;
@@ -407,14 +402,19 @@ static unsigned long mremap_to(unsigned long addr, unsigned long old_len,
 	unsigned long charged = 0;
 	unsigned long map_flags;
 
-	if (offset_in_page(new_addr))
+	if (new_addr & ~PAGE_MASK)
 		goto out;
 
 	if (new_len > TASK_SIZE || new_addr > TASK_SIZE - new_len)
 		goto out;
 
-	/* Ensure the old/new locations do not overlap */
-	if (addr + old_len > new_addr && new_addr + new_len > addr)
+	/* Check if the location we're moving into overlaps the
+	 * old location at all, and fail if it does.
+	 */
+	if ((new_addr <= addr) && (new_addr+new_len) > addr)
+		goto out;
+
+	if ((addr <= new_addr) && (addr+old_len) > new_addr)
 		goto out;
 
 	ret = do_munmap(mm, new_addr, new_len);
@@ -441,11 +441,11 @@ static unsigned long mremap_to(unsigned long addr, unsigned long old_len,
 	ret = get_unmapped_area(vma->vm_file, new_addr, new_len, vma->vm_pgoff +
 				((addr - vma->vm_start) >> PAGE_SHIFT),
 				map_flags);
-	if (offset_in_page(ret))
+	if (ret & ~PAGE_MASK)
 		goto out1;
 
 	ret = move_vma(vma, addr, old_len, new_len, new_addr, locked);
-	if (!(offset_in_page(ret)))
+	if (!(ret & ~PAGE_MASK))
 		goto out;
 out1:
 	vm_unacct_memory(charged);
@@ -490,17 +490,11 @@ SYSCALL_DEFINE5(mremap, unsigned long, addr, unsigned long, old_len,
 	if (flags & MREMAP_FIXED && !(flags & MREMAP_MAYMOVE))
 		return ret;
 
-	if (offset_in_page(addr))
+	if (addr & ~PAGE_MASK)
 		return ret;
 
 	old_len = PAGE_ALIGN(old_len);
 	new_len = PAGE_ALIGN(new_len);
-
-#ifdef CONFIG_POPCORN
-	if (distributed_remote_process(current)) {
-		vma_server_mremap_remote(addr, old_len, new_len, flags, new_addr);
-	}
-#endif
 
 	/*
 	 * We allow a zero old-len as a special case
@@ -578,7 +572,7 @@ SYSCALL_DEFINE5(mremap, unsigned long, addr, unsigned long, old_len,
 					vma->vm_pgoff +
 					((addr - vma->vm_start) >> PAGE_SHIFT),
 					map_flags);
-		if (offset_in_page(new_addr)) {
+		if (new_addr & ~PAGE_MASK) {
 			ret = new_addr;
 			goto out;
 		}
@@ -586,10 +580,8 @@ SYSCALL_DEFINE5(mremap, unsigned long, addr, unsigned long, old_len,
 		ret = move_vma(vma, addr, old_len, new_len, new_addr, &locked);
 	}
 out:
-	if (offset_in_page(ret)) {
+	if (ret & ~PAGE_MASK)
 		vm_unacct_memory(charged);
-		locked = 0;
-	}
 	up_write(&current->mm->mmap_sem);
 	if (locked && new_len > old_len)
 		mm_populate(new_addr + old_len, new_len - old_len);

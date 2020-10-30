@@ -9,9 +9,6 @@
  */
 
 / {
-	compatible = "ti,k2e", "ti,keystone";
-	model = "Texas Instruments Keystone 2 Edison SoC";
-
 	cpus {
 		#address-cells = <1>;
 		#size-cells = <0>;

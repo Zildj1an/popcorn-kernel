@@ -87,7 +87,6 @@ loads_done:
 	and	t0, t1, t0
 	bnez	t0, trace_a_syscall
 
-syscall_common:
 	jalr	t2			# Do The Real Thing (TM)
 
 	li	t0, -EMAXERRNO - 1	# error?
@@ -131,9 +130,9 @@ trace_a_syscall:
 
 1:	jal	syscall_trace_enter
 
-	bltz	v0, 1f			# seccomp failed? Skip syscall
+	bltz	v0, 2f			# seccomp failed? Skip syscall
 
-	move	t2, s0
+	move	t0, s0
 	RESTORE_STATIC
 	ld	a0, PT_R4(sp)		# Restore argument registers
 	ld	a1, PT_R5(sp)
@@ -143,9 +142,19 @@ trace_a_syscall:
 	ld	a5, PT_R9(sp)
 	ld	a6, PT_R10(sp)
 	ld	a7, PT_R11(sp)		# For indirect syscalls
-	j	syscall_common
+	jalr	t0
 
-1:	j	syscall_exit
+	li	t0, -EMAXERRNO - 1	# error?
+	sltu	t0, t0, v0
+	sd	t0, PT_R7(sp)		# set error flag
+	beqz	t0, 1f
+
+	ld	t1, PT_R2(sp)		# syscall number
+	dnegu	v0			# error
+	sd	t1, PT_R0(sp)		# save it for syscall restarting
+1:	sd	v0, PT_R2(sp)		# result
+
+2:	j	syscall_exit
 
 /* ------------------------------------------------------------------------ */
 
@@ -367,7 +376,7 @@ EXPORT(sys32_call_table)
 	PTR	compat_sys_writev
 	PTR	sys_cacheflush
 	PTR	sys_cachectl
-	PTR	__sys_sysmips
+	PTR	sys_sysmips
 	PTR	sys_ni_syscall			/* 4150 */
 	PTR	sys_getsid
 	PTR	sys_fdatasync
@@ -500,7 +509,7 @@ EXPORT(sys32_call_table)
 	PTR	sys_ni_syscall			/* available, was setaltroot */
 	PTR	sys_add_key			/* 4280 */
 	PTR	sys_request_key
-	PTR	compat_sys_keyctl
+	PTR	sys_keyctl
 	PTR	sys_set_thread_area
 	PTR	sys_inotify_init
 	PTR	sys_inotify_add_watch		/* 4285 */
@@ -575,7 +584,4 @@ EXPORT(sys32_call_table)
 	PTR	sys_memfd_create
 	PTR	sys_bpf				/* 4355 */
 	PTR	compat_sys_execveat
-	PTR	sys_userfaultfd
-	PTR	sys_membarrier
-	PTR	sys_mlock2
 	.size	sys32_call_table,.-sys32_call_table

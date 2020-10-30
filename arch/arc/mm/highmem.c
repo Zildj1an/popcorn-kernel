@@ -26,10 +26,10 @@
  * shortlived ala "temporary mappings" which historically were implemented as
  * fixmaps (compile time addr etc). Their book-keeping is done per cpu.
  *
- *	Both these facts combined (preemption disabled and per-cpu allocation)
- *	means the total number of concurrent fixmaps will be limited to max
- *	such allocations in a single control path. Thus KM_TYPE_NR (another
- *	historic relic) is a small'ish number which caps max percpu fixmaps
+ *     Both these facts combined (preemption disabled and per-cpu allocation)
+ *     means the total number of concurrent fixmaps will be limited to max
+ *     such allocations in a single control path. Thus KM_TYPE_NR (another
+ *     historic relic) is a small'ish number which caps max percpu fixmaps
  *
  * ARC HIGHMEM Details
  *
@@ -77,7 +77,7 @@ void *kmap_atomic(struct page *page)
 	vaddr = FIXMAP_ADDR(idx);
 
 	set_pte_at(&init_mm, vaddr, fixmap_page_table + idx,
-		   mk_pte(page, kmap_prot));
+	mk_pte(page, kmap_prot));
 
 	return (void *)vaddr;
 }
@@ -111,7 +111,8 @@ void __kunmap_atomic(void *kv)
 }
 EXPORT_SYMBOL(__kunmap_atomic);
 
-static noinline pte_t * __init alloc_kmap_pgtable(unsigned long kvaddr)
+static noinline pte_t * __init alloc_kmap_pgtable(unsigned long kvaddr,
+						unsigned long size)
 {
 	pgd_t *pgd_k;
 	pud_t *pud_k;
@@ -122,7 +123,7 @@ static noinline pte_t * __init alloc_kmap_pgtable(unsigned long kvaddr)
 	pud_k = pud_offset(pgd_k, kvaddr);
 	pmd_k = pmd_offset(pud_k, kvaddr);
 
-	pte_k = (pte_t *)alloc_bootmem_low_pages(PAGE_SIZE);
+	pte_k = (pte_t *)alloc_bootmem_low_pages(size);
 	pmd_populate_kernel(&init_mm, pmd_k, pte_k);
 	return pte_k;
 }
@@ -133,8 +134,8 @@ void __init kmap_init(void)
 	BUILD_BUG_ON(PAGE_OFFSET < (VMALLOC_END + FIXMAP_SIZE + PKMAP_SIZE));
 
 	BUILD_BUG_ON(KM_TYPE_NR > PTRS_PER_PTE);
-	pkmap_page_table = alloc_kmap_pgtable(PKMAP_BASE);
+	pkmap_page_table = alloc_kmap_pgtable(PKMAP_BASE, 4 * PAGE_SIZE);
 
-	BUILD_BUG_ON(LAST_PKMAP > PTRS_PER_PTE);
-	fixmap_page_table = alloc_kmap_pgtable(FIXMAP_BASE);
+	//BUILD_BUG_ON(LAST_PKMAP > PTRS_PER_PTE);
+	fixmap_page_table = alloc_kmap_pgtable(FIXMAP_BASE, 4 * PAGE_SIZE);
 }

@@ -25,7 +25,6 @@
 
 #include <linux/gpio.h>
 
-#include <asm/mach-jz4740/gpio.h>
 #include <asm/mach-jz4740/jz4740_nand.h>
 
 #define JZ_REG_NAND_CTRL	0x50
@@ -435,7 +434,7 @@ static int jz_nand_probe(struct platform_device *pdev)
 	mtd		= &nand->mtd;
 	chip		= &nand->chip;
 	mtd->priv	= chip;
-	mtd->dev.parent = &pdev->dev;
+	mtd->owner	= THIS_MODULE;
 	mtd->name	= "jz4740-nand";
 
 	chip->ecc.hwctl		= jz_nand_hwctl;

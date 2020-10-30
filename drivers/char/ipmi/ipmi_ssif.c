@@ -52,7 +52,6 @@
 #include <linux/kthread.h>
 #include <linux/acpi.h>
 #include <linux/ctype.h>
-#include <linux/time64.h>
 
 #define PFX "ipmi_ssif: "
 #define DEVICE_NAME "ipmi_ssif"
@@ -409,7 +408,6 @@ static void start_event_fetch(struct ssif_info *ssif_info, unsigned long *flags)
 	msg = ipmi_alloc_smi_msg();
 	if (!msg) {
 		ssif_info->ssif_state = SSIF_NORMAL;
-		ipmi_ssif_unlock_cond(ssif_info, flags);
 		return;
 	}
 
@@ -432,7 +430,6 @@ static void start_recv_msg_fetch(struct ssif_info *ssif_info,
 	msg = ipmi_alloc_smi_msg();
 	if (!msg) {
 		ssif_info->ssif_state = SSIF_NORMAL;
-		ipmi_ssif_unlock_cond(ssif_info, flags);
 		return;
 	}
 
@@ -757,14 +754,9 @@ static void msg_done_handler(struct ssif_info *ssif_info, int result,
 			ssif_info->ssif_state = SSIF_NORMAL;
 			ipmi_ssif_unlock_cond(ssif_info, flags);
 			pr_warn(PFX "Error getting flags: %d %d, %x\n",
-			       result, len, (len >= 3) ? data[2] : 0);
+			       result, len, data[2]);
 		} else if (data[0] != (IPMI_NETFN_APP_REQUEST | 1) << 2
 			   || data[1] != IPMI_GET_MSG_FLAGS_CMD) {
-			/*
-			 * Don't abort here, maybe it was a queued
-			 * response to a previous command.
-			 */
-			ipmi_ssif_unlock_cond(ssif_info, flags);
 			pr_warn(PFX "Invalid response getting flags: %x %x\n",
 				data[0], data[1]);
 		} else {
@@ -779,7 +771,7 @@ static void msg_done_handler(struct ssif_info *ssif_info, int result,
 		if ((result < 0) || (len < 3) || (data[2] != 0)) {
 			/* Error clearing flags */
 			pr_warn(PFX "Error clearing flags: %d %d, %x\n",
-			       result, len, (len >= 3) ? data[2] : 0);
+			       result, len, data[2]);
 		} else if (data[0] != (IPMI_NETFN_APP_REQUEST | 1) << 2
 			   || data[1] != IPMI_CLEAR_MSG_FLAGS_CMD) {
 			pr_warn(PFX "Invalid response clearing flags: %x %x\n",
@@ -895,7 +887,6 @@ static void msg_written_handler(struct ssif_info *ssif_info, int result,
 		 * for details on the intricacies of this.
 		 */
 		int left;
-		unsigned char *data_to_send;
 
 		ssif_inc_stat(ssif_info, sent_messages_parts);
 
@@ -904,7 +895,6 @@ static void msg_written_handler(struct ssif_info *ssif_info, int result,
 			left = 32;
 		/* Length byte. */
 		ssif_info->multi_data[ssif_info->multi_pos] = left;
-		data_to_send = ssif_info->multi_data + ssif_info->multi_pos;
 		ssif_info->multi_pos += left;
 		if (left < 32)
 			/*
@@ -918,7 +908,7 @@ static void msg_written_handler(struct ssif_info *ssif_info, int result,
 		rv = ssif_i2c_send(ssif_info, msg_written_handler,
 				  I2C_SMBUS_WRITE,
 				  SSIF_IPMI_MULTI_PART_REQUEST_MIDDLE,
-				  data_to_send,
+				  ssif_info->multi_data + ssif_info->multi_pos,
 				  I2C_SMBUS_BLOCK_DATA);
 		if (rv < 0) {
 			/* request failed, just return the error. */
@@ -1051,12 +1041,12 @@ static void sender(void                *send_info,
 	start_next_msg(ssif_info, flags);
 
 	if (ssif_info->ssif_debug & SSIF_DEBUG_TIMING) {
-		struct timespec64 t;
+		struct timeval t;
 
-		ktime_get_real_ts64(&t);
-		pr_info("**Enqueue %02x %02x: %lld.%6.6ld\n",
+		do_gettimeofday(&t);
+		pr_info("**Enqueue %02x %02x: %ld.%6.6ld\n",
 		       msg->data[0], msg->data[1],
-		       (long long) t.tv_sec, (long) t.tv_nsec / NSEC_PER_USEC);
+		       (long) t.tv_sec, (long) t.tv_usec);
 	}
 }
 
@@ -1146,10 +1136,6 @@ module_param_array(slave_addrs, int, &num_slave_addrs, 0);
 MODULE_PARM_DESC(slave_addrs,
 		 "The default IPMB slave address for the controller.");
 
-static bool alerts_broken;
-module_param(alerts_broken, bool, 0);
-MODULE_PARM_DESC(alerts_broken, "Don't enable alerts for the controller.");
-
 /*
  * Bit 0 enables message debugging, bit 1 enables state debugging, and
  * bit 2 enables timing debugging.  This is an array indexed by
@@ -1168,11 +1154,11 @@ static int use_thread;
 module_param(use_thread, int, 0);
 MODULE_PARM_DESC(use_thread, "Use the thread interface.");
 
-static bool ssif_tryacpi = true;
+static bool ssif_tryacpi = 1;
 module_param_named(tryacpi, ssif_tryacpi, bool, 0);
 MODULE_PARM_DESC(tryacpi, "Setting this to zero will disable the default scan of the interfaces identified via ACPI");
 
-static bool ssif_trydmi = true;
+static bool ssif_trydmi = 1;
 module_param_named(trydmi, ssif_trydmi, bool, 0);
 MODULE_PARM_DESC(trydmi, "Setting this to zero will disable the default scan of the interfaces identified via DMI (SMBIOS)");
 
@@ -1596,10 +1582,6 @@ static int ssif_probe(struct i2c_client *client, const struct i2c_device_id *id)
 		ssif_info->global_enables |= IPMI_BMC_EVT_MSG_BUFF;
 	}
 
-	/* Some systems don't behave well if you enable alerts. */
-	if (alerts_broken)
-		goto found;
-
 	msg[0] = IPMI_NETFN_APP_REQUEST << 2;
 	msg[1] = IPMI_SET_BMC_GLOBAL_ENABLES_CMD;
 	msg[2] = ssif_info->global_enables | IPMI_BMC_RCV_MSG_INTR;
@@ -1805,7 +1787,7 @@ skip_addr:
 }
 
 #ifdef CONFIG_ACPI
-static const struct acpi_device_id ssif_acpi_match[] = {
+static struct acpi_device_id ssif_acpi_match[] = {
 	{ "IPI0001", 0 },
 	{ },
 };

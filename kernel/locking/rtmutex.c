@@ -65,72 +65,8 @@ static inline void clear_rt_mutex_waiters(struct rt_mutex *lock)
 
 static void fixup_rt_mutex_waiters(struct rt_mutex *lock)
 {
-	unsigned long owner, *p = (unsigned long *) &lock->owner;
-
-	if (rt_mutex_has_waiters(lock))
-		return;
-
-	/*
-	 * The rbtree has no waiters enqueued, now make sure that the
-	 * lock->owner still has the waiters bit set, otherwise the
-	 * following can happen:
-	 *
-	 * CPU 0	CPU 1		CPU2
-	 * l->owner=T1
-	 *		rt_mutex_lock(l)
-	 *		lock(l->lock)
-	 *		l->owner = T1 | HAS_WAITERS;
-	 *		enqueue(T2)
-	 *		boost()
-	 *		  unlock(l->lock)
-	 *		block()
-	 *
-	 *				rt_mutex_lock(l)
-	 *				lock(l->lock)
-	 *				l->owner = T1 | HAS_WAITERS;
-	 *				enqueue(T3)
-	 *				boost()
-	 *				  unlock(l->lock)
-	 *				block()
-	 *		signal(->T2)	signal(->T3)
-	 *		lock(l->lock)
-	 *		dequeue(T2)
-	 *		deboost()
-	 *		  unlock(l->lock)
-	 *				lock(l->lock)
-	 *				dequeue(T3)
-	 *				 ==> wait list is empty
-	 *				deboost()
-	 *				 unlock(l->lock)
-	 *		lock(l->lock)
-	 *		fixup_rt_mutex_waiters()
-	 *		  if (wait_list_empty(l) {
-	 *		    l->owner = owner
-	 *		    owner = l->owner & ~HAS_WAITERS;
-	 *		      ==> l->owner = T1
-	 *		  }
-	 *				lock(l->lock)
-	 * rt_mutex_unlock(l)		fixup_rt_mutex_waiters()
-	 *				  if (wait_list_empty(l) {
-	 *				    owner = l->owner & ~HAS_WAITERS;
-	 * cmpxchg(l->owner, T1, NULL)
-	 *  ===> Success (l->owner = NULL)
-	 *
-	 *				    l->owner = owner
-	 *				      ==> l->owner = T1
-	 *				  }
-	 *
-	 * With the check for the waiter bit in place T3 on CPU2 will not
-	 * overwrite. All tasks fiddling with the waiters bit are
-	 * serialized by l->lock, so nothing else can modify the waiters
-	 * bit. If the bit is set then nothing can change l->owner either
-	 * so the simple RMW is safe. The cmpxchg() will simply fail if it
-	 * happens in the middle of the RMW because the waiters bit is
-	 * still set.
-	 */
-	owner = READ_ONCE(*p);
-	if (owner & RT_MUTEX_HAS_WAITERS)
-		WRITE_ONCE(*p, owner & ~RT_MUTEX_HAS_WAITERS);
+	if (!rt_mutex_has_waiters(lock))
+		clear_rt_mutex_waiters(lock);
 }
 
 /*
@@ -138,23 +74,14 @@ static void fixup_rt_mutex_waiters(struct rt_mutex *lock)
  * set up.
  */
 #ifndef CONFIG_DEBUG_RT_MUTEXES
-# define rt_mutex_cmpxchg_relaxed(l,c,n) (cmpxchg_relaxed(&l->owner, c, n) == c)
-# define rt_mutex_cmpxchg_acquire(l,c,n) (cmpxchg_acquire(&l->owner, c, n) == c)
-# define rt_mutex_cmpxchg_release(l,c,n) (cmpxchg_release(&l->owner, c, n) == c)
-
-/*
- * Callers must hold the ->wait_lock -- which is the whole purpose as we force
- * all future threads that attempt to [Rmw] the lock to the slowpath. As such
- * relaxed semantics suffice.
- */
+# define rt_mutex_cmpxchg(l,c,n)	(cmpxchg(&l->owner, c, n) == c)
 static inline void mark_rt_mutex_waiters(struct rt_mutex *lock)
 {
 	unsigned long owner, *p = (unsigned long *) &lock->owner;
 
 	do {
 		owner = *p;
-	} while (cmpxchg_relaxed(p, owner,
-				 owner | RT_MUTEX_HAS_WAITERS) != owner);
+	} while (cmpxchg(p, owner, owner | RT_MUTEX_HAS_WAITERS) != owner);
 }
 
 /*
@@ -194,14 +121,11 @@ static inline bool unlock_rt_mutex_safe(struct rt_mutex *lock)
 	 *					lock(wait_lock);
 	 *					acquire(lock);
 	 */
-	return rt_mutex_cmpxchg_release(lock, owner, NULL);
+	return rt_mutex_cmpxchg(lock, owner, NULL);
 }
 
 #else
-# define rt_mutex_cmpxchg_relaxed(l,c,n)	(0)
-# define rt_mutex_cmpxchg_acquire(l,c,n)	(0)
-# define rt_mutex_cmpxchg_release(l,c,n)	(0)
-
+# define rt_mutex_cmpxchg(l,c,n)	(0)
 static inline void mark_rt_mutex_waiters(struct rt_mutex *lock)
 {
 	lock->owner = (struct task_struct *)
@@ -234,8 +158,7 @@ rt_mutex_waiter_less(struct rt_mutex_waiter *left,
 	 * then right waiter has a dl_prio() too.
 	 */
 	if (dl_prio(left->prio))
-		return dl_time_before(left->task->dl.deadline,
-				      right->task->dl.deadline);
+		return (left->task->dl.deadline < right->task->dl.deadline);
 
 	return 0;
 }
@@ -1197,7 +1120,7 @@ __rt_mutex_slowlock(struct rt_mutex *lock, int state,
 
 		debug_rt_mutex_print_deadlock(waiter);
 
-		schedule();
+		schedule_rt_mutex(lock);
 
 		raw_spin_lock(&lock->wait_lock);
 		set_current_state(state);
@@ -1398,7 +1321,7 @@ rt_mutex_fastlock(struct rt_mutex *lock, int state,
 				struct hrtimer_sleeper *timeout,
 				enum rtmutex_chainwalk chwalk))
 {
-	if (likely(rt_mutex_cmpxchg_acquire(lock, NULL, current))) {
+	if (likely(rt_mutex_cmpxchg(lock, NULL, current))) {
 		rt_mutex_deadlock_account_lock(lock, current);
 		return 0;
 	} else
@@ -1414,7 +1337,7 @@ rt_mutex_timed_fastlock(struct rt_mutex *lock, int state,
 				      enum rtmutex_chainwalk chwalk))
 {
 	if (chwalk == RT_MUTEX_MIN_CHAINWALK &&
-	    likely(rt_mutex_cmpxchg_acquire(lock, NULL, current))) {
+	    likely(rt_mutex_cmpxchg(lock, NULL, current))) {
 		rt_mutex_deadlock_account_lock(lock, current);
 		return 0;
 	} else
@@ -1425,7 +1348,7 @@ static inline int
 rt_mutex_fasttrylock(struct rt_mutex *lock,
 		     int (*slowfn)(struct rt_mutex *lock))
 {
-	if (likely(rt_mutex_cmpxchg_acquire(lock, NULL, current))) {
+	if (likely(rt_mutex_cmpxchg(lock, NULL, current))) {
 		rt_mutex_deadlock_account_lock(lock, current);
 		return 1;
 	}
@@ -1439,7 +1362,7 @@ rt_mutex_fastunlock(struct rt_mutex *lock,
 {
 	WAKE_Q(wake_q);
 
-	if (likely(rt_mutex_cmpxchg_release(lock, current, NULL))) {
+	if (likely(rt_mutex_cmpxchg(lock, current, NULL))) {
 		rt_mutex_deadlock_account_unlock(current);
 
 	} else {
@@ -1561,7 +1484,7 @@ EXPORT_SYMBOL_GPL(rt_mutex_unlock);
 bool __sched rt_mutex_futex_unlock(struct rt_mutex *lock,
 				   struct wake_q_head *wqh)
 {
-	if (likely(rt_mutex_cmpxchg_release(lock, current, NULL))) {
+	if (likely(rt_mutex_cmpxchg(lock, current, NULL))) {
 		rt_mutex_deadlock_account_unlock(current);
 		return false;
 	}

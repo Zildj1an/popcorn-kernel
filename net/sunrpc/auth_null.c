@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * linux/net/sunrpc/auth_null.c
  *
@@ -19,9 +18,9 @@ static struct rpc_auth null_auth;
 static struct rpc_cred null_cred;
 
 static struct rpc_auth *
-nul_create(const struct rpc_auth_create_args *args, struct rpc_clnt *clnt)
+nul_create(struct rpc_auth_create_args *args, struct rpc_clnt *clnt)
 {
-	refcount_inc(&null_auth.au_count);
+	atomic_inc(&null_auth.au_count);
 	return &null_auth;
 }
 
@@ -114,12 +113,11 @@ const struct rpc_authops authnull_ops = {
 
 static
 struct rpc_auth null_auth = {
-	.au_cslack	= NUL_CALLSLACK,
-	.au_rslack	= NUL_REPLYSLACK,
-	.au_flags	= RPCAUTH_AUTH_NO_CRKEY_TIMEOUT,
+	.au_cslack	= 4,
+	.au_rslack	= 2,
 	.au_ops		= &authnull_ops,
 	.au_flavor	= RPC_AUTH_NULL,
-	.au_count	= REFCOUNT_INIT(1),
+	.au_count	= ATOMIC_INIT(0),
 };
 
 static
@@ -138,6 +136,9 @@ struct rpc_cred null_cred = {
 	.cr_lru		= LIST_HEAD_INIT(null_cred.cr_lru),
 	.cr_auth	= &null_auth,
 	.cr_ops		= &null_credops,
-	.cr_count	= REFCOUNT_INIT(2),
+	.cr_count	= ATOMIC_INIT(1),
 	.cr_flags	= 1UL << RPCAUTH_CRED_UPTODATE,
+#if IS_ENABLED(CONFIG_SUNRPC_DEBUG)
+	.cr_magic	= RPCAUTH_CRED_MAGIC,
+#endif
 };

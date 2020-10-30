@@ -6,7 +6,6 @@
 #include <linux/dma-mapping.h>
 #include <linux/blkdev.h>
 #include <linux/percpu_ida.h>
-#include <linux/t10-pi.h>
 #include <net/sock.h>
 #include <net/tcp.h>
 
@@ -138,8 +137,6 @@ enum se_cmd_flags_table {
 	SCF_COMPARE_AND_WRITE		= 0x00080000,
 	SCF_COMPARE_AND_WRITE_POST	= 0x00100000,
 	SCF_PASSTHROUGH_PROT_SG_TO_MEM_NOALLOC = 0x00200000,
-	SCF_ACK_KREF			= 0x00400000,
-	SCF_TASK_ATTR_SET		= 0x01000000,
 };
 
 /* struct se_dev_entry->lun_flags and struct se_lun->lun_access */
@@ -180,7 +177,6 @@ enum tcm_sense_reason_table {
 	TCM_LOGICAL_BLOCK_GUARD_CHECK_FAILED	= R(0x15),
 	TCM_LOGICAL_BLOCK_APP_TAG_CHECK_FAILED	= R(0x16),
 	TCM_LOGICAL_BLOCK_REF_TAG_CHECK_FAILED	= R(0x17),
-	TCM_COPY_TARGET_DEVICE_NOT_REACHABLE	= R(0x18),
 #undef R
 };
 
@@ -199,7 +195,6 @@ enum tcm_tmreq_table {
 	TMR_LUN_RESET		= 5,
 	TMR_TARGET_WARM_RESET	= 6,
 	TMR_TARGET_COLD_RESET	= 7,
-	TMR_UNKNOWN		= 0xff,
 };
 
 /* fabric independent task management response values */
@@ -299,7 +294,7 @@ struct t10_alua_tg_pt_gp {
 	struct list_head tg_pt_gp_lun_list;
 	struct se_lun *tg_pt_gp_alua_lun;
 	struct se_node_acl *tg_pt_gp_alua_nacl;
-	struct work_struct tg_pt_gp_transition_work;
+	struct delayed_work tg_pt_gp_transition_work;
 	struct completion *tg_pt_gp_transition_complete;
 };
 
@@ -431,6 +426,12 @@ enum target_core_dif_check {
 	TARGET_DIF_CHECK_REFTAG = 0x1 << 2,
 };
 
+struct se_dif_v1_tuple {
+	__be16			guard_tag;
+	__be16			app_tag;
+	__be32			ref_tag;
+};
+
 /* for sam_task_attr */
 #define TCM_SIMPLE_TAG	0x20
 #define TCM_HEAD_TAG	0x21
@@ -443,9 +444,6 @@ struct se_cmd {
 	u8			scsi_asc;
 	u8			scsi_ascq;
 	u16			scsi_sense_length;
-	unsigned		cmd_wait_set:1;
-	unsigned		unknown_data_length:1;
-	bool			state_active:1;
 	u64			tag; /* SAM command identifier aka task tag */
 	/* Delay for ALUA Active/NonOptimized state access in milliseconds */
 	int			alua_nonop_delay;
@@ -457,8 +455,11 @@ struct se_cmd {
 	unsigned int		map_tag;
 	/* Transport protocol dependent state, see transport_state_table */
 	enum transport_state_table t_state;
+	unsigned		cmd_wait_set:1;
+	unsigned		unknown_data_length:1;
 	/* See se_cmd_flags_table */
 	u32			se_cmd_flags;
+	u32			se_ordered_id;
 	/* Total size in bytes associated with command */
 	u32			data_length;
 	u32			residual_count;
@@ -476,9 +477,10 @@ struct se_cmd {
 	struct se_tmr_req	*se_tmr_req;
 	struct list_head	se_cmd_list;
 	struct completion	cmd_wait_comp;
+	struct kref		cmd_kref;
 	const struct target_core_fabric_ops *se_tfo;
 	sense_reason_t		(*execute_cmd)(struct se_cmd *);
-	sense_reason_t (*transport_complete_callback)(struct se_cmd *, bool, int *);
+	sense_reason_t (*transport_complete_callback)(struct se_cmd *, bool);
 	void			*protocol_data;
 
 	unsigned char		*t_task_cdb;
@@ -494,11 +496,7 @@ struct se_cmd {
 #define CMD_T_DEV_ACTIVE	(1 << 7)
 #define CMD_T_REQUEST_STOP	(1 << 8)
 #define CMD_T_BUSY		(1 << 9)
-#define CMD_T_TAS		(1 << 10)
-#define CMD_T_FABRIC_STOP	(1 << 11)
-#define CMD_T_PRE_EXECUTE	(1 << 12)
 	spinlock_t		t_state_lock;
-	struct kref		cmd_kref;
 	struct completion	t_transport_stop_comp;
 
 	struct work_struct	work;
@@ -511,10 +509,8 @@ struct se_cmd {
 	struct scatterlist	*t_bidi_data_sg;
 	unsigned int		t_bidi_data_nents;
 
-	/* Used for lun->lun_ref counting */
-	int			lun_ref_active;
-
 	struct list_head	state_list;
+	bool			state_active;
 
 	/* old task stop completion, consider merging with some of the above */
 	struct completion	task_stop_comp;
@@ -522,17 +518,20 @@ struct se_cmd {
 	/* backend private data */
 	void			*priv;
 
+	/* Used for lun->lun_ref counting */
+	int			lun_ref_active;
+
 	/* DIF related members */
 	enum target_prot_op	prot_op;
 	enum target_prot_type	prot_type;
 	u8			prot_checks;
-	bool			prot_pto;
 	u32			prot_length;
 	u32			reftag_seed;
 	struct scatterlist	*t_prot_sg;
 	unsigned int		t_prot_nents;
 	sense_reason_t		pi_err;
 	sector_t		bad_sector;
+	bool			prot_pto;
 };
 
 struct se_ua {
@@ -546,7 +545,6 @@ struct se_node_acl {
 	/* Used to signal demo mode created ACL, disabled by default */
 	bool			dynamic_node_acl;
 	bool			acl_stop:1;
-	bool			dynamic_stop;
 	u32			queue_depth;
 	u32			acl_index;
 	enum target_prot_type	saved_prot_type;
@@ -570,36 +568,6 @@ struct se_node_acl {
 	struct completion	acl_free_comp;
 	struct kref		acl_kref;
 };
-
-static inline struct se_node_acl *acl_to_nacl(struct config_item *item)
-{
-	return container_of(to_config_group(item), struct se_node_acl,
-			acl_group);
-}
-
-static inline struct se_node_acl *attrib_to_nacl(struct config_item *item)
-{
-	return container_of(to_config_group(item), struct se_node_acl,
-			acl_attrib_group);
-}
-
-static inline struct se_node_acl *auth_to_nacl(struct config_item *item)
-{
-	return container_of(to_config_group(item), struct se_node_acl,
-			acl_auth_group);
-}
-
-static inline struct se_node_acl *param_to_nacl(struct config_item *item)
-{
-	return container_of(to_config_group(item), struct se_node_acl,
-			acl_param_group);
-}
-
-static inline struct se_node_acl *fabric_stat_to_nacl(struct config_item *item)
-{
-	return container_of(to_config_group(item), struct se_node_acl,
-			acl_fabric_stat_group);
-}
 
 struct se_session {
 	unsigned		sess_tearing_down:1;
@@ -630,6 +598,7 @@ struct se_ml_stat_grps {
 };
 
 struct se_lun_acl {
+	char			initiatorname[TRANSPORT_IQN_LEN];
 	u64			mapped_lun;
 	struct se_node_acl	*se_lun_nacl;
 	struct se_lun		*se_lun;
@@ -716,7 +685,7 @@ struct se_lun {
 #define SE_LUN_LINK_MAGIC			0xffff7771
 	u32			lun_link_magic;
 	u32			lun_access;
-	bool			lun_shutdown;
+	u32			lun_flags;
 	u32			lun_index;
 
 	/* RELATIVE TARGET PORT IDENTIFER */
@@ -743,7 +712,6 @@ struct se_lun {
 	struct config_group	lun_group;
 	struct se_port_stat_grps port_stat_grps;
 	struct completion	lun_ref_comp;
-	struct completion	lun_shutdown_comp;
 	struct percpu_ref	lun_ref;
 	struct list_head	lun_dev_link;
 	struct hlist_node	link;
@@ -770,7 +738,6 @@ struct se_device {
 #define DF_EMULATED_VPD_UNIT_SERIAL		0x00000004
 #define DF_USING_UDEV_PATH			0x00000008
 #define DF_USING_ALIAS				0x00000010
-#define DF_READ_ONLY				0x00000020
 	/* Physical device queue depth */
 	u32			queue_depth;
 	/* Used for SPC-2 reservations enforce of ISIDs */
@@ -784,6 +751,7 @@ struct se_device {
 	atomic_long_t		write_bytes;
 	/* Active commands on this virtual SE device */
 	atomic_t		simple_cmds;
+	atomic_t		dev_ordered_id;
 	atomic_t		dev_ordered_sync;
 	atomic_t		dev_qf_count;
 	u32			export_count;
@@ -861,12 +829,6 @@ struct se_tpg_np {
 	struct config_group	tpg_np_group;
 };
 
-static inline struct se_tpg_np *to_tpg_np(struct config_item *item)
-{
-	return container_of(to_config_group(item), struct se_tpg_np,
-			tpg_np_group);
-}
-
 struct se_portal_group {
 	/*
 	 * PROTOCOL IDENTIFIER value per SPC4, 7.5.1.
@@ -902,30 +864,6 @@ struct se_portal_group {
 	struct config_group	tpg_auth_group;
 	struct config_group	tpg_param_group;
 };
-
-static inline struct se_portal_group *to_tpg(struct config_item *item)
-{
-	return container_of(to_config_group(item), struct se_portal_group,
-			tpg_group);
-}
-
-static inline struct se_portal_group *attrib_to_tpg(struct config_item *item)
-{
-	return container_of(to_config_group(item), struct se_portal_group,
-			tpg_attrib_group);
-}
-
-static inline struct se_portal_group *auth_to_tpg(struct config_item *item)
-{
-	return container_of(to_config_group(item), struct se_portal_group,
-			tpg_auth_group);
-}
-
-static inline struct se_portal_group *param_to_tpg(struct config_item *item)
-{
-	return container_of(to_config_group(item), struct se_portal_group,
-			tpg_param_group);
-}
 
 struct se_wwn {
 	struct target_fabric_configfs *wwn_tf;

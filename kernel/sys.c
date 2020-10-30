@@ -41,6 +41,7 @@
 #include <linux/syscore_ops.h>
 #include <linux/version.h>
 #include <linux/ctype.h>
+#include <linux/isolation.h>
 
 #include <linux/compat.h>
 #include <linux/syscalls.h>
@@ -52,8 +53,6 @@
 #include <linux/rcupdate.h>
 #include <linux/uidgid.h>
 #include <linux/cred.h>
-
-#include <linux/nospec.h>
 
 #include <linux/kmsg_dump.h>
 /* Move somewhere else to avoid recompiling? */
@@ -224,7 +223,7 @@ SYSCALL_DEFINE3(setpriority, int, which, int, who, int, niceval)
 				goto out_unlock;	/* No processes for this user */
 		}
 		do_each_thread(g, p) {
-			if (uid_eq(task_uid(p), uid) && task_pid_vnr(p))
+			if (uid_eq(task_uid(p), uid))
 				error = set_one_prio(p, niceval, error);
 		} while_each_thread(g, p);
 		if (!uid_eq(uid, cred->uid))
@@ -292,7 +291,7 @@ SYSCALL_DEFINE2(getpriority, int, which, int, who)
 				goto out_unlock;	/* No processes for this user */
 		}
 		do_each_thread(g, p) {
-			if (uid_eq(task_uid(p), uid) && task_pid_vnr(p)) {
+			if (uid_eq(task_uid(p), uid)) {
 				niceval = nice_to_rlimit(task_nice(p));
 				if (niceval > retval)
 					retval = niceval;
@@ -820,11 +819,6 @@ change_okay:
 }
 #endif /* CONFIG_MULTIUSER */
 
-#ifdef CONFIG_POPCORN
-#include <popcorn/types.h>
-#include <popcorn/syscall_server.h>
-#endif
-
 /**
  * sys_getpid - return the thread group id of the current process
  *
@@ -836,12 +830,6 @@ change_okay:
  */
 SYSCALL_DEFINE0(getpid)
 {
-#ifdef CONFIG_POPCORN
-	if (distributed_remote_process(current)) {
-		return redirect_getpid(0);
-	}
-#endif
-
 	return task_tgid_vnr(current);
 }
 
@@ -1324,7 +1312,6 @@ SYSCALL_DEFINE2(old_getrlimit, unsigned int, resource,
 	if (resource >= RLIM_NLIMITS)
 		return -EINVAL;
 
-	resource = array_index_nospec(resource, RLIM_NLIMITS);
 	task_lock(current->group_leader);
 	x = current->signal->rlim[resource];
 	task_unlock(current->group_leader);
@@ -1682,7 +1669,8 @@ static int prctl_set_mm_exe_file(struct mm_struct *mm, unsigned int fd)
 	 * overall picture.
 	 */
 	err = -EACCES;
-	if (!S_ISREG(inode->i_mode) || path_noexec(&exe.file->f_path))
+	if (!S_ISREG(inode->i_mode)	||
+	    exe.file->f_path.mnt->mnt_flags & MNT_NOEXEC)
 		goto exit;
 
 	err = inode_permission(inode, MAY_EXEC);
@@ -1867,13 +1855,11 @@ static int prctl_set_mm_map(int opt, const void __user *addr, unsigned long data
 		user_auxv[AT_VECTOR_SIZE - 1] = AT_NULL;
 	}
 
-	if (prctl_map.exe_fd != (u32)-1) {
+	if (prctl_map.exe_fd != (u32)-1)
 		error = prctl_set_mm_exe_file(mm, prctl_map.exe_fd);
-		if (error)
-			return error;
-	}
-
-	down_write(&mm->mmap_sem);
+	down_read(&mm->mmap_sem);
+	if (error)
+		goto out;
 
 	/*
 	 * We don't validate if these members are pointing to
@@ -1910,8 +1896,10 @@ static int prctl_set_mm_map(int opt, const void __user *addr, unsigned long data
 	if (prctl_map.auxv_size)
 		memcpy(mm->saved_auxv, user_auxv, sizeof(user_auxv));
 
-	up_write(&mm->mmap_sem);
-	return 0;
+	error = 0;
+out:
+	up_read(&mm->mmap_sem);
+	return error;
 }
 #endif /* CONFIG_CHECKPOINT_RESTORE */
 
@@ -1977,7 +1965,7 @@ static int prctl_set_mm(int opt, unsigned long addr,
 
 	error = -EINVAL;
 
-	down_write(&mm->mmap_sem);
+	down_read(&mm->mmap_sem);
 	vma = find_vma(mm, addr);
 
 	prctl_map.start_code	= mm->start_code;
@@ -2070,7 +2058,7 @@ static int prctl_set_mm(int opt, unsigned long addr,
 
 	error = 0;
 out:
-	up_write(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	return error;
 }
 
@@ -2280,6 +2268,14 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 	case PR_GET_FP_MODE:
 		error = GET_FP_MODE(me);
 		break;
+#ifdef CONFIG_TASK_ISOLATION
+	case PR_SET_TASK_ISOLATION:
+		error = task_isolation_set(arg2);
+		break;
+	case PR_GET_TASK_ISOLATION:
+		error = me->task_isolation_flags;
+		break;
+#endif
 	default:
 		error = -EINVAL;
 		break;

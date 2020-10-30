@@ -131,8 +131,17 @@ static struct platform_driver tosa_bt_driver = {
 		.name = "tosa-bt",
 	},
 };
-module_platform_driver(tosa_bt_driver);
 
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Dmitry Baryshkov");
-MODULE_DESCRIPTION("Bluetooth built-in chip control");
+
+static int __init tosa_bt_init(void)
+{
+	return platform_driver_register(&tosa_bt_driver);
+}
+
+static void __exit tosa_bt_exit(void)
+{
+	platform_driver_unregister(&tosa_bt_driver);
+}
+
+module_init(tosa_bt_init);
+module_exit(tosa_bt_exit);

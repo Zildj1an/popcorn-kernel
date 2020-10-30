@@ -15,8 +15,13 @@
 #include <linux/uaccess.h>
 #include <linux/kdebug.h>
 #include <linux/perf_event.h>
+#include <linux/context_tracking.h> /* exception_enter(), ... */
 #include <asm/pgalloc.h>
 #include <asm/mmu.h>
+#include <asm/highmem.h>
+#ifdef CONFIG_ARC_PLAT_EZNPS
+#include <plat/ctop.h>
+#endif
 
 /*
  * kernel virtual address is required to implement vmalloc/pkmap/fixmap
@@ -24,7 +29,7 @@
  *
  * It simply copies the PMD entry (pointer to 2nd level page table or hugepage)
  * from swapper pgdir to task pgdir. The 2nd level table/page is thus shared
- */
+*/
 noinline static int handle_kernel_vaddr_fault(unsigned long address)
 {
 	/*
@@ -34,6 +39,13 @@ noinline static int handle_kernel_vaddr_fault(unsigned long address)
 	pgd_t *pgd, *pgd_k;
 	pud_t *pud, *pud_k;
 	pmd_t *pmd, *pmd_k;
+
+#ifdef CONFIG_HIGHMEM
+	if (address >= FIXMAP_BASE && address < (FIXMAP_BASE + FIXMAP_SIZE))
+		address = FIXMAP_BASE;
+	else if ( address >= PKMAP_BASE && address < (PKMAP_BASE + PKMAP_SIZE))
+		address = PKMAP_BASE;
+#endif
 
 	pgd = pgd_offset_fast(current->active_mm, address);
 	pgd_k = pgd_offset_k(address);
@@ -60,7 +72,7 @@ bad_area:
 	return 1;
 }
 
-void do_page_fault(unsigned long address, struct pt_regs *regs)
+static void __do_page_fault(unsigned long address, struct pt_regs *regs)
 {
 	struct vm_area_struct *vma = NULL;
 	struct task_struct *tsk = current;
@@ -86,6 +98,14 @@ void do_page_fault(unsigned long address, struct pt_regs *regs)
 		else
 			return;
 	}
+
+#ifdef CONFIG_ARC_PLAT_EZNPS
+	if (address >= STACK_TOP && user_mode(regs)) {
+		ret = provide_nps_mapping_information(address);
+		if (ret)
+			goto bad_area_nosemaphore;
+	}
+#endif
 
 	info.si_code = SEGV_MAPERR;
 
@@ -239,4 +259,13 @@ do_sigbus:
 	info.si_code = BUS_ADRERR;
 	info.si_addr = (void __user *)address;
 	force_sig_info(SIGBUS, &info, tsk);
+}
+
+void do_page_fault(unsigned long address, struct pt_regs *regs)
+{
+	enum ctx_state prev_state;
+
+	prev_state = exception_enter();
+	__do_page_fault(address, regs);
+	exception_exit(prev_state);
 }

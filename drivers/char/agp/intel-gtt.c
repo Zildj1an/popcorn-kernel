@@ -859,8 +859,6 @@ void intel_gtt_insert_sg_entries(struct sg_table *st,
 		}
 	}
 	wmb();
-	if (intel_private.driver->chipset_flush)
-		intel_private.driver->chipset_flush();
 }
 EXPORT_SYMBOL(intel_gtt_insert_sg_entries);
 
@@ -1410,8 +1408,8 @@ int intel_gmch_probe(struct pci_dev *bridge_pdev, struct pci_dev *gpu_pdev,
 }
 EXPORT_SYMBOL(intel_gmch_probe);
 
-void intel_gtt_get(u64 *gtt_total, size_t *stolen_size,
-		   phys_addr_t *mappable_base, u64 *mappable_end)
+void intel_gtt_get(size_t *gtt_total, size_t *stolen_size,
+		   phys_addr_t *mappable_base, unsigned long *mappable_end)
 {
 	*gtt_total = intel_private.gtt_total_entries << PAGE_SHIFT;
 	*stolen_size = intel_private.stolen_size;

@@ -22,6 +22,49 @@
 #include <asm/smp.h>
 #endif
 
+#ifdef CONFIG_ARC_PLAT_EZNPS
+#define BIT_OP(op, c_op, asm_op)					\
+static inline void op##_bit(unsigned long nr, volatile unsigned long *m)\
+{									\
+	m += nr >> 5;							\
+									\
+	nr = (1UL << (nr & 0x1f));					\
+	if (asm_op == CTOP_INST_AAND_DI_R2_R2_R3)			\
+		nr = ~nr;						\
+									\
+	__asm__ __volatile__(						\
+	"	mov r2, %0\n"						\
+	"	mov r3, %1\n"						\
+	"	.word %2\n"						\
+	:								\
+	: "r"(nr), "r"(m), "i"(asm_op)					\
+	: "r2", "r3", "memory");					\
+}
+
+#define TEST_N_BIT_OP(op, c_op, asm_op)					\
+static inline int test_and_##op##_bit(unsigned long nr, volatile unsigned long *m)\
+{									\
+	unsigned long old;						\
+									\
+	m += nr >> 5;							\
+									\
+	nr = (1UL << (nr & 0x1f));					\
+	old = nr;							\
+	if (asm_op == CTOP_INST_AAND_DI_R2_R2_R3)			\
+		old = ~old;						\
+									\
+	__asm__ __volatile__(						\
+	"	mov r2, %0\n"						\
+	"	mov r3, %1\n"						\
+	"       .word %2\n"						\
+	"	mov %0, r2"						\
+	: "+r"(old)							\
+	: "r"(m), "i"(asm_op)						\
+	: "r2", "r3", "memory");					\
+									\
+	return (old & nr) != 0;						\
+}
+#else /* CONFIG_ARC_PLAT_EZNPS */
 #if defined(CONFIG_ARC_HAS_LLSC)
 
 /*
@@ -35,6 +78,21 @@ static inline void op##_bit(unsigned long nr, volatile unsigned long *m)\
 									\
 	m += nr >> 5;							\
 									\
+	/*								\
+	 * ARC ISA micro-optimization:					\
+	 *								\
+	 * Instructions dealing with bitpos only consider lower 5 bits	\
+	 * e.g (x << 33) is handled like (x << 1) by ASL instruction	\
+	 *  (mem pointer still needs adjustment to point to next word)	\
+	 *								\
+	 * Hence the masking to clamp @nr arg can be elided in general.	\
+	 *								\
+	 * However if @nr is a constant (above assumed in a register),	\
+	 * and greater than 31, gcc can optimize away (x << 33) to 0,	\
+	 * as overflow, given the 32-bit ISA. Thus masking needs to be	\
+	 * done for const @nr, but no code is generated due to gcc	\
+	 * const prop.							\
+	 */								\
 	nr &= 0x1f;							\
 									\
 	__asm__ __volatile__(						\
@@ -140,6 +198,7 @@ static inline int test_and_##op##_bit(unsigned long nr, volatile unsigned long *
 }
 
 #endif /* CONFIG_ARC_HAS_LLSC */
+#endif /* CONFIG_ARC_PLAT_EZNPS */
 
 /***************************************
  * Non atomic variants
@@ -181,9 +240,15 @@ static inline int __test_and_##op##_bit(unsigned long nr, volatile unsigned long
 	/* __test_and_set_bit(), __test_and_clear_bit(), __test_and_change_bit() */\
 	__TEST_N_BIT_OP(op, c_op, asm_op)
 
+#ifdef CONFIG_ARC_PLAT_EZNPS
+BIT_OPS(set, |, CTOP_INST_AOR_DI_R2_R2_R3)
+BIT_OPS(clear, & ~, CTOP_INST_AAND_DI_R2_R2_R3)
+BIT_OPS(change, ^, CTOP_INST_AXOR_DI_R2_R2_R3)
+#else
 BIT_OPS(set, |, bset)
 BIT_OPS(clear, & ~, bclr)
 BIT_OPS(change, ^, bxor)
+#endif
 
 /*
  * This routine doesn't need to be atomic.

@@ -17,8 +17,6 @@
  * MCP3204
  * MCP3208
  * ------------
- * 13 bit converter
- * MCP3301
  *
  * Datasheet can be found here:
  * http://ww1.microchip.com/downloads/en/DeviceDoc/21293C.pdf  mcp3001
@@ -27,7 +25,6 @@
  * http://ww1.microchip.com/downloads/en/DeviceDoc/21290D.pdf  mcp3201
  * http://ww1.microchip.com/downloads/en/DeviceDoc/21034D.pdf  mcp3202
  * http://ww1.microchip.com/downloads/en/DeviceDoc/21298c.pdf  mcp3204/08
- * http://ww1.microchip.com/downloads/en/DeviceDoc/21700E.pdf  mcp3301
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -50,7 +47,6 @@ enum {
 	mcp3202,
 	mcp3204,
 	mcp3208,
-	mcp3301,
 };
 
 struct mcp320x_chip_info {
@@ -80,7 +76,6 @@ static int mcp320x_channel_to_tx_data(int device_index,
 	switch (device_index) {
 	case mcp3001:
 	case mcp3201:
-	case mcp3301:
 		return 0;
 	case mcp3002:
 	case mcp3202:
@@ -98,7 +93,7 @@ static int mcp320x_channel_to_tx_data(int device_index,
 }
 
 static int mcp320x_adc_conversion(struct mcp320x *adc, u8 channel,
-				  bool differential, int device_index, int *val)
+				  bool differential, int device_index)
 {
 	int ret;
 
@@ -107,7 +102,7 @@ static int mcp320x_adc_conversion(struct mcp320x *adc, u8 channel,
 	adc->tx_buf = mcp320x_channel_to_tx_data(device_index,
 						channel, differential);
 
-	if (device_index != mcp3001 && device_index != mcp3201 && device_index != mcp3301) {
+	if (device_index != mcp3001 && device_index != mcp3201) {
 		ret = spi_sync(adc->spi, &adc->msg);
 		if (ret < 0)
 			return ret;
@@ -119,25 +114,17 @@ static int mcp320x_adc_conversion(struct mcp320x *adc, u8 channel,
 
 	switch (device_index) {
 	case mcp3001:
-		*val = (adc->rx_buf[0] << 5 | adc->rx_buf[1] >> 3);
-		return 0;
+		return (adc->rx_buf[0] << 5 | adc->rx_buf[1] >> 3);
 	case mcp3002:
 	case mcp3004:
 	case mcp3008:
-		*val = (adc->rx_buf[0] << 2 | adc->rx_buf[1] >> 6);
-		return 0;
+		return (adc->rx_buf[0] << 2 | adc->rx_buf[1] >> 6);
 	case mcp3201:
-		*val = (adc->rx_buf[0] << 7 | adc->rx_buf[1] >> 1);
-		return 0;
+		return (adc->rx_buf[0] << 7 | adc->rx_buf[1] >> 1);
 	case mcp3202:
 	case mcp3204:
 	case mcp3208:
-		*val = (adc->rx_buf[0] << 4 | adc->rx_buf[1] >> 4);
-		return 0;
-	case mcp3301:
-		*val = sign_extend32((adc->rx_buf[0] & 0x1f) << 8
-				    | adc->rx_buf[1], 12);
-		return 0;
+		return (adc->rx_buf[0] << 4 | adc->rx_buf[1] >> 4);
 	default:
 		return -EINVAL;
 	}
@@ -158,10 +145,12 @@ static int mcp320x_read_raw(struct iio_dev *indio_dev,
 	switch (mask) {
 	case IIO_CHAN_INFO_RAW:
 		ret = mcp320x_adc_conversion(adc, channel->address,
-			channel->differential, device_index, val);
+			channel->differential, device_index);
+
 		if (ret < 0)
 			goto out;
 
+		*val = ret;
 		ret = IIO_VAL_INT;
 		break;
 
@@ -285,11 +274,6 @@ static const struct mcp320x_chip_info mcp320x_chip_infos[] = {
 		.num_channels = ARRAY_SIZE(mcp3208_channels),
 		.resolution = 12
 	},
-	[mcp3301] = {
-		.channels = mcp3201_channels,
-		.num_channels = ARRAY_SIZE(mcp3201_channels),
-		.resolution = 13
-	},
 };
 
 static int mcp320x_probe(struct spi_device *spi)
@@ -310,7 +294,6 @@ static int mcp320x_probe(struct spi_device *spi)
 	indio_dev->name = spi_get_device_id(spi)->name;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->info = &mcp320x_info;
-	spi_set_drvdata(spi, indio_dev);
 
 	chip_info = &mcp320x_chip_infos[spi_get_device_id(spi)->driver_data];
 	indio_dev->channels = chip_info->channels;
@@ -386,9 +369,6 @@ static const struct of_device_id mcp320x_dt_ids[] = {
 		.compatible = "mcp3208",
 		.data = &mcp320x_chip_infos[mcp3208],
 	}, {
-		.compatible = "mcp3301",
-		.data = &mcp320x_chip_infos[mcp3301],
-	}, {
 	}
 };
 MODULE_DEVICE_TABLE(of, mcp320x_dt_ids);
@@ -403,7 +383,6 @@ static const struct spi_device_id mcp320x_id[] = {
 	{ "mcp3202", mcp3202 },
 	{ "mcp3204", mcp3204 },
 	{ "mcp3208", mcp3208 },
-	{ "mcp3301", mcp3301 },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, mcp320x_id);
@@ -411,7 +390,7 @@ MODULE_DEVICE_TABLE(spi, mcp320x_id);
 static struct spi_driver mcp320x_driver = {
 	.driver = {
 		.name = "mcp320x",
-		.of_match_table = of_match_ptr(mcp320x_dt_ids),
+		.owner = THIS_MODULE,
 	},
 	.probe = mcp320x_probe,
 	.remove = mcp320x_remove,

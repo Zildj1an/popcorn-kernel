@@ -73,7 +73,6 @@ enum {
 	sym_vvar_start,
 	sym_vvar_page,
 	sym_hpet_page,
-	sym_pvclock_page,
 	sym_VDSO_FAKE_SECTION_TABLE_START,
 	sym_VDSO_FAKE_SECTION_TABLE_END,
 };
@@ -81,7 +80,6 @@ enum {
 const int special_pages[] = {
 	sym_vvar_page,
 	sym_hpet_page,
-	sym_pvclock_page,
 };
 
 struct vdso_sym {
@@ -93,7 +91,6 @@ struct vdso_sym required_syms[] = {
 	[sym_vvar_start] = {"vvar_start", true},
 	[sym_vvar_page] = {"vvar_page", true},
 	[sym_hpet_page] = {"hpet_page", true},
-	[sym_pvclock_page] = {"pvclock_page", true},
 	[sym_VDSO_FAKE_SECTION_TABLE_START] = {
 		"VDSO_FAKE_SECTION_TABLE_START", false
 	},
@@ -101,10 +98,10 @@ struct vdso_sym required_syms[] = {
 		"VDSO_FAKE_SECTION_TABLE_END", false
 	},
 	{"VDSO32_NOTE_MASK", true},
+	{"VDSO32_SYSENTER_RETURN", true},
 	{"__kernel_vsyscall", true},
 	{"__kernel_sigreturn", true},
 	{"__kernel_rt_sigreturn", true},
-	{"int80_landing_pad", true},
 };
 
 __attribute__((format(printf, 1, 2))) __attribute__((noreturn))

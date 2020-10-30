@@ -60,7 +60,7 @@ SECTIONS
 		EXIT_DATA
 	}
 	PERCPU_SECTION(8)
-	. = ALIGN(HUGEPAGE_SIZE);
+	. = ALIGN(PAGE_SIZE);
 	__init_end = .;
 	/* freed after init ends here */
 
@@ -88,9 +88,8 @@ SECTIONS
 	/* Start of data section */
 	_sdata = .;
 
-	/* Architecturally we need to keep __gp below 0x1000000 and thus
-	 * in front of RO_DATA_SECTION() which stores lots of tracepoint
-	 * and ftrace symbols. */
+	RO_DATA_SECTION(8)
+
 #ifdef CONFIG_64BIT
 	. = ALIGN(16);
 	/* Linkage tables */
@@ -105,8 +104,6 @@ SECTIONS
 	}
 #endif
 
-	RO_DATA_SECTION(8)
-
 	/* unwind info */
 	.PARISC.unwind : {
 		__start___unwind = .;
@@ -119,7 +116,7 @@ SECTIONS
 	 * that we can properly leave these
 	 * as writable
 	 */
-	. = ALIGN(HUGEPAGE_SIZE);
+	. = ALIGN(PAGE_SIZE);
 	data_start = .;
 
 	EXCEPTION_TABLE(8)
@@ -138,11 +135,8 @@ SECTIONS
 	_edata = .;
 
 	/* BSS */
-	BSS_SECTION(PAGE_SIZE, PAGE_SIZE, PAGE_SIZE)
+	BSS_SECTION(PAGE_SIZE, PAGE_SIZE, 8)
 
-	/* bootmap is allocated in setup_bootmem() directly behind bss. */
-
-	. = ALIGN(HUGEPAGE_SIZE);
 	_end = . ;
 
 	STABS_DEBUG

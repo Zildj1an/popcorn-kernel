@@ -606,7 +606,7 @@ void ata_scsi_error(struct Scsi_Host *host)
 	ata_scsi_port_error_handler(host, ap);
 
 	/* finish or retry handled scmd's and clean up */
-	WARN_ON(!list_empty(&eh_work_q));
+	WARN_ON(host->host_failed || !list_empty(&eh_work_q));
 
 	DPRINTK("EXIT\n");
 }
@@ -1505,19 +1505,11 @@ static const char *ata_err_string(unsigned int err_mask)
 unsigned int ata_read_log_page(struct ata_device *dev, u8 log,
 			       u8 page, void *buf, unsigned int sectors)
 {
-	unsigned long ap_flags = dev->link->ap->flags;
 	struct ata_taskfile tf;
 	unsigned int err_mask;
 	bool dma = false;
 
 	DPRINTK("read log page - log 0x%x, page 0x%x\n", log, page);
-
-	/*
-	 * Return error without actually issuing the command on controllers
-	 * which e.g. lockup on a read log page.
-	 */
-	if (ap_flags & ATA_FLAG_NO_LOG_PAGE)
-		return AC_ERR_DEV;
 
 retry:
 	ata_tf_init(dev, &tf);
@@ -2245,8 +2237,8 @@ static void ata_eh_link_autopsy(struct ata_link *link)
 		if (dev->flags & ATA_DFLAG_DUBIOUS_XFER)
 			eflags |= ATA_EFLAG_DUBIOUS_XFER;
 		ehc->i.action |= ata_eh_speed_down(dev, eflags, all_err_mask);
-		trace_ata_eh_link_autopsy(dev, ehc->i.action, all_err_mask);
 	}
+	trace_ata_eh_link_autopsy(dev, ehc->i.action, all_err_mask);
 	DPRINTK("EXIT\n");
 }
 

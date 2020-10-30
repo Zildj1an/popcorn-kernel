@@ -919,15 +919,10 @@ int usb_stor_CB_transport(struct scsi_cmnd *srb, struct us_data *us)
 
 	/* COMMAND STAGE */
 	/* let's send the command via the control pipe */
-	/*
-	 * Command is sometime (f.e. after scsi_eh_prep_cmnd) on the stack.
-	 * Stack may be vmallocated.  So no DMA for us.  Make a copy.
-	 */
-	memcpy(us->iobuf, srb->cmnd, srb->cmd_len);
 	result = usb_stor_ctrl_transfer(us, us->send_ctrl_pipe,
 				      US_CBI_ADSC, 
 				      USB_TYPE_CLASS | USB_RECIP_INTERFACE, 0, 
-				      us->ifnum, us->iobuf, srb->cmd_len);
+				      us->ifnum, srb->cmnd, srb->cmd_len);
 
 	/* check the return code for the command */
 	usb_stor_dbg(us, "Call to usb_stor_ctrl_transfer() returned %d\n",
@@ -1116,7 +1111,7 @@ int usb_stor_Bulk_transport(struct scsi_cmnd *srb, struct us_data *us)
 	 * command phase and the data phase.  Some devices need a little
 	 * more than that, probably because of clock rate inaccuracies. */
 	if (unlikely(us->fflags & US_FL_GO_SLOW))
-		usleep_range(125, 150);
+		udelay(125);
 
 	if (transfer_length) {
 		unsigned int pipe = srb->sc_data_direction == DMA_FROM_DEVICE ? 

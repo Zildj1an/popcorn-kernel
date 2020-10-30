@@ -47,19 +47,6 @@
 
 #include <asm/mcip.h>
 
-/* Timer related Aux registers */
-#define ARC_REG_TIMER0_LIMIT	0x23	/* timer 0 limit */
-#define ARC_REG_TIMER0_CTRL	0x22	/* timer 0 control */
-#define ARC_REG_TIMER0_CNT	0x21	/* timer 0 count */
-#define ARC_REG_TIMER1_LIMIT	0x102	/* timer 1 limit */
-#define ARC_REG_TIMER1_CTRL	0x101	/* timer 1 control */
-#define ARC_REG_TIMER1_CNT	0x100	/* timer 1 count */
-
-#define TIMER_CTRL_IE		(1 << 0) /* Interupt when Count reachs limit */
-#define TIMER_CTRL_NH		(1 << 1) /* Count only when CPU NOT halted */
-
-#define ARC_TIMER_MAX	0xFFFFFFFF
-
 /********** Clock Source Device *********/
 
 #ifdef CONFIG_ARC_HAS_GRTC
@@ -130,17 +117,14 @@ static cycle_t arc_counter_read(struct clocksource *cs)
 		cycle_t  full;
 	} stamp;
 
-	/*
-	 * hardware has an internal state machine which tracks readout of
-	 * low/high and updates the CTRL.status if
-	 *  - interrupt/exception taken between the two reads
-	 *  - high increments after low has been read
-	 */
-	do {
-		stamp.low = read_aux_reg(AUX_RTC_LOW);
-		stamp.high = read_aux_reg(AUX_RTC_HIGH);
-		status = read_aux_reg(AUX_RTC_CTRL);
-	} while (!(status & _BITUL(31)));
+
+	__asm__ __volatile(
+	"1:						\n"
+	"	lr		%0, [AUX_RTC_LOW]	\n"
+	"	lr		%1, [AUX_RTC_HIGH]	\n"
+	"	lr		%2, [AUX_RTC_CTRL]	\n"
+	"	bbit0.nt	%2, 31, 1b		\n"
+	: "=r" (stamp.low), "=r" (stamp.high), "=r" (status));
 
 	return stamp.full;
 }
@@ -198,11 +182,41 @@ static void arc_timer_event_setup(unsigned int cycles)
 	write_aux_reg(ARC_REG_TIMER0_CTRL, TIMER_CTRL_IE | TIMER_CTRL_NH);
 }
 
+static void arc_timer_mask(void)
+{
+	unsigned int ienb;
+
+	ienb = read_aux_reg(AUX_IENABLE);
+	ienb &= ~(1 << TIMER0_IRQ);
+	write_aux_reg(AUX_IENABLE, ienb);
+}
+
+static void arc_timer_unmask(void)
+{
+	unsigned int ienb;
+
+	ienb = read_aux_reg(AUX_IENABLE);
+	ienb |= (1 << TIMER0_IRQ);
+	write_aux_reg(AUX_IENABLE, ienb);
+}
 
 static int arc_clkevent_set_next_event(unsigned long delta,
 				       struct clock_event_device *dev)
 {
 	arc_timer_event_setup(delta);
+	arc_timer_unmask();
+
+	return 0;
+}
+
+/*
+ * Whenever anyone tries to change modes, we just mask interrupts
+ * and wait for the next event to get set.
+ */
+static int arc_clkevent_timer_shutdown(struct clock_event_device *dev)
+{
+	arc_timer_mask();
+
 	return 0;
 }
 
@@ -216,6 +230,15 @@ static int arc_clkevent_set_periodic(struct clock_event_device *dev)
 	return 0;
 }
 
+static int arc_clkevent_set_oneshot(struct clock_event_device *dev)
+{
+	write_aux_reg(ARC_REG_TIMER0_CTRL, TIMER_CTRL_NH);
+
+	arc_clkevent_timer_shutdown(dev);
+
+	return 0;
+}
+
 static DEFINE_PER_CPU(struct clock_event_device, arc_clockevent_device) = {
 	.name			= "ARC Timer0",
 	.features		= CLOCK_EVT_FEAT_ONESHOT |
@@ -223,7 +246,11 @@ static DEFINE_PER_CPU(struct clock_event_device, arc_clockevent_device) = {
 	.rating			= 300,
 	.irq			= TIMER0_IRQ,	/* hardwired, no need for resources */
 	.set_next_event		= arc_clkevent_set_next_event,
+	.set_state_shutdown = arc_clkevent_timer_shutdown,
 	.set_state_periodic	= arc_clkevent_set_periodic,
+	.set_state_oneshot = arc_clkevent_set_oneshot,
+	.set_state_oneshot_stopped = arc_clkevent_timer_shutdown,
+	.tick_resume = arc_clkevent_timer_shutdown,
 };
 
 static irqreturn_t timer_irq_handler(int irq, void *dev_id)
@@ -250,7 +277,7 @@ static irqreturn_t timer_irq_handler(int irq, void *dev_id)
 /*
  * Setup the local event timer for @cpu
  */
-void arc_local_timer_setup()
+void __weak arc_local_timer_setup()
 {
 	struct clock_event_device *evt = this_cpu_ptr(&arc_clockevent_device);
 	int cpu = smp_processor_id();
@@ -288,4 +315,7 @@ void __init time_init(void)
 
 	/* sets up the periodic event timer */
 	arc_local_timer_setup();
+
+	if (machine_desc->init_time)
+		machine_desc->init_time();
 }

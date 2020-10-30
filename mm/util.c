@@ -80,8 +80,6 @@ EXPORT_SYMBOL(kstrdup_const);
  * @s: the string to duplicate
  * @max: read at most @max chars from @s
  * @gfp: the GFP mask used in the kmalloc() call when allocating memory
- *
- * Note: Use kmemdup_nul() instead if the size is known exactly.
  */
 char *kstrndup(const char *s, size_t max, gfp_t gfp)
 {
@@ -118,28 +116,6 @@ void *kmemdup(const void *src, size_t len, gfp_t gfp)
 	return p;
 }
 EXPORT_SYMBOL(kmemdup);
-
-/**
- * kmemdup_nul - Create a NUL-terminated string from unterminated data
- * @s: The data to stringify
- * @len: The size of the data
- * @gfp: the GFP mask used in the kmalloc() call when allocating memory
- */
-char *kmemdup_nul(const char *s, size_t len, gfp_t gfp)
-{
-	char *buf;
-
-	if (!s)
-		return NULL;
-
-	buf = kmalloc_track_caller(len + 1, gfp);
-	if (buf) {
-		memcpy(buf, s, len);
-		buf[len] = '\0';
-	}
-	return buf;
-}
-EXPORT_SYMBOL(kmemdup_nul);
 
 /**
  * memdup_user - duplicate memory region from user space
@@ -223,9 +199,34 @@ void __vma_link_list(struct mm_struct *mm, struct vm_area_struct *vma,
 }
 
 /* Check if the vma is being used as a stack by this task */
-int vma_is_stack_for_task(struct vm_area_struct *vma, struct task_struct *t)
+static int vm_is_stack_for_task(struct task_struct *t,
+				struct vm_area_struct *vma)
 {
 	return (vma->vm_start <= KSTK_ESP(t) && vma->vm_end >= KSTK_ESP(t));
+}
+
+/*
+ * Check if the vma is being used as a stack.
+ * If is_group is non-zero, check in the entire thread group or else
+ * just check in the current task. Returns the task_struct of the task
+ * that the vma is stack for. Must be called under rcu_read_lock().
+ */
+struct task_struct *task_of_stack(struct task_struct *task,
+				struct vm_area_struct *vma, bool in_group)
+{
+	if (vm_is_stack_for_task(task, vma))
+		return task;
+
+	if (in_group) {
+		struct task_struct *t;
+
+		for_each_thread(task, t) {
+			if (vm_is_stack_for_task(t, vma))
+				return t;
+		}
+	}
+
+	return NULL;
 }
 
 #if defined(CONFIG_MMU) && !defined(HAVE_ARCH_PICK_MMAP_LAYOUT)
@@ -308,7 +309,7 @@ unsigned long vm_mmap(struct file *file, unsigned long addr,
 {
 	if (unlikely(offset + PAGE_ALIGN(len) < offset))
 		return -EINVAL;
-	if (unlikely(offset_in_page(offset)))
+	if (unlikely(offset & ~PAGE_MASK))
 		return -EINVAL;
 
 	return vm_mmap_pgoff(file, addr, len, prot, flag, offset >> PAGE_SHIFT);
@@ -428,25 +429,17 @@ int get_cmdline(struct task_struct *task, char *buffer, int buflen)
 	int res = 0;
 	unsigned int len;
 	struct mm_struct *mm = get_task_mm(task);
-	unsigned long arg_start, arg_end, env_start, env_end;
 	if (!mm)
 		goto out;
 	if (!mm->arg_end)
 		goto out_mm;	/* Shh! No looking before we're done */
 
-	down_read(&mm->mmap_sem);
-	arg_start = mm->arg_start;
-	arg_end = mm->arg_end;
-	env_start = mm->env_start;
-	env_end = mm->env_end;
-	up_read(&mm->mmap_sem);
-
-	len = arg_end - arg_start;
+	len = mm->arg_end - mm->arg_start;
 
 	if (len > buflen)
 		len = buflen;
 
-	res = access_process_vm(task, arg_start, buffer, len, 0);
+	res = access_process_vm(task, mm->arg_start, buffer, len, 0);
 
 	/*
 	 * If the nul at the end of args has been overwritten, then
@@ -457,10 +450,10 @@ int get_cmdline(struct task_struct *task, char *buffer, int buflen)
 		if (len < res) {
 			res = len;
 		} else {
-			len = env_end - env_start;
+			len = mm->env_end - mm->env_start;
 			if (len > buflen - res)
 				len = buflen - res;
-			res += access_process_vm(task, env_start,
+			res += access_process_vm(task, mm->env_start,
 						 buffer+res, len, 0);
 			res = strnlen(buffer, res);
 		}

@@ -89,18 +89,20 @@ void radeon_connector_hotplug(struct drm_connector *connector)
 		/* don't do anything if sink is not display port, i.e.,
 		 * passive dp->(dvi|hdmi) adaptor
 		 */
-		if (dig_connector->dp_sink_type == CONNECTOR_OBJECT_ID_DISPLAYPORT &&
-		    radeon_hpd_sense(rdev, radeon_connector->hpd.hpd) &&
-		    radeon_dp_needs_link_train(radeon_connector)) {
-			/* Don't start link training before we have the DPCD */
-			if (!radeon_dp_getdpcd(radeon_connector))
-				return;
-
-			/* Turn the connector off and back on immediately, which
-			 * will trigger link training
-			 */
-			drm_helper_connector_dpms(connector, DRM_MODE_DPMS_OFF);
-			drm_helper_connector_dpms(connector, DRM_MODE_DPMS_ON);
+		if (dig_connector->dp_sink_type == CONNECTOR_OBJECT_ID_DISPLAYPORT) {
+			int saved_dpms = connector->dpms;
+			/* Only turn off the display if it's physically disconnected */
+			if (!radeon_hpd_sense(rdev, radeon_connector->hpd.hpd)) {
+				drm_helper_connector_dpms(connector, DRM_MODE_DPMS_OFF);
+			} else if (radeon_dp_needs_link_train(radeon_connector)) {
+				/* set it to OFF so that drm_helper_connector_dpms()
+				 * won't return immediately since the current state
+				 * is ON at this point.
+				 */
+				connector->dpms = DRM_MODE_DPMS_OFF;
+				drm_helper_connector_dpms(connector, DRM_MODE_DPMS_ON);
+			}
+			connector->dpms = saved_dpms;
 		}
 	}
 }
@@ -884,11 +886,9 @@ radeon_lvds_detect(struct drm_connector *connector, bool force)
 	enum drm_connector_status ret = connector_status_disconnected;
 	int r;
 
-	if (!drm_kms_helper_is_poll_worker()) {
-		r = pm_runtime_get_sync(connector->dev->dev);
-		if (r < 0)
-			return connector_status_disconnected;
-	}
+	r = pm_runtime_get_sync(connector->dev->dev);
+	if (r < 0)
+		return connector_status_disconnected;
 
 	if (encoder) {
 		struct radeon_encoder *radeon_encoder = to_radeon_encoder(encoder);
@@ -911,12 +911,8 @@ radeon_lvds_detect(struct drm_connector *connector, bool force)
 	/* check acpi lid status ??? */
 
 	radeon_connector_update_scratch_regs(connector, ret);
-
-	if (!drm_kms_helper_is_poll_worker()) {
-		pm_runtime_mark_last_busy(connector->dev->dev);
-		pm_runtime_put_autosuspend(connector->dev->dev);
-	}
-
+	pm_runtime_mark_last_busy(connector->dev->dev);
+	pm_runtime_put_autosuspend(connector->dev->dev);
 	return ret;
 }
 
@@ -1019,11 +1015,9 @@ radeon_vga_detect(struct drm_connector *connector, bool force)
 	enum drm_connector_status ret = connector_status_disconnected;
 	int r;
 
-	if (!drm_kms_helper_is_poll_worker()) {
-		r = pm_runtime_get_sync(connector->dev->dev);
-		if (r < 0)
-			return connector_status_disconnected;
-	}
+	r = pm_runtime_get_sync(connector->dev->dev);
+	if (r < 0)
+		return connector_status_disconnected;
 
 	encoder = radeon_best_single_encoder(connector);
 	if (!encoder)
@@ -1090,10 +1084,8 @@ radeon_vga_detect(struct drm_connector *connector, bool force)
 	radeon_connector_update_scratch_regs(connector, ret);
 
 out:
-	if (!drm_kms_helper_is_poll_worker()) {
-		pm_runtime_mark_last_busy(connector->dev->dev);
-		pm_runtime_put_autosuspend(connector->dev->dev);
-	}
+	pm_runtime_mark_last_busy(connector->dev->dev);
+	pm_runtime_put_autosuspend(connector->dev->dev);
 
 	return ret;
 }
@@ -1156,11 +1148,9 @@ radeon_tv_detect(struct drm_connector *connector, bool force)
 	if (!radeon_connector->dac_load_detect)
 		return ret;
 
-	if (!drm_kms_helper_is_poll_worker()) {
-		r = pm_runtime_get_sync(connector->dev->dev);
-		if (r < 0)
-			return connector_status_disconnected;
-	}
+	r = pm_runtime_get_sync(connector->dev->dev);
+	if (r < 0)
+		return connector_status_disconnected;
 
 	encoder = radeon_best_single_encoder(connector);
 	if (!encoder)
@@ -1172,12 +1162,8 @@ radeon_tv_detect(struct drm_connector *connector, bool force)
 	if (ret == connector_status_connected)
 		ret = radeon_connector_analog_encoder_conflict_solve(connector, encoder, ret, false);
 	radeon_connector_update_scratch_regs(connector, ret);
-
-	if (!drm_kms_helper_is_poll_worker()) {
-		pm_runtime_mark_last_busy(connector->dev->dev);
-		pm_runtime_put_autosuspend(connector->dev->dev);
-	}
-
+	pm_runtime_mark_last_busy(connector->dev->dev);
+	pm_runtime_put_autosuspend(connector->dev->dev);
 	return ret;
 }
 
@@ -1239,38 +1225,17 @@ radeon_dvi_detect(struct drm_connector *connector, bool force)
 	enum drm_connector_status ret = connector_status_disconnected;
 	bool dret = false, broken_edid = false;
 
-	if (!drm_kms_helper_is_poll_worker()) {
-		r = pm_runtime_get_sync(connector->dev->dev);
-		if (r < 0)
-			return connector_status_disconnected;
-	}
-
-	if (radeon_connector->detected_hpd_without_ddc) {
-		force = true;
-		radeon_connector->detected_hpd_without_ddc = false;
-	}
+	r = pm_runtime_get_sync(connector->dev->dev);
+	if (r < 0)
+		return connector_status_disconnected;
 
 	if (!force && radeon_check_hpd_status_unchanged(connector)) {
 		ret = connector->status;
 		goto exit;
 	}
 
-	if (radeon_connector->ddc_bus) {
+	if (radeon_connector->ddc_bus)
 		dret = radeon_ddc_probe(radeon_connector, false);
-
-		/* Sometimes the pins required for the DDC probe on DVI
-		 * connectors don't make contact at the same time that the ones
-		 * for HPD do. If the DDC probe fails even though we had an HPD
-		 * signal, try again later */
-		if (!dret && !force &&
-		    connector->status != connector_status_connected) {
-			DRM_DEBUG_KMS("hpd detected without ddc, retrying in 1 second\n");
-			radeon_connector->detected_hpd_without_ddc = true;
-			schedule_delayed_work(&rdev->hotplug_work,
-					      msecs_to_jiffies(1000));
-			goto exit;
-		}
-	}
 	if (dret) {
 		radeon_connector->detected_by_load = false;
 		radeon_connector_free_edid(connector);
@@ -1426,10 +1391,8 @@ out:
 	}
 
 exit:
-	if (!drm_kms_helper_is_poll_worker()) {
-		pm_runtime_mark_last_busy(connector->dev->dev);
-		pm_runtime_put_autosuspend(connector->dev->dev);
-	}
+	pm_runtime_mark_last_busy(connector->dev->dev);
+	pm_runtime_put_autosuspend(connector->dev->dev);
 
 	return ret;
 }
@@ -1679,11 +1642,9 @@ radeon_dp_detect(struct drm_connector *connector, bool force)
 	if (radeon_dig_connector->is_mst)
 		return connector_status_disconnected;
 
-	if (!drm_kms_helper_is_poll_worker()) {
-		r = pm_runtime_get_sync(connector->dev->dev);
-		if (r < 0)
-			return connector_status_disconnected;
-	}
+	r = pm_runtime_get_sync(connector->dev->dev);
+	if (r < 0)
+		return connector_status_disconnected;
 
 	if (!force && radeon_check_hpd_status_unchanged(connector)) {
 		ret = connector->status;
@@ -1770,10 +1731,8 @@ radeon_dp_detect(struct drm_connector *connector, bool force)
 	}
 
 out:
-	if (!drm_kms_helper_is_poll_worker()) {
-		pm_runtime_mark_last_busy(connector->dev->dev);
-		pm_runtime_put_autosuspend(connector->dev->dev);
-	}
+	pm_runtime_mark_last_busy(connector->dev->dev);
+	pm_runtime_put_autosuspend(connector->dev->dev);
 
 	return ret;
 }
@@ -2013,12 +1972,10 @@ radeon_add_atom_connector(struct drm_device *dev,
 						   rdev->mode_info.dither_property,
 						   RADEON_FMT_DITHER_DISABLE);
 
-			if (radeon_audio != 0) {
+			if (radeon_audio != 0)
 				drm_object_attach_property(&radeon_connector->base.base,
 							   rdev->mode_info.audio_property,
 							   RADEON_AUDIO_AUTO);
-				radeon_connector->audio = RADEON_AUDIO_AUTO;
-			}
 			if (ASIC_IS_DCE5(rdev))
 				drm_object_attach_property(&radeon_connector->base.base,
 							   rdev->mode_info.output_csc_property,
@@ -2075,6 +2032,7 @@ radeon_add_atom_connector(struct drm_device *dev,
 							   RADEON_OUTPUT_CSC_BYPASS);
 			/* no HPD on analog connectors */
 			radeon_connector->hpd.hpd = RADEON_HPD_NONE;
+			connector->polled = DRM_CONNECTOR_POLL_CONNECT;
 			connector->interlace_allowed = true;
 			connector->doublescan_allowed = true;
 			break;
@@ -2142,7 +2100,6 @@ radeon_add_atom_connector(struct drm_device *dev,
 				drm_object_attach_property(&radeon_connector->base.base,
 							   rdev->mode_info.audio_property,
 							   RADEON_AUDIO_AUTO);
-				radeon_connector->audio = RADEON_AUDIO_AUTO;
 			}
 			if (connector_type == DRM_MODE_CONNECTOR_DVII) {
 				radeon_connector->dac_load_detect = true;
@@ -2198,7 +2155,6 @@ radeon_add_atom_connector(struct drm_device *dev,
 				drm_object_attach_property(&radeon_connector->base.base,
 							   rdev->mode_info.audio_property,
 							   RADEON_AUDIO_AUTO);
-				radeon_connector->audio = RADEON_AUDIO_AUTO;
 			}
 			if (ASIC_IS_DCE5(rdev))
 				drm_object_attach_property(&radeon_connector->base.base,
@@ -2251,7 +2207,6 @@ radeon_add_atom_connector(struct drm_device *dev,
 				drm_object_attach_property(&radeon_connector->base.base,
 							   rdev->mode_info.audio_property,
 							   RADEON_AUDIO_AUTO);
-				radeon_connector->audio = RADEON_AUDIO_AUTO;
 			}
 			if (ASIC_IS_DCE5(rdev))
 				drm_object_attach_property(&radeon_connector->base.base,
@@ -2324,10 +2279,8 @@ radeon_add_atom_connector(struct drm_device *dev,
 	}
 
 	if (radeon_connector->hpd.hpd == RADEON_HPD_NONE) {
-		if (i2c_bus->valid) {
-			connector->polled = DRM_CONNECTOR_POLL_CONNECT |
-			                    DRM_CONNECTOR_POLL_DISCONNECT;
-		}
+		if (i2c_bus->valid)
+			connector->polled = DRM_CONNECTOR_POLL_CONNECT;
 	} else
 		connector->polled = DRM_CONNECTOR_POLL_HPD;
 
@@ -2403,6 +2356,7 @@ radeon_add_legacy_connector(struct drm_device *dev,
 					      1);
 		/* no HPD on analog connectors */
 		radeon_connector->hpd.hpd = RADEON_HPD_NONE;
+		connector->polled = DRM_CONNECTOR_POLL_CONNECT;
 		connector->interlace_allowed = true;
 		connector->doublescan_allowed = true;
 		break;
@@ -2487,13 +2441,10 @@ radeon_add_legacy_connector(struct drm_device *dev,
 	}
 
 	if (radeon_connector->hpd.hpd == RADEON_HPD_NONE) {
-		if (i2c_bus->valid) {
-			connector->polled = DRM_CONNECTOR_POLL_CONNECT |
-			                    DRM_CONNECTOR_POLL_DISCONNECT;
-		}
+		if (i2c_bus->valid)
+			connector->polled = DRM_CONNECTOR_POLL_CONNECT;
 	} else
 		connector->polled = DRM_CONNECTOR_POLL_HPD;
-
 	connector->display_info.subpixel_order = subpixel_order;
 	drm_connector_register(connector);
 }

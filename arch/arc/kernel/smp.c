@@ -22,6 +22,7 @@
 #include <linux/atomic.h>
 #include <linux/cpumask.h>
 #include <linux/reboot.h>
+#include <linux/irq_work.h>
 #include <asm/processor.h>
 #include <asm/setup.h>
 #include <asm/mach_desc.h>
@@ -42,23 +43,18 @@ void __init smp_prepare_boot_cpu(void)
 }
 
 /*
- * Called from setup_arch() before calling setup_processor()
- *
- * - Initialise the CPU possible map early - this describes the CPUs
- *   which may be present or become present in the system.
- * - Call early smp init hook. This can initialize a specific multi-core
- *   IP which is say common to several platforms (hence not part of
- *   platform specific int_early() hook)
+ * Initialise the CPU possible map early - this describes the CPUs
+ * which may be present or become present in the system.
  */
 void __init smp_init_cpus(void)
 {
 	unsigned int i;
 
+	if (plat_smp_ops.map_cpus)
+		return plat_smp_ops.map_cpus(0);
+
 	for (i = 0; i < NR_CPUS; i++)
 		set_cpu_possible(i, true);
-
-	if (plat_smp_ops.init_early_smp)
-		plat_smp_ops.init_early_smp();
 }
 
 /* called from init ( ) =>  process 1 */
@@ -66,10 +62,17 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 {
 	int i;
 
+	init_cpu_topology();
+
+	store_cpu_topology(smp_processor_id());
+
 	/*
 	 * Initialise the present map, which describes the set of CPUs
 	 * actually populated at the present time.
 	 */
+	if (plat_smp_ops.map_cpus)
+		return plat_smp_ops.map_cpus(max_cpus);
+
 	for (i = 0; i < max_cpus; i++)
 		set_cpu_present(i, true);
 }
@@ -80,28 +83,34 @@ void __init smp_cpus_done(unsigned int max_cpus)
 }
 
 /*
- * Default smp boot helper for Run-on-reset case where all cores start off
- * together. Non-masters need to wait for Master to start running.
- * This is implemented using a flag in memory, which Non-masters spin-wait on.
- * Master sets it to cpu-id of core to "ungate" it.
+ * After power-up, a non Master CPU needs to wait for Master to kick start it
+ *
+ * The default implementation halts
+ *
+ * This relies on platform specific support allowing Master to directly set
+ * this CPU's PC (to be @first_lines_of_secondary() and kick start it.
+ *
+ * In lack of such h/w assist, platforms can override this function
+ *   - make this function busy-spin on a token, eventually set by Master
+ *     (from arc_platform_smp_wakeup_cpu())
+ *   - Once token is available, jump to @first_lines_of_secondary
+ *     (using inline asm).
+ *
+ * Alert: can NOT use stack here as it has not been determined/setup for CPU.
+ *        If it turns out to be elaborate, it's better to code it in assembly
+ *
  */
-static volatile int wake_flag;
-
-static void arc_default_smp_cpu_kick(int cpu, unsigned long pc)
+void __weak arc_platform_smp_wait_to_boot(int cpu)
 {
-	BUG_ON(cpu == 0);
-	wake_flag = cpu;
+	/*
+	 * As a hack for debugging - since debugger will single-step over the
+	 * FLAG insn - wrap the halt itself it in a self loop
+	 */
+	__asm__ __volatile__(
+	"1:		\n"
+	"	flag 1	\n"
+	"	b 1b	\n");
 }
-
-void arc_platform_smp_wait_to_boot(int cpu)
-{
-	while (wake_flag != cpu)
-		;
-
-	wake_flag = 0;
-	__asm__ __volatile__("j @first_lines_of_secondary	\n");
-}
-
 
 const char *arc_platform_smp_cpuinfo(void)
 {
@@ -126,17 +135,17 @@ void start_kernel_secondary(void)
 	current->active_mm = mm;
 	cpumask_set_cpu(cpu, mm_cpumask(mm));
 
+	/* Before we turn online */
+	if (machine_desc->init_smp)
+		machine_desc->init_smp(cpu);
+
 	notify_cpu_starting(cpu);
+
+	store_cpu_topology(cpu);
+
 	set_cpu_online(cpu, true);
 
 	pr_info("## CPU%u LIVE ##: Executing Code...\n", cpu);
-
-	/* Some SMP H/w setup - for each cpu */
-	if (plat_smp_ops.init_per_cpu)
-		plat_smp_ops.init_per_cpu(cpu);
-
-	if (machine_desc->init_per_cpu)
-		machine_desc->init_per_cpu(cpu);
 
 	arc_local_timer_setup();
 
@@ -161,14 +170,12 @@ int __cpu_up(unsigned int cpu, struct task_struct *idle)
 
 	secondary_idle_tsk = idle;
 
-	pr_info("Idle Task [%d] %p", cpu, idle);
-	pr_info("Trying to bring up CPU%u ...\n", cpu);
+	//pr_info("Idle Task [%d] %p", cpu, idle);
+	//pr_info("Trying to bring up CPU%u ...\n", cpu);
 
 	if (plat_smp_ops.cpu_kick)
 		plat_smp_ops.cpu_kick(cpu,
 				(unsigned long)first_lines_of_secondary);
-	else
-		arc_default_smp_cpu_kick(cpu, (unsigned long)NULL);
 
 	/* wait for 1 sec after kicking the secondary */
 	wait_till = jiffies + HZ;
@@ -204,6 +211,7 @@ enum ipi_msg_type {
 	IPI_RESCHEDULE = 1,
 	IPI_CALL_FUNC,
 	IPI_CPU_STOP,
+	IPI_IRQ_WORK,
 };
 
 /*
@@ -278,6 +286,14 @@ void arch_send_call_function_ipi_mask(const struct cpumask *mask)
 	ipi_send_msg(mask, IPI_CALL_FUNC);
 }
 
+#ifdef CONFIG_IRQ_WORK
+void arch_irq_work_raise(void)
+{
+	if (arch_irq_work_has_interrupt())
+		ipi_send_msg_one(smp_processor_id(), IPI_IRQ_WORK);
+}
+#endif
+
 /*
  * ipi_cpu_stop - handle IPI from smp_send_stop()
  */
@@ -302,6 +318,12 @@ static inline int __do_IPI(unsigned long msg)
 	case IPI_CPU_STOP:
 		ipi_cpu_stop();
 		break;
+
+#ifdef CONFIG_IRQ_WORK
+	case IPI_IRQ_WORK:
+		irq_work_run();
+		break;
+#endif
 
 	default:
 		rc = 1;

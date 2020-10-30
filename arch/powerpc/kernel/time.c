@@ -99,17 +99,16 @@ static struct clocksource clocksource_timebase = {
 
 static int decrementer_set_next_event(unsigned long evt,
 				      struct clock_event_device *dev);
-static int decrementer_shutdown(struct clock_event_device *evt);
+static void decrementer_set_mode(enum clock_event_mode mode,
+				 struct clock_event_device *dev);
 
 struct clock_event_device decrementer_clockevent = {
-	.name			= "decrementer",
-	.rating			= 200,
-	.irq			= 0,
-	.set_next_event		= decrementer_set_next_event,
-	.set_state_shutdown	= decrementer_shutdown,
-	.tick_resume		= decrementer_shutdown,
-	.features		= CLOCK_EVT_FEAT_ONESHOT |
-				  CLOCK_EVT_FEAT_C3STOP,
+	.name           = "decrementer",
+	.rating         = 200,
+	.irq            = 0,
+	.set_next_event = decrementer_set_next_event,
+	.set_mode       = decrementer_set_mode,
+	.features       = CLOCK_EVT_FEAT_ONESHOT | CLOCK_EVT_FEAT_C3STOP,
 };
 EXPORT_SYMBOL(decrementer_clockevent);
 
@@ -686,20 +685,12 @@ static int __init get_freq(char *name, int cells, unsigned long *val)
 static void start_cpu_decrementer(void)
 {
 #if defined(CONFIG_BOOKE) || defined(CONFIG_40x)
-	unsigned int tcr;
-
 	/* Clear any pending timer interrupts */
 	mtspr(SPRN_TSR, TSR_ENW | TSR_WIS | TSR_DIS | TSR_FIS);
 
-	tcr = mfspr(SPRN_TCR);
-	/*
-	 * The watchdog may have already been enabled by u-boot. So leave
-	 * TRC[WP] (Watchdog Period) alone.
-	 */
-	tcr &= TCR_WP_MASK;	/* Clear all bits except for TCR[WP] */
-	tcr |= TCR_DIE;		/* Enable decrementer */
-	mtspr(SPRN_TCR, tcr);
-#endif
+	/* Enable decrementer interrupt */
+	mtspr(SPRN_TCR, TCR_DIE);
+#endif /* defined(CONFIG_BOOKE) || defined(CONFIG_40x) */
 }
 
 void __init generic_calibrate_decr(void)
@@ -871,10 +862,11 @@ static int decrementer_set_next_event(unsigned long evt,
 	return 0;
 }
 
-static int decrementer_shutdown(struct clock_event_device *dev)
+static void decrementer_set_mode(enum clock_event_mode mode,
+				 struct clock_event_device *dev)
 {
-	decrementer_set_next_event(DECREMENTER_MAX, dev);
-	return 0;
+	if (mode != CLOCK_EVT_MODE_ONESHOT)
+		decrementer_set_next_event(DECREMENTER_MAX, dev);
 }
 
 /* Interrupt handler for the timer broadcast IPI */

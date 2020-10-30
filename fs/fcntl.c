@@ -113,10 +113,6 @@ void f_setown(struct file *filp, unsigned long arg, int force)
 	int who = arg;
 	type = PIDTYPE_PID;
 	if (who < 0) {
-		/* avoid overflow below */
-		if (who == INT_MIN)
-			return;
-
 		type = PIDTYPE_PGID;
 		who = -who;
 	}
@@ -357,22 +353,10 @@ static int check_fcntl_cmd(unsigned cmd)
 	return 0;
 }
 
-#ifdef CONFIG_POPCORN
-#include <popcorn/types.h>
-#include <popcorn/syscall_server.h>
-#endif
-
 SYSCALL_DEFINE3(fcntl, unsigned int, fd, unsigned int, cmd, unsigned long, arg)
-{
-	struct fd f;
+{	
+	struct fd f = fdget_raw(fd);
 	long err = -EBADF;
-#ifdef CONFIG_POPCORN
-	if (distributed_remote_process(current)) {
-		err = redirect_fcntl(fd, cmd, arg);
-		return err;
-	}
-#endif
-	f = fdget_raw(fd);
 
 	if (!f.file)
 		goto out;
@@ -756,10 +740,16 @@ static int __init fcntl_init(void)
 	 * Exceptions: O_NONBLOCK is a two bit define on parisc; O_NDELAY
 	 * is defined as O_NONBLOCK on some platforms and not on others.
 	 */
-	BUILD_BUG_ON(21 - 1 /* for O_RDONLY being 0 */ !=
-		HWEIGHT32(
-			(VALID_OPEN_FLAGS & ~(O_NONBLOCK | O_NDELAY)) |
-			__FMODE_EXEC | __FMODE_NONOTIFY));
+	BUILD_BUG_ON(21 - 1 /* for O_RDONLY being 0 */ != HWEIGHT32(
+		O_RDONLY	| O_WRONLY	| O_RDWR	|
+		O_CREAT		| O_EXCL	| O_NOCTTY	|
+		O_TRUNC		| O_APPEND	| /* O_NONBLOCK	| */
+		__O_SYNC	| O_DSYNC	| FASYNC	|
+		O_DIRECT	| O_LARGEFILE	| O_DIRECTORY	|
+		O_NOFOLLOW	| O_NOATIME	| O_CLOEXEC	|
+		__FMODE_EXEC	| O_PATH	| __O_TMPFILE	|
+		__FMODE_NONOTIFY
+		));
 
 	fasync_cache = kmem_cache_create("fasync_cache",
 		sizeof(struct fasync_struct), 0, SLAB_PANIC, NULL);

@@ -69,18 +69,20 @@ void amdgpu_connector_hotplug(struct drm_connector *connector)
 		/* don't do anything if sink is not display port, i.e.,
 		 * passive dp->(dvi|hdmi) adaptor
 		 */
-		if (dig_connector->dp_sink_type == CONNECTOR_OBJECT_ID_DISPLAYPORT &&
-		    amdgpu_display_hpd_sense(adev, amdgpu_connector->hpd.hpd) &&
-		    amdgpu_atombios_dp_needs_link_train(amdgpu_connector)) {
-			/* Don't start link training before we have the DPCD */
-			if (amdgpu_atombios_dp_get_dpcd(amdgpu_connector))
-				return;
-
-			/* Turn the connector off and back on immediately, which
-			 * will trigger link training
-			 */
-			drm_helper_connector_dpms(connector, DRM_MODE_DPMS_OFF);
-			drm_helper_connector_dpms(connector, DRM_MODE_DPMS_ON);
+		if (dig_connector->dp_sink_type == CONNECTOR_OBJECT_ID_DISPLAYPORT) {
+			int saved_dpms = connector->dpms;
+			/* Only turn off the display if it's physically disconnected */
+			if (!amdgpu_display_hpd_sense(adev, amdgpu_connector->hpd.hpd)) {
+				drm_helper_connector_dpms(connector, DRM_MODE_DPMS_OFF);
+			} else if (amdgpu_atombios_dp_needs_link_train(amdgpu_connector)) {
+				/* set it to OFF so that drm_helper_connector_dpms()
+				 * won't return immediately since the current state
+				 * is ON at this point.
+				 */
+				connector->dpms = DRM_MODE_DPMS_OFF;
+				drm_helper_connector_dpms(connector, DRM_MODE_DPMS_ON);
+			}
+			connector->dpms = saved_dpms;
 		}
 	}
 }
@@ -187,12 +189,12 @@ int amdgpu_connector_get_monitor_bpc(struct drm_connector *connector)
 				bpc = 8;
 				DRM_DEBUG("%s: HDMI deep color 10 bpc exceeds max tmds clock. Using %d bpc.\n",
 					  connector->name, bpc);
+			} else if (bpc > 8) {
+				/* max_tmds_clock missing, but hdmi spec mandates it for deep color. */
+				DRM_DEBUG("%s: Required max tmds clock for HDMI deep color missing. Using 8 bpc.\n",
+					  connector->name);
+				bpc = 8;
 			}
-		} else if (bpc > 8) {
-			/* max_tmds_clock missing, but hdmi spec mandates it for deep color. */
-			DRM_DEBUG("%s: Required max tmds clock for HDMI deep color missing. Using 8 bpc.\n",
-				  connector->name);
-			bpc = 8;
 		}
 	}
 
@@ -732,11 +734,9 @@ amdgpu_connector_lvds_detect(struct drm_connector *connector, bool force)
 	enum drm_connector_status ret = connector_status_disconnected;
 	int r;
 
-	if (!drm_kms_helper_is_poll_worker()) {
-		r = pm_runtime_get_sync(connector->dev->dev);
-		if (r < 0)
-			return connector_status_disconnected;
-	}
+	r = pm_runtime_get_sync(connector->dev->dev);
+	if (r < 0)
+		return connector_status_disconnected;
 
 	if (encoder) {
 		struct amdgpu_encoder *amdgpu_encoder = to_amdgpu_encoder(encoder);
@@ -755,12 +755,8 @@ amdgpu_connector_lvds_detect(struct drm_connector *connector, bool force)
 	/* check acpi lid status ??? */
 
 	amdgpu_connector_update_scratch_regs(connector, ret);
-
-	if (!drm_kms_helper_is_poll_worker()) {
-		pm_runtime_mark_last_busy(connector->dev->dev);
-		pm_runtime_put_autosuspend(connector->dev->dev);
-	}
-
+	pm_runtime_mark_last_busy(connector->dev->dev);
+	pm_runtime_put_autosuspend(connector->dev->dev);
 	return ret;
 }
 
@@ -861,11 +857,9 @@ amdgpu_connector_vga_detect(struct drm_connector *connector, bool force)
 	enum drm_connector_status ret = connector_status_disconnected;
 	int r;
 
-	if (!drm_kms_helper_is_poll_worker()) {
-		r = pm_runtime_get_sync(connector->dev->dev);
-		if (r < 0)
-			return connector_status_disconnected;
-	}
+	r = pm_runtime_get_sync(connector->dev->dev);
+	if (r < 0)
+		return connector_status_disconnected;
 
 	encoder = amdgpu_connector_best_single_encoder(connector);
 	if (!encoder)
@@ -919,10 +913,8 @@ amdgpu_connector_vga_detect(struct drm_connector *connector, bool force)
 	amdgpu_connector_update_scratch_regs(connector, ret);
 
 out:
-	if (!drm_kms_helper_is_poll_worker()) {
-		pm_runtime_mark_last_busy(connector->dev->dev);
-		pm_runtime_put_autosuspend(connector->dev->dev);
-	}
+	pm_runtime_mark_last_busy(connector->dev->dev);
+	pm_runtime_put_autosuspend(connector->dev->dev);
 
 	return ret;
 }
@@ -984,11 +976,9 @@ amdgpu_connector_dvi_detect(struct drm_connector *connector, bool force)
 	enum drm_connector_status ret = connector_status_disconnected;
 	bool dret = false, broken_edid = false;
 
-	if (!drm_kms_helper_is_poll_worker()) {
-		r = pm_runtime_get_sync(connector->dev->dev);
-		if (r < 0)
-			return connector_status_disconnected;
-	}
+	r = pm_runtime_get_sync(connector->dev->dev);
+	if (r < 0)
+		return connector_status_disconnected;
 
 	if (!force && amdgpu_connector_check_hpd_status_unchanged(connector)) {
 		ret = connector->status;
@@ -1113,10 +1103,8 @@ out:
 	amdgpu_connector_update_scratch_regs(connector, ret);
 
 exit:
-	if (!drm_kms_helper_is_poll_worker()) {
-		pm_runtime_mark_last_busy(connector->dev->dev);
-		pm_runtime_put_autosuspend(connector->dev->dev);
-	}
+	pm_runtime_mark_last_busy(connector->dev->dev);
+	pm_runtime_put_autosuspend(connector->dev->dev);
 
 	return ret;
 }
@@ -1358,11 +1346,9 @@ amdgpu_connector_dp_detect(struct drm_connector *connector, bool force)
 	struct drm_encoder *encoder = amdgpu_connector_best_single_encoder(connector);
 	int r;
 
-	if (!drm_kms_helper_is_poll_worker()) {
-		r = pm_runtime_get_sync(connector->dev->dev);
-		if (r < 0)
-			return connector_status_disconnected;
-	}
+	r = pm_runtime_get_sync(connector->dev->dev);
+	if (r < 0)
+		return connector_status_disconnected;
 
 	if (!force && amdgpu_connector_check_hpd_status_unchanged(connector)) {
 		ret = connector->status;
@@ -1430,10 +1416,8 @@ amdgpu_connector_dp_detect(struct drm_connector *connector, bool force)
 
 	amdgpu_connector_update_scratch_regs(connector, ret);
 out:
-	if (!drm_kms_helper_is_poll_worker()) {
-		pm_runtime_mark_last_busy(connector->dev->dev);
-		pm_runtime_put_autosuspend(connector->dev->dev);
-	}
+	pm_runtime_mark_last_busy(connector->dev->dev);
+	pm_runtime_put_autosuspend(connector->dev->dev);
 
 	return ret;
 }
@@ -1701,6 +1685,7 @@ amdgpu_connector_add(struct amdgpu_device *adev,
 						   DRM_MODE_SCALE_NONE);
 			/* no HPD on analog connectors */
 			amdgpu_connector->hpd.hpd = AMDGPU_HPD_NONE;
+			connector->polled = DRM_CONNECTOR_POLL_CONNECT;
 			connector->interlace_allowed = true;
 			connector->doublescan_allowed = true;
 			break;
@@ -1903,10 +1888,8 @@ amdgpu_connector_add(struct amdgpu_device *adev,
 	}
 
 	if (amdgpu_connector->hpd.hpd == AMDGPU_HPD_NONE) {
-		if (i2c_bus->valid) {
-			connector->polled = DRM_CONNECTOR_POLL_CONNECT |
-			                    DRM_CONNECTOR_POLL_DISCONNECT;
-		}
+		if (i2c_bus->valid)
+			connector->polled = DRM_CONNECTOR_POLL_CONNECT;
 	} else
 		connector->polled = DRM_CONNECTOR_POLL_HPD;
 

@@ -92,7 +92,7 @@ static int exynos_pd_power(struct generic_pm_domain *domain, bool power_on)
 			if (IS_ERR(pd->clk[i]))
 				break;
 
-			if (IS_ERR(pd->pclk[i]))
+			if (IS_ERR(pd->clk[i]))
 				continue; /* Skip on first power up */
 			if (clk_set_parent(pd->clk[i], pd->pclk[i]))
 				pr_err("%s: error setting parent to clock%d\n",
@@ -200,15 +200,15 @@ no_clk:
 		args.args_count = 0;
 		child_domain = of_genpd_get_from_provider(&args);
 		if (IS_ERR(child_domain))
-			continue;
+			goto next_pd;
 
 		if (of_parse_phandle_with_args(np, "power-domains",
 					 "#power-domain-cells", 0, &args) != 0)
-			continue;
+			goto next_pd;
 
 		parent_domain = of_genpd_get_from_provider(&args);
 		if (IS_ERR(parent_domain))
-			continue;
+			goto next_pd;
 
 		if (pm_genpd_add_subdomain(parent_domain, child_domain))
 			pr_warn("%s failed to add subdomain: %s\n",
@@ -216,6 +216,8 @@ no_clk:
 		else
 			pr_info("%s has as child subdomain: %s.\n",
 				parent_domain->name, child_domain->name);
+next_pd:
+		of_node_put(np);
 	}
 
 	return 0;

@@ -61,7 +61,6 @@
 #include <linux/string.h>
 #include <linux/dma-debug.h>
 #include <linux/debugfs.h>
-#include <linux/userfaultfd_k.h>
 
 #include <asm/io.h>
 #include <asm/pgalloc.h>
@@ -72,13 +71,7 @@
 
 #include "internal.h"
 
-#ifdef CONFIG_POPCORN
-#include <linux/delay.h>
-#include <popcorn/page_server.h>
-#include <popcorn/process_server.h>
-#endif
-
-#if defined(LAST_CPUPID_NOT_IN_PAGE_FLAGS) && !defined(CONFIG_COMPILE_TEST)
+#ifdef LAST_CPUPID_NOT_IN_PAGE_FLAGS
 #warning Unfortunate NUMA and NUMA Balancing config, growing page-frame for last_cpupid.
 #endif
 
@@ -112,11 +105,7 @@ int randomize_va_space __read_mostly =
 #ifdef CONFIG_COMPAT_BRK
 					1;
 #else
-#ifdef CONFIG_POPCORN
-					0;	/* Popcorn needs address space randomization to be turned off for the time being */
-#else
 					2;
-#endif
 #endif
 
 static int __init disable_randmaps(char *s)
@@ -191,22 +180,22 @@ static void check_sync_rss_stat(struct task_struct *task)
 
 #ifdef HAVE_GENERIC_MMU_GATHER
 
-static bool tlb_next_batch(struct mmu_gather *tlb)
+static int tlb_next_batch(struct mmu_gather *tlb)
 {
 	struct mmu_gather_batch *batch;
 
 	batch = tlb->active;
 	if (batch->next) {
 		tlb->active = batch->next;
-		return true;
+		return 1;
 	}
 
 	if (tlb->batch_count == MAX_GATHER_BATCH_COUNT)
-		return false;
+		return 0;
 
 	batch = (void *)__get_free_pages(GFP_NOWAIT | __GFP_NOWARN, 0);
 	if (!batch)
-		return false;
+		return 0;
 
 	tlb->batch_count++;
 	batch->next = NULL;
@@ -216,7 +205,7 @@ static bool tlb_next_batch(struct mmu_gather *tlb)
 	tlb->active->next = batch;
 	tlb->active = batch;
 
-	return true;
+	return 1;
 }
 
 /* tlb_gather_mmu
@@ -807,46 +796,6 @@ out:
 	return pfn_to_page(pfn);
 }
 
-#ifdef CONFIG_TRANSPARENT_HUGEPAGE
-struct page *vm_normal_page_pmd(struct vm_area_struct *vma, unsigned long addr,
-				pmd_t pmd)
-{
-	unsigned long pfn = pmd_pfn(pmd);
-
-	/*
-	 * There is no pmd_special() but there may be special pmds, e.g.
-	 * in a direct-access (dax) mapping, so let's just replicate the
-	 * !HAVE_PTE_SPECIAL case from vm_normal_page() here.
-	 */
-	if (unlikely(vma->vm_flags & (VM_PFNMAP|VM_MIXEDMAP))) {
-		if (vma->vm_flags & VM_MIXEDMAP) {
-			if (!pfn_valid(pfn))
-				return NULL;
-			goto out;
-		} else {
-			unsigned long off;
-			off = (addr - vma->vm_start) >> PAGE_SHIFT;
-			if (pfn == vma->vm_pgoff + off)
-				return NULL;
-			if (!is_cow_mapping(vma->vm_flags))
-				return NULL;
-		}
-	}
-
-	if (is_zero_pfn(pfn))
-		return NULL;
-	if (unlikely(pfn > highest_memmap_pfn))
-		return NULL;
-
-	/*
-	 * NOTE! We still have PageReserved() pages in the page tables.
-	 * eg. VDSO mappings can cause them to exist.
-	 */
-out:
-	return pfn_to_page(pfn);
-}
-#endif
-
 /*
  * copy one vm_area from one task to the other. Assumes the page tables
  * already present in the new task to be cleared in the whole range
@@ -1137,17 +1086,12 @@ again:
 	init_rss_vec(rss);
 	start_pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
 	pte = start_pte;
-	flush_tlb_batched_pending(mm);
 	arch_enter_lazy_mmu_mode();
 	do {
 		pte_t ptent = *pte;
 		if (pte_none(ptent)) {
 			continue;
 		}
-
-#ifdef CONFIG_POPCORN
-		page_server_zap_pte(vma, addr, pte, &ptent);
-#endif
 
 		if (pte_present(ptent)) {
 			struct page *page;
@@ -2004,20 +1948,6 @@ static inline void cow_user_page(struct page *dst, struct page *src, unsigned lo
 		copy_user_highpage(dst, src, va, vma);
 }
 
-static gfp_t __get_fault_gfp_mask(struct vm_area_struct *vma)
-{
-	struct file *vm_file = vma->vm_file;
-
-	if (vm_file)
-		return mapping_gfp_mask(vm_file->f_mapping) | __GFP_FS | __GFP_IO;
-
-	/*
-	 * Special mappings (e.g. VDSO) do not have any file so fake
-	 * a default GFP_KERNEL for them.
-	 */
-	return GFP_KERNEL;
-}
-
 /*
  * Notify the address space that the page is about to become writable so that
  * it can prohibit this or wait for the page to get into an appropriate state.
@@ -2033,7 +1963,6 @@ static int do_page_mkwrite(struct vm_area_struct *vma, struct page *page,
 	vmf.virtual_address = (void __user *)(address & PAGE_MASK);
 	vmf.pgoff = page->index;
 	vmf.flags = FAULT_FLAG_WRITE|FAULT_FLAG_MKWRITE;
-	vmf.gfp_mask = __get_fault_gfp_mask(vma);
 	vmf.page = page;
 	vmf.cow_page = NULL;
 
@@ -2692,6 +2621,40 @@ out_release:
 }
 
 /*
+ * This is like a special single-page "expand_{down|up}wards()",
+ * except we must first make sure that 'address{-|+}PAGE_SIZE'
+ * doesn't hit another vma.
+ */
+static inline int check_stack_guard_page(struct vm_area_struct *vma, unsigned long address)
+{
+	address &= PAGE_MASK;
+	if ((vma->vm_flags & VM_GROWSDOWN) && address == vma->vm_start) {
+		struct vm_area_struct *prev = vma->vm_prev;
+
+		/*
+		 * Is there a mapping abutting this one below?
+		 *
+		 * That's only ok if it's the same stack mapping
+		 * that has gotten split..
+		 */
+		if (prev && prev->vm_end == address)
+			return prev->vm_flags & VM_GROWSDOWN ? 0 : -ENOMEM;
+
+		return expand_downwards(vma, address - PAGE_SIZE);
+	}
+	if ((vma->vm_flags & VM_GROWSUP) && address + PAGE_SIZE == vma->vm_end) {
+		struct vm_area_struct *next = vma->vm_next;
+
+		/* As VM_GROWSDOWN but s/below/above/ */
+		if (next && next->vm_start == address + PAGE_SIZE)
+			return next->vm_flags & VM_GROWSUP ? 0 : -ENOMEM;
+
+		return expand_upwards(vma, address + PAGE_SIZE);
+	}
+	return 0;
+}
+
+/*
  * We enter with non-exclusive mmap_sem (to exclude vma changes,
  * but allow concurrent faults), and pte mapped but not yet locked.
  * We return with mmap_sem still held, but pte unmapped and unlocked.
@@ -2711,6 +2674,10 @@ static int do_anonymous_page(struct mm_struct *mm, struct vm_area_struct *vma,
 	if (vma->vm_flags & VM_SHARED)
 		return VM_FAULT_SIGBUS;
 
+	/* Check if we need to add a guard page to the stack */
+	if (check_stack_guard_page(vma, address) < 0)
+		return VM_FAULT_SIGSEGV;
+
 	/* Use the zero-page for reads */
 	if (!(flags & FAULT_FLAG_WRITE) && !mm_forbids_zeropage(mm)) {
 		entry = pte_mkspecial(pfn_pte(my_zero_pfn(address),
@@ -2718,12 +2685,6 @@ static int do_anonymous_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		page_table = pte_offset_map_lock(mm, pmd, address, &ptl);
 		if (!pte_none(*page_table))
 			goto unlock;
-		/* Deliver the page fault to userland, check inside PT lock */
-		if (userfaultfd_missing(vma)) {
-			pte_unmap_unlock(page_table, ptl);
-			return handle_userfault(vma, address, flags,
-						VM_UFFD_MISSING);
-		}
 		goto setpte;
 	}
 
@@ -2751,15 +2712,6 @@ static int do_anonymous_page(struct mm_struct *mm, struct vm_area_struct *vma,
 	page_table = pte_offset_map_lock(mm, pmd, address, &ptl);
 	if (!pte_none(*page_table))
 		goto release;
-
-	/* Deliver the page fault to userland, check inside PT lock */
-	if (userfaultfd_missing(vma)) {
-		pte_unmap_unlock(page_table, ptl);
-		mem_cgroup_cancel_charge(page, memcg);
-		page_cache_release(page);
-		return handle_userfault(vma, address, flags,
-					VM_UFFD_MISSING);
-	}
 
 	inc_mm_counter_fast(mm, MM_ANONPAGES);
 	page_add_new_anon_rmap(page, vma, address);
@@ -2799,7 +2751,6 @@ static int __do_fault(struct vm_area_struct *vma, unsigned long address,
 	vmf.pgoff = pgoff;
 	vmf.flags = flags;
 	vmf.page = NULL;
-	vmf.gfp_mask = __get_fault_gfp_mask(vma);
 	vmf.cow_page = cow_page;
 
 	ret = vma->vm_ops->fault(vma, &vmf);
@@ -2966,7 +2917,6 @@ static void do_fault_around(struct vm_area_struct *vma, unsigned long address,
 	vmf.pgoff = pgoff;
 	vmf.max_pgoff = max_pgoff;
 	vmf.flags = flags;
-	vmf.gfp_mask = __get_fault_gfp_mask(vma);
 	vma->vm_ops->map_pages(vma, &vmf);
 }
 
@@ -3266,27 +3216,6 @@ out:
 	return 0;
 }
 
-static int create_huge_pmd(struct mm_struct *mm, struct vm_area_struct *vma,
-			unsigned long address, pmd_t *pmd, unsigned int flags)
-{
-	if (vma_is_anonymous(vma))
-		return do_huge_pmd_anonymous_page(mm, vma, address, pmd, flags);
-	if (vma->vm_ops->pmd_fault)
-		return vma->vm_ops->pmd_fault(vma, address, pmd, flags);
-	return VM_FAULT_FALLBACK;
-}
-
-static int wp_huge_pmd(struct mm_struct *mm, struct vm_area_struct *vma,
-			unsigned long address, pmd_t *pmd, pmd_t orig_pmd,
-			unsigned int flags)
-{
-	if (vma_is_anonymous(vma))
-		return do_huge_pmd_wp_page(mm, vma, address, pmd, orig_pmd);
-	if (vma->vm_ops->pmd_fault)
-		return vma->vm_ops->pmd_fault(vma, address, pmd, flags);
-	return VM_FAULT_FALLBACK;
-}
-
 /*
  * These routines also need to handle stuff like marking pages dirty
  * and/or accessed for architectures that don't do it in hardware (most
@@ -3320,36 +3249,15 @@ static int handle_pte_fault(struct mm_struct *mm,
 	 */
 	entry = *pte;
 	barrier();
-#ifdef CONFIG_POPCORN
-	if (distributed_process(current)) {
-		int ret = page_server_handle_pte_fault(
-				mm, vma, address, pmd, pte, entry, flags);
-		if (ret == VM_FAULT_RETRY) {
-			int backoff = ++current->backoff_weight;
-			PGPRINTK("  [%d] backoff %d\n", current->pid, backoff);
-			if (backoff <= 10) {
-				udelay(backoff * 100);
-			} else {
-				msleep(backoff - 10);
-			}
-		} else {
-			current->backoff_weight /= 2;
-		}
-		if (ret != VM_FAULT_CONTINUE) return ret;
-	}
-#endif
 	if (!pte_present(entry)) {
 		if (pte_none(entry)) {
-			if (vma_is_anonymous(vma))
-				return do_anonymous_page(mm, vma, address,
-							 pte, pmd, flags);
-			else
+			if (vma->vm_ops)
 				return do_fault(mm, vma, address, pte, pmd,
 						flags, entry);
+
+			return do_anonymous_page(mm, vma, address, pte, pmd,
+					flags);
 		}
-#ifdef CONFIG_POPCORN
-		page_server_panic(true, mm, address, pte, entry);
-#endif
 		return do_swap_page(mm, vma, address,
 					pte, pmd, flags, entry);
 	}
@@ -3385,152 +3293,6 @@ unlock:
 	return 0;
 }
 
-#ifdef CONFIG_POPCORN
-struct page *get_normal_page(struct vm_area_struct *vma, unsigned long addr, pte_t *pte)
-{
-	struct mm_struct *mm = vma->vm_mm;
-	struct mem_cgroup *memcg;
-	struct page *page;
-	pte_t entry = *pte;
-
-	if ((page = vm_normal_page(vma, addr, entry))) return page;
-
-	BUG_ON(!is_zero_pfn(pte_pfn(entry)) && "Cannot handle this special page");
-
-	page = alloc_zeroed_user_highpage_movable(vma, addr);
-	if (!page) return NULL;
-
-	if (mem_cgroup_try_charge(page, mm, GFP_KERNEL, &memcg)) {
-		page_cache_release(page);
-		return NULL;
-	}
-
-	__SetPageUptodate(page);
-
-	entry = mk_pte(page, vma->vm_page_prot);
-	if (vma->vm_flags & VM_WRITE)
-		entry = pte_mkwrite(pte_mkdirty(entry));
-
-	inc_mm_counter_fast(mm, MM_ANONPAGES);
-	page_add_new_anon_rmap(page, vma, addr);
-	mem_cgroup_commit_charge(page, memcg, false);
-	lru_cache_add_active_or_unevictable(page, vma);
-
-	set_pte_at_notify(mm, addr, pte, entry);
-	update_mmu_cache(vma, addr, pte);
-	flush_tlb_page(vma, addr);
-
-	return page;
-}
-
-int handle_pte_fault_origin(struct mm_struct *mm,
-		struct vm_area_struct *vma, unsigned long address,
-		pte_t *pte, pmd_t *pmd, unsigned int flags)
-{
-	struct mem_cgroup *memcg;
-	struct page *page;
-	spinlock_t *ptl;
-	pte_t entry = *pte;
-	barrier();
-
-	if (!vma_is_anonymous(vma))
-		return do_fault(mm, vma, address, pte, pmd, flags, entry);
-
-	/**
-	 * Following is for anonymous page. Almost same to do_anonymos_page
-	 * except it allocates page upon read
-	 */
-	pte_unmap(pte);
-
-	if (vma->vm_flags & VM_SHARED) return VM_FAULT_SIGBUS;
-
-	if (unlikely(anon_vma_prepare(vma)))
-		return VM_FAULT_OOM;
-
-	page = alloc_zeroed_user_highpage_movable(vma, address);
-	if (!page)
-		return VM_FAULT_OOM;
-
-	if (mem_cgroup_try_charge(page, mm, GFP_KERNEL, &memcg)) {
-		page_cache_release(page);
-		return VM_FAULT_OOM;
-	}
-
-	__SetPageUptodate(page);
-
-	entry = mk_pte(page, vma->vm_page_prot);
-	if (vma->vm_flags & VM_WRITE)
-		entry = pte_mkwrite(pte_mkdirty(entry));
-
-	pte = pte_offset_map_lock(mm, pmd, address, &ptl);
-	if (!pte_none(*pte)) {
-		/* Somebody already attached a page */
-		mem_cgroup_cancel_charge(page, memcg);
-		page_cache_release(page);
-	} else {
-		inc_mm_counter_fast(mm, MM_ANONPAGES);
-		page_add_new_anon_rmap(page, vma, address);
-		mem_cgroup_commit_charge(page, memcg, false);
-		lru_cache_add_active_or_unevictable(page, vma);
-
-		set_pte_at(mm, address, pte, entry);
-		/* No need to invalidate - it was non-present before */
-		update_mmu_cache(vma, address, pte);
-	}
-	pte_unmap_unlock(pte, ptl);
-	return 0;
-}
-
-int cow_file_at_origin(struct mm_struct *mm, struct vm_area_struct *vma, unsigned long addr, pte_t *pte)
-{
-	struct page *new_page, *old_page;
-	struct mem_cgroup *memcg;
-	pte_t entry;
-
-	/**
-	 * Following is very similar to do_wp_page() and wp_page_copy()
-	 */
-	if (anon_vma_prepare(vma)) return VM_FAULT_OOM;
-
-	new_page = alloc_page_vma(GFP_HIGHUSER_MOVABLE, vma, addr);
-	if (!new_page) return VM_FAULT_OOM;
-
-	if (mem_cgroup_try_charge(new_page, mm, GFP_KERNEL, &memcg)) {
-		page_cache_release(new_page);
-		return VM_FAULT_OOM;
-	}
-
-	old_page = vm_normal_page(vma, addr, *pte);
-	BUG_ON(!old_page);
-	BUG_ON(PageAnon(old_page));
-
-	page_cache_get(old_page);
-
-	copy_user_highpage(new_page, old_page, addr, vma);
-	__SetPageUptodate(new_page);
-
-	dec_mm_counter_fast(mm, MM_FILEPAGES);
-	inc_mm_counter_fast(mm, MM_ANONPAGES);
-
-	flush_cache_page(vma, addr, pte_pfn(*pte));
-	entry = mk_pte(new_page, vma->vm_page_prot);
-	entry = maybe_mkwrite(pte_mkdirty(entry), vma);
-
-	ptep_clear_flush_notify(vma, addr, pte);
-	page_add_new_anon_rmap(new_page, vma, addr);
-	mem_cgroup_commit_charge(new_page, memcg, false);
-	lru_cache_add_active_or_unevictable(new_page, vma);
-
-	set_pte_at_notify(mm, addr, pte, entry);
-	update_mmu_cache(vma, addr, pte);
-
-	page_remove_rmap(old_page);
-	page_cache_release(old_page);
-
-	return 0;
-}
-#endif
-
 /*
  * By the time we get here, we already hold the mm semaphore
  *
@@ -3556,7 +3318,10 @@ static int __handle_mm_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	if (!pmd)
 		return VM_FAULT_OOM;
 	if (pmd_none(*pmd) && transparent_hugepage_enabled(vma)) {
-		int ret = create_huge_pmd(mm, vma, address, pmd, flags);
+		int ret = VM_FAULT_FALLBACK;
+		if (!vma->vm_ops)
+			ret = do_huge_pmd_anonymous_page(mm, vma, address,
+					pmd, flags);
 		if (!(ret & VM_FAULT_FALLBACK))
 			return ret;
 	} else {
@@ -3580,8 +3345,8 @@ static int __handle_mm_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 							     orig_pmd, pmd);
 
 			if (dirty && !pmd_write(orig_pmd)) {
-				ret = wp_huge_pmd(mm, vma, address, pmd,
-							orig_pmd, flags);
+				ret = do_huge_pmd_wp_page(mm, vma, address, pmd,
+							  orig_pmd);
 				if (!(ret & VM_FAULT_FALLBACK))
 					return ret;
 			} else {
@@ -3600,18 +3365,8 @@ static int __handle_mm_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	if (unlikely(pmd_none(*pmd)) &&
 	    unlikely(__pte_alloc(mm, vma, pmd, address)))
 		return VM_FAULT_OOM;
-	/*
-	 * If a huge pmd materialized under us just retry later.  Use
-	 * pmd_trans_unstable() instead of pmd_trans_huge() to ensure the pmd
-	 * didn't become pmd_trans_huge under us and then back to pmd_none, as
-	 * a result of MADV_DONTNEED running immediately after a huge pmd fault
-	 * in a different thread of this mm, in turn leading to a misleading
-	 * pmd_trans_huge() retval.  All we have to ensure is that it is a
-	 * regular pmd that we can walk with pte_offset_map() and we can do that
-	 * through an atomic read in C, which is what pmd_trans_unstable()
-	 * provides.
-	 */
-	if (unlikely(pmd_trans_unstable(pmd)))
+	/* if an huge pmd materialized from under us just retry later */
+	if (unlikely(pmd_trans_huge(*pmd)))
 		return 0;
 	/*
 	 * A regular pmd is established and it can't morph into a huge pmd
@@ -3639,9 +3394,6 @@ int handle_mm_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 
 	count_vm_event(PGFAULT);
 	mem_cgroup_count_vm_event(mm, PGFAULT);
-#ifdef CONFIG_POPCORN_STAT_PGFAULTS
-	page_server_start_mm_fault(address);
-#endif
 
 	/* do counter updates before entering really critical section. */
 	check_sync_rss_stat(current);
@@ -3666,10 +3418,6 @@ int handle_mm_fault(struct mm_struct *mm, struct vm_area_struct *vma,
                 if (task_in_memcg_oom(current) && !(ret & VM_FAULT_OOM))
                         mem_cgroup_oom_synchronize(false);
 	}
-
-#ifdef CONFIG_POPCORN_STAT_PGFAULTS
-	ret = page_server_end_mm_fault(ret);
-#endif
 
 	return ret;
 }

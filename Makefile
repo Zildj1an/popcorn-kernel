@@ -1,6 +1,6 @@
 VERSION = 4
-PATCHLEVEL = 20
-SUBLEVEL = 17
+PATCHLEVEL = 2
+SUBLEVEL = 0
 EXTRAVERSION = 
 NAME = popcorn embedded
 
@@ -439,6 +439,7 @@ scripts_basic:
 	$(Q)$(MAKE) $(build)=scripts/basic
 	$(Q)rm -f .tmp_quiet_recordmcount
 
+# To avoid any implicit rule to kick in, define an empty command.
 scripts/basic/%: scripts_basic ;
 
 PHONY += outputmakefile

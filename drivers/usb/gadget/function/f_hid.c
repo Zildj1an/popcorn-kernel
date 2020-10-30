@@ -223,13 +223,6 @@ static ssize_t f_hidg_read(struct file *file, char __user *buffer,
 	/* pick the first one */
 	list = list_first_entry(&hidg->completed_out_req,
 				struct f_hidg_req_list, list);
-
-	/*
-	 * Remove this from list to protect it from beign free()
-	 * while host disables our function
-	 */
-	list_del(&list->list);
-
 	req = list->req;
 	count = min_t(unsigned int, count, req->actual - list->pos);
 	spin_unlock_irqrestore(&hidg->spinlock, flags);
@@ -245,20 +238,15 @@ static ssize_t f_hidg_read(struct file *file, char __user *buffer,
 	 * call, taking into account its current read position.
 	 */
 	if (list->pos == req->actual) {
+		spin_lock_irqsave(&hidg->spinlock, flags);
+		list_del(&list->list);
 		kfree(list);
+		spin_unlock_irqrestore(&hidg->spinlock, flags);
 
 		req->length = hidg->report_length;
 		ret = usb_ep_queue(hidg->out_ep, req, GFP_KERNEL);
-		if (ret < 0) {
-			free_ep_req(hidg->out_ep, req);
+		if (ret < 0)
 			return ret;
-		}
-	} else {
-		spin_lock_irqsave(&hidg->spinlock, flags);
-		list_add(&list->list, &hidg->completed_out_req);
-		spin_unlock_irqrestore(&hidg->spinlock, flags);
-
-		wake_up(&hidg->read_queue);
 	}
 
 	return count;
@@ -502,18 +490,17 @@ static void hidg_disable(struct usb_function *f)
 {
 	struct f_hidg *hidg = func_to_hidg(f);
 	struct f_hidg_req_list *list, *next;
-	unsigned long flags;
 
 	usb_ep_disable(hidg->in_ep);
-	usb_ep_disable(hidg->out_ep);
+	hidg->in_ep->driver_data = NULL;
 
-	spin_lock_irqsave(&hidg->spinlock, flags);
+	usb_ep_disable(hidg->out_ep);
+	hidg->out_ep->driver_data = NULL;
+
 	list_for_each_entry_safe(list, next, &hidg->completed_out_req, list) {
-		free_ep_req(hidg->out_ep, list->req);
 		list_del(&list->list);
 		kfree(list);
 	}
-	spin_unlock_irqrestore(&hidg->spinlock, flags);
 }
 
 static int hidg_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
@@ -526,7 +513,8 @@ static int hidg_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 
 	if (hidg->in_ep != NULL) {
 		/* restart endpoint */
-		usb_ep_disable(hidg->in_ep);
+		if (hidg->in_ep->driver_data != NULL)
+			usb_ep_disable(hidg->in_ep);
 
 		status = config_ep_by_speed(f->config->cdev->gadget, f,
 					    hidg->in_ep);
@@ -545,7 +533,8 @@ static int hidg_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 
 	if (hidg->out_ep != NULL) {
 		/* restart endpoint */
-		usb_ep_disable(hidg->out_ep);
+		if (hidg->out_ep->driver_data != NULL)
+			usb_ep_disable(hidg->out_ep);
 
 		status = config_ep_by_speed(f->config->cdev->gadget, f,
 					    hidg->out_ep);
@@ -555,7 +544,7 @@ static int hidg_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 		}
 		status = usb_ep_enable(hidg->out_ep);
 		if (status < 0) {
-			ERROR(cdev, "Enable OUT endpoint FAILED!\n");
+			ERROR(cdev, "Enable IN endpoint FAILED!\n");
 			goto fail;
 		}
 		hidg->out_ep->driver_data = hidg;
@@ -577,6 +566,7 @@ static int hidg_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 						hidg->out_ep->name, status);
 			} else {
 				usb_ep_disable(hidg->out_ep);
+				hidg->out_ep->driver_data = NULL;
 				status = -ENOMEM;
 				goto fail;
 			}
@@ -624,11 +614,13 @@ static int hidg_bind(struct usb_configuration *c, struct usb_function *f)
 	ep = usb_ep_autoconfig(c->cdev->gadget, &hidg_fs_in_ep_desc);
 	if (!ep)
 		goto fail;
+	ep->driver_data = c->cdev;	/* claim */
 	hidg->in_ep = ep;
 
 	ep = usb_ep_autoconfig(c->cdev->gadget, &hidg_fs_out_ep_desc);
 	if (!ep)
 		goto fail;
+	ep->driver_data = c->cdev;	/* claim */
 	hidg->out_ep = ep;
 
 	/* preallocate request and buffer */
@@ -721,6 +713,9 @@ static inline struct f_hid_opts *to_f_hid_opts(struct config_item *item)
 			    func_inst.group);
 }
 
+CONFIGFS_ATTR_STRUCT(f_hid_opts);
+CONFIGFS_ATTR_OPS(f_hid_opts);
+
 static void hid_attr_release(struct config_item *item)
 {
 	struct f_hid_opts *opts = to_f_hid_opts(item);
@@ -730,12 +725,13 @@ static void hid_attr_release(struct config_item *item)
 
 static struct configfs_item_operations hidg_item_ops = {
 	.release	= hid_attr_release,
+	.show_attribute	= f_hid_opts_attr_show,
+	.store_attribute = f_hid_opts_attr_store,
 };
 
 #define F_HID_OPT(name, prec, limit)					\
-static ssize_t f_hid_opts_##name##_show(struct config_item *item, char *page)\
+static ssize_t f_hid_opts_##name##_show(struct f_hid_opts *opts, char *page)\
 {									\
-	struct f_hid_opts *opts = to_f_hid_opts(item);			\
 	int result;							\
 									\
 	mutex_lock(&opts->lock);					\
@@ -745,10 +741,9 @@ static ssize_t f_hid_opts_##name##_show(struct config_item *item, char *page)\
 	return result;							\
 }									\
 									\
-static ssize_t f_hid_opts_##name##_store(struct config_item *item,	\
+static ssize_t f_hid_opts_##name##_store(struct f_hid_opts *opts,	\
 					 const char *page, size_t len)	\
 {									\
-	struct f_hid_opts *opts = to_f_hid_opts(item);			\
 	int ret;							\
 	u##prec num;							\
 									\
@@ -774,15 +769,16 @@ end:									\
 	return ret;							\
 }									\
 									\
-CONFIGFS_ATTR(f_hid_opts_, name)
+static struct f_hid_opts_attribute f_hid_opts_##name =			\
+	__CONFIGFS_ATTR(name, S_IRUGO | S_IWUSR, f_hid_opts_##name##_show,\
+			f_hid_opts_##name##_store)
 
 F_HID_OPT(subclass, 8, 255);
 F_HID_OPT(protocol, 8, 255);
 F_HID_OPT(report_length, 16, 65535);
 
-static ssize_t f_hid_opts_report_desc_show(struct config_item *item, char *page)
+static ssize_t f_hid_opts_report_desc_show(struct f_hid_opts *opts, char *page)
 {
-	struct f_hid_opts *opts = to_f_hid_opts(item);
 	int result;
 
 	mutex_lock(&opts->lock);
@@ -793,10 +789,9 @@ static ssize_t f_hid_opts_report_desc_show(struct config_item *item, char *page)
 	return result;
 }
 
-static ssize_t f_hid_opts_report_desc_store(struct config_item *item,
+static ssize_t f_hid_opts_report_desc_store(struct f_hid_opts *opts,
 					    const char *page, size_t len)
 {
-	struct f_hid_opts *opts = to_f_hid_opts(item);
 	int ret = -EBUSY;
 	char *d;
 
@@ -823,13 +818,16 @@ end:
 	return ret;
 }
 
-CONFIGFS_ATTR(f_hid_opts_, report_desc);
+static struct f_hid_opts_attribute f_hid_opts_report_desc =
+	__CONFIGFS_ATTR(report_desc, S_IRUGO | S_IWUSR,
+			f_hid_opts_report_desc_show,
+			f_hid_opts_report_desc_store);
 
 static struct configfs_attribute *hid_attrs[] = {
-	&f_hid_opts_attr_subclass,
-	&f_hid_opts_attr_protocol,
-	&f_hid_opts_attr_report_length,
-	&f_hid_opts_attr_report_desc,
+	&f_hid_opts_subclass.attr,
+	&f_hid_opts_protocol.attr,
+	&f_hid_opts_report_length.attr,
+	&f_hid_opts_report_desc.attr,
 	NULL,
 };
 

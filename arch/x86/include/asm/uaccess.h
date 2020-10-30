@@ -7,7 +7,6 @@
 #include <linux/compiler.h>
 #include <linux/thread_info.h>
 #include <linux/string.h>
-#include <linux/preempt.h>
 #include <asm/asm.h>
 #include <asm/page.h>
 #include <asm/smap.h>
@@ -52,13 +51,13 @@ static inline bool __chk_range_not_ok(unsigned long addr, unsigned long size, un
 	 * limit, not add it to the address).
 	 */
 	if (__builtin_constant_p(size))
-		return unlikely(addr > limit - size);
+		return addr > limit - size;
 
 	/* Arbitrary sizes? Be careful about overflow */
 	addr += size;
-	if (unlikely(addr < size))
+	if (addr < size)
 		return true;
-	return unlikely(addr > limit);
+	return addr > limit;
 }
 
 #define __range_not_ok(addr, size, limit)				\
@@ -66,12 +65,6 @@ static inline bool __chk_range_not_ok(unsigned long addr, unsigned long size, un
 	__chk_user_ptr(addr);						\
 	__chk_range_not_ok((unsigned long __force)(addr), size, limit); \
 })
-
-#ifdef CONFIG_DEBUG_ATOMIC_SLEEP
-# define WARN_ON_IN_IRQ()	WARN_ON_ONCE(!in_task())
-#else
-# define WARN_ON_IN_IRQ()
-#endif
 
 /**
  * access_ok: - Checks if a user space pointer is valid
@@ -93,11 +86,8 @@ static inline bool __chk_range_not_ok(unsigned long addr, unsigned long size, un
  * checks that the pointer is in the user space range - after calling
  * this function, memory access functions may still return -EFAULT.
  */
-#define access_ok(type, addr, size)					\
-({									\
-	WARN_ON_IN_IRQ();						\
-	likely(!__range_not_ok(addr, size, user_addr_max()));		\
-})
+#define access_ok(type, addr, size) \
+	likely(!__range_not_ok(addr, size, user_addr_max()))
 
 /*
  * The exception table consists of pairs of addresses relative to the
@@ -192,7 +182,7 @@ __typeof__(__builtin_choose_expr(sizeof(x) > sizeof(0UL), 0ULL, 0UL))
 		     : "=a" (__ret_gu), "=r" (__val_gu)			\
 		     : "0" (ptr), "i" (sizeof(*(ptr))));		\
 	(x) = (__force __typeof__(*(ptr))) __val_gu;			\
-	__builtin_expect(__ret_gu, 0);					\
+	__ret_gu;							\
 })
 
 #define __put_user_x(size, x, ptr, __ret_pu)			\
@@ -288,7 +278,7 @@ extern void __put_user_8(void);
 		__put_user_x(X, __pu_val, ptr, __ret_pu);	\
 		break;						\
 	}							\
-	__builtin_expect(__ret_pu, 0);				\
+	__ret_pu;						\
 })
 
 #define __put_user_size(x, ptr, size, retval, errret)			\
@@ -342,7 +332,7 @@ do {									\
 #define __get_user_asm_u64(x, ptr, retval, errret) \
 	 __get_user_asm(x, ptr, retval, "q", "", "=r", errret)
 #define __get_user_asm_ex_u64(x, ptr) \
-	 __get_user_asm_ex(x, ptr, "q", "", "=&r")
+	 __get_user_asm_ex(x, ptr, "q", "", "=r")
 #endif
 
 #define __get_user_size(x, ptr, size, retval, errret)			\
@@ -385,13 +375,13 @@ do {									\
 	__chk_user_ptr(ptr);						\
 	switch (size) {							\
 	case 1:								\
-		__get_user_asm_ex(x, ptr, "b", "b", "=&q");		\
+		__get_user_asm_ex(x, ptr, "b", "b", "=q");		\
 		break;							\
 	case 2:								\
-		__get_user_asm_ex(x, ptr, "w", "w", "=&r");		\
+		__get_user_asm_ex(x, ptr, "w", "w", "=r");		\
 		break;							\
 	case 4:								\
-		__get_user_asm_ex(x, ptr, "l", "k", "=&r");		\
+		__get_user_asm_ex(x, ptr, "l", "k", "=r");		\
 		break;							\
 	case 8:								\
 		__get_user_asm_ex_u64(x, ptr);				\
@@ -405,13 +395,13 @@ do {									\
 	asm volatile("1:	mov"itype" %1,%"rtype"0\n"		\
 		     "2:\n"						\
 		     _ASM_EXTABLE_EX(1b, 2b)				\
-		     : ltype(x) : "m" (__m(addr)), "0" (0))
+		     : ltype(x) : "m" (__m(addr)))
 
 #define __put_user_nocheck(x, ptr, size)			\
 ({								\
 	int __pu_err;						\
 	__put_user_size((x), (ptr), (size), __pu_err, -EFAULT);	\
-	__builtin_expect(__pu_err, 0);				\
+	__pu_err;						\
 })
 
 #define __get_user_nocheck(x, ptr, size)				\
@@ -420,7 +410,7 @@ do {									\
 	unsigned long __gu_val;						\
 	__get_user_size(__gu_val, (ptr), (size), __gu_err, -EFAULT);	\
 	(x) = (__force __typeof__(*(ptr)))__gu_val;			\
-	__builtin_expect(__gu_err, 0);					\
+	__gu_err;							\
 })
 
 /* FIXME: this hack is definitely wrong -AK */

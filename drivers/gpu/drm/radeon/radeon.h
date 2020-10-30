@@ -268,7 +268,6 @@ struct radeon_clock {
 	uint32_t current_dispclk;
 	uint32_t dp_extclk;
 	uint32_t max_pixel_clock;
-	uint32_t vco_freq;
 };
 
 /*
@@ -1659,7 +1658,6 @@ struct radeon_pm {
 	u8                      fan_max_rpm;
 	/* dpm */
 	bool                    dpm_enabled;
-	bool                    sysfs_initialized;
 	struct radeon_dpm       dpm;
 };
 
@@ -2415,7 +2413,7 @@ struct radeon_device {
 	struct r600_ih ih; /* r6/700 interrupt ring */
 	struct radeon_rlc rlc;
 	struct radeon_mec mec;
-	struct delayed_work hotplug_work;
+	struct work_struct hotplug_work;
 	struct work_struct dp_work;
 	struct work_struct audio_work;
 	int num_crtc; /* number of crtcs */

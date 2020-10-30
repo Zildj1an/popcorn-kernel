@@ -29,11 +29,6 @@
 #include <asm/cacheflush.h>
 #include <asm/tlbflush.h>
 
-#ifdef CONFIG_POPCORN
-#include <popcorn/types.h>
-#include <popcorn/vma_server.h>
-#endif
-
 #include "internal.h"
 
 /*
@@ -77,7 +72,6 @@ static unsigned long change_pte_range(struct vm_area_struct *vma, pmd_t *pmd,
 	if (!pte)
 		return 0;
 
-	flush_tlb_batched_pending(vma->vm_mm);
 	arch_enter_lazy_mmu_mode();
 	do {
 		oldpte = *pte;
@@ -298,8 +292,7 @@ mprotect_fixup(struct vm_area_struct *vma, struct vm_area_struct **pprev,
 	 */
 	pgoff = vma->vm_pgoff + ((start - vma->vm_start) >> PAGE_SHIFT);
 	*pprev = vma_merge(mm, *pprev, start, end, newflags,
-			   vma->anon_vma, vma->vm_file, pgoff, vma_policy(vma),
-			   vma->vm_userfaultfd_ctx);
+			vma->anon_vma, vma->vm_file, pgoff, vma_policy(vma));
 	if (*pprev) {
 		vma = *pprev;
 		goto success;
@@ -371,13 +364,6 @@ SYSCALL_DEFINE3(mprotect, unsigned long, start, size_t, len,
 		return -ENOMEM;
 	if (!arch_validate_prot(prot))
 		return -EINVAL;
-
-#ifdef CONFIG_POPCORN
-	if (distributed_remote_process(current)) {
-		error = vma_server_mprotect_remote(start, len, prot);
-		if (error) return error;
-	}
-#endif
 
 	reqprot = prot;
 	/*

@@ -40,7 +40,6 @@
 #include <linux/seq_file.h>
 #include <linux/root_dev.h>
 #include <linux/of.h>
-#include <linux/of_pci.h>
 #include <linux/kexec.h>
 
 #include <asm/mmu.h>
@@ -112,7 +111,7 @@ static void __init fwnmi_init(void)
 		fwnmi_active = 1;
 }
 
-static void pseries_8259_cascade(struct irq_desc *desc)
+static void pseries_8259_cascade(unsigned int irq, struct irq_desc *desc)
 {
 	struct irq_chip *chip = irq_desc_get_chip(desc);
 	unsigned int cascade_irq = i8259_irq();
@@ -255,26 +254,19 @@ static void __init pseries_discover_pic(void)
 static int pci_dn_reconfig_notifier(struct notifier_block *nb, unsigned long action, void *data)
 {
 	struct of_reconfig_data *rd = data;
-	struct device_node *parent, *np = rd->dn;
-	struct pci_dn *pdn;
+	struct device_node *np = rd->dn;
+	struct pci_dn *pci = NULL;
 	int err = NOTIFY_OK;
 
 	switch (action) {
 	case OF_RECONFIG_ATTACH_NODE:
-		parent = of_get_parent(np);
-		pdn = parent ? PCI_DN(parent) : NULL;
-		if (pdn) {
-			/* Create pdn and EEH device */
-			update_dn_pci_info(np, pdn->phb);
-			eeh_dev_init(PCI_DN(np), pdn->phb);
-		}
+		pci = np->parent->data;
+		if (pci) {
+			update_dn_pci_info(np, pci->phb);
 
-		of_node_put(parent);
-		break;
-	case OF_RECONFIG_DETACH_NODE:
-		pdn = PCI_DN(np);
-		if (pdn)
-			list_del(&pdn->list);
+			/* Create EEH device for the OF node */
+			eeh_dev_init(PCI_DN(np), pci->phb);
+		}
 		break;
 	default:
 		err = NOTIFY_DONE;
@@ -496,40 +488,18 @@ static void __init find_and_init_phbs(void)
 	 * PCI_PROBE_ONLY and PCI_REASSIGN_ALL_BUS can be set via properties
 	 * in chosen.
 	 */
-	of_pci_check_probe_only();
-}
+	if (of_chosen) {
+		const int *prop;
 
-static void pseries_setup_rfi_flush(void)
-{
-	struct h_cpu_char_result result;
-	enum l1d_flush_type types;
-	bool enable;
-	long rc;
-
-	/* Enable by default */
-	enable = true;
-
-	rc = plpar_get_cpu_characteristics(&result);
-	if (rc == H_SUCCESS) {
-		types = L1D_FLUSH_NONE;
-
-		if (result.character & H_CPU_CHAR_L1D_FLUSH_TRIG2)
-			types |= L1D_FLUSH_MTTRIG;
-		if (result.character & H_CPU_CHAR_L1D_FLUSH_ORI30)
-			types |= L1D_FLUSH_ORI;
-
-		/* Use fallback if nothing set in hcall */
-		if (types == L1D_FLUSH_NONE)
-			types = L1D_FLUSH_FALLBACK;
-
-		if (!(result.behaviour & H_CPU_BEHAV_L1D_FLUSH_PR))
-			enable = false;
-	} else {
-		/* Default to fallback if case hcall is not available */
-		types = L1D_FLUSH_FALLBACK;
+		prop = of_get_property(of_chosen,
+				"linux,pci-probe-only", NULL);
+		if (prop) {
+			if (*prop)
+				pci_add_flags(PCI_PROBE_ONLY);
+			else
+				pci_clear_flags(PCI_PROBE_ONLY);
+		}
 	}
-
-	setup_rfi_flush(types, enable);
 }
 
 static void __init pSeries_setup_arch(void)
@@ -548,9 +518,7 @@ static void __init pSeries_setup_arch(void)
 
 	fwnmi_init();
 
-	pseries_setup_rfi_flush();
-
-	/* By default, only probe PCI (can be overridden by rtas_pci) */
+	/* By default, only probe PCI (can be overriden by rtas_pci) */
 	pci_add_flags(PCI_PROBE_ONLY);
 
 	/* Find and initialize PCI host bridges */
@@ -861,6 +829,10 @@ static int pSeries_pci_probe_mode(struct pci_bus *bus)
 		return PCI_PROBE_DEVTREE;
 	return PCI_PROBE_NORMAL;
 }
+
+#ifndef CONFIG_PCI
+void pSeries_final_fixup(void) { }
+#endif
 
 struct pci_controller_ops pseries_pci_controller_ops = {
 	.probe_mode		= pSeries_pci_probe_mode,

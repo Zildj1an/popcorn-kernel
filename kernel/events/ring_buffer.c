@@ -3,7 +3,7 @@
  *
  *  Copyright (C) 2008 Thomas Gleixner <tglx@linutronix.de>
  *  Copyright (C) 2008-2011 Red Hat, Inc., Ingo Molnar
- *  Copyright (C) 2008-2011 Red Hat, Inc., Peter Zijlstra
+ *  Copyright (C) 2008-2011 Red Hat, Inc., Peter Zijlstra <pzijlstr@redhat.com>
  *  Copyright  ©  2009 Paul Mackerras, IBM Corp. <paulus@au1.ibm.com>
  *
  * For licensing details see kernel-base/COPYING
@@ -14,7 +14,6 @@
 #include <linux/slab.h>
 #include <linux/circ_buf.h>
 #include <linux/poll.h>
-#include <linux/nospec.h>
 
 #include "internal.h"
 
@@ -142,7 +141,7 @@ int perf_output_begin(struct perf_output_handle *handle,
 	perf_output_get_handle(handle);
 
 	do {
-		tail = READ_ONCE(rb->user_page->data_tail);
+		tail = READ_ONCE_CTRL(rb->user_page->data_tail);
 		offset = head = local_read(&rb->head);
 		if (!rb->overwrite &&
 		    unlikely(CIRC_SPACE(head, tail, perf_data_size(rb)) < size))
@@ -348,7 +347,6 @@ void perf_aux_output_end(struct perf_output_handle *handle, unsigned long size,
 			 bool truncated)
 {
 	struct ring_buffer *rb = handle->rb;
-	bool wakeup = truncated;
 	unsigned long aux_head;
 	u64 flags = 0;
 
@@ -377,16 +375,9 @@ void perf_aux_output_end(struct perf_output_handle *handle, unsigned long size,
 	aux_head = rb->user_page->aux_head = local_read(&rb->aux_head);
 
 	if (aux_head - local_read(&rb->aux_wakeup) >= rb->aux_watermark) {
-		wakeup = true;
+		perf_output_wakeup(handle);
 		local_add(rb->aux_watermark, &rb->aux_wakeup);
 	}
-
-	if (wakeup) {
-		if (truncated)
-			handle->event->pending_disable = 1;
-		perf_output_wakeup(handle);
-	}
-
 	handle->event = NULL;
 
 	local_set(&rb->aux_nest, 0);
@@ -446,10 +437,7 @@ static struct page *rb_alloc_aux_page(int node, int order)
 
 	if (page && order) {
 		/*
-		 * Communicate the allocation size to the driver:
-		 * if we managed to secure a high-order allocation,
-		 * set its first page's private to this order;
-		 * !PagePrivate(page) means it's just a normal page.
+		 * Communicate the allocation size to the driver
 		 */
 		split_page(page, order);
 		SetPagePrivate(page);
@@ -780,10 +768,8 @@ perf_mmap_to_page(struct ring_buffer *rb, unsigned long pgoff)
 			return NULL;
 
 		/* AUX space */
-		if (pgoff >= rb->aux_pgoff) {
-			int aux_pgoff = array_index_nospec(pgoff - rb->aux_pgoff, rb->aux_nr_pages);
-			return virt_to_page(rb->aux_pages[aux_pgoff]);
-		}
+		if (pgoff >= rb->aux_pgoff)
+			return virt_to_page(rb->aux_pages[pgoff - rb->aux_pgoff]);
 	}
 
 	return __perf_mmap_to_page(rb, pgoff);

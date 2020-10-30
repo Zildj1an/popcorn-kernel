@@ -317,9 +317,11 @@ EXPORT_SYMBOL(zcrypt_device_unregister);
 
 void zcrypt_msgtype_register(struct zcrypt_ops *zops)
 {
-	spin_lock_bh(&zcrypt_ops_list_lock);
-	list_add_tail(&zops->list, &zcrypt_ops_list);
-	spin_unlock_bh(&zcrypt_ops_list_lock);
+	if (zops->owner) {
+		spin_lock_bh(&zcrypt_ops_list_lock);
+		list_add_tail(&zops->list, &zcrypt_ops_list);
+		spin_unlock_bh(&zcrypt_ops_list_lock);
+	}
 }
 EXPORT_SYMBOL(zcrypt_msgtype_register);
 
@@ -340,7 +342,7 @@ struct zcrypt_ops *__ops_lookup(unsigned char *name, int variant)
 	spin_lock_bh(&zcrypt_ops_list_lock);
 	list_for_each_entry(zops, &zcrypt_ops_list, list) {
 		if ((zops->variant == variant) &&
-		    (!strncmp(zops->name, name, sizeof(zops->name)))) {
+		    (!strncmp(zops->owner->name, name, MODULE_NAME_LEN))) {
 			found = 1;
 			break;
 		}
@@ -470,7 +472,8 @@ static long zcrypt_rsa_crt(struct ica_rsa_modexpo_crt *crt)
 	unsigned long long z1, z2, z3;
 	int rc, copied;
 
-	if (crt->outputdatalength < crt->inputdatalength)
+	if (crt->outputdatalength < crt->inputdatalength ||
+	    (crt->inputdatalength & 1))
 		return -EINVAL;
 	/*
 	 * As long as outputdatalength is big enough, we can set the
@@ -1203,8 +1206,16 @@ static void sprinthx(unsigned char *title, struct seq_file *m,
 static void sprinthx4(unsigned char *title, struct seq_file *m,
 		      unsigned int *array, unsigned int len)
 {
+	int r;
+
 	seq_printf(m, "\n%s\n", title);
-	seq_hex_dump(m, "    ", DUMP_PREFIX_NONE, 32, 4, array, len, false);
+	for (r = 0; r < len; r++) {
+		if ((r % 8) == 0)
+			seq_printf(m, "    ");
+		seq_printf(m, "%08X ", array[r]);
+		if ((r % 8) == 7)
+			seq_putc(m, '\n');
+	}
 	seq_putc(m, '\n');
 }
 

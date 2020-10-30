@@ -1,5 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright (C) 2012-2018  B.A.T.M.A.N. contributors:
+/* Copyright (C) 2012-2015 B.A.T.M.A.N. contributors:
  *
  * Martin Hundebøll, Jeppe Ledet-Pedersen
  *
@@ -23,7 +22,11 @@
 
 #include <linux/types.h>
 
+struct batadv_nc_node;
+struct batadv_neigh_node;
 struct batadv_ogm_packet;
+struct batadv_orig_node;
+struct batadv_priv;
 struct net_device;
 struct seq_file;
 struct sk_buff;
