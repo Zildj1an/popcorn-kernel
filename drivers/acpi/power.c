@@ -1,36 +1,22 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- *  acpi_power.c - ACPI Bus Power Management ($Revision: 39 $)
+ * drivers/acpi/power.c - ACPI Power Resources management.
  *
- *  Copyright (C) 2001, 2002 Andy Grover <andrew.grover@intel.com>
- *  Copyright (C) 2001, 2002 Paul Diefenbaugh <paul.s.diefenbaugh@intel.com>
- *
- * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or (at
- *  your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful, but
- *  WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License along
- *  with this program; if not, write to the Free Software Foundation, Inc.,
- *  59 Temple Place, Suite 330, Boston, MA 02111-1307 USA.
- *
- * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ * Copyright (C) 2001 - 2015 Intel Corp.
+ * Author: Andy Grover <andrew.grover@intel.com>
+ * Author: Paul Diefenbaugh <paul.s.diefenbaugh@intel.com>
+ * Author: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
  */
 
 /*
  * ACPI power-managed devices may be controlled in two ways:
  * 1. via "Device Specific (D-State) Control"
  * 2. via "Power Resource Control".
- * This module is used to manage devices relying on Power Resource Control.
+ * The code below deals with ACPI Power Resources control.
  * 
- * An ACPI "power resource object" describes a software controllable power
- * plane, clock plane, or other resource used by a power managed device.
+ * An ACPI "power resource object" represents a software controllable power
+ * plane, clock plane, or other resource depended on by a device.
+ *
  * A device may rely on multiple power resources, and a power resource
  * may be shared by multiple devices.
  */
@@ -132,6 +118,23 @@ void acpi_power_resources_list_free(struct list_head *list)
 	}
 }
 
+static bool acpi_power_resource_is_dup(union acpi_object *package,
+				       unsigned int start, unsigned int i)
+{
+	acpi_handle rhandle, dup;
+	unsigned int j;
+
+	/* The caller is expected to check the package element types */
+	rhandle = package->package.elements[i].reference.handle;
+	for (j = start; j < i; j++) {
+		dup = package->package.elements[j].reference.handle;
+		if (dup == rhandle)
+			return true;
+	}
+
+	return false;
+}
+
 int acpi_extract_power_resources(union acpi_object *package, unsigned int start,
 				 struct list_head *list)
 {
@@ -151,6 +154,11 @@ int acpi_extract_power_resources(union acpi_object *package, unsigned int start,
 			err = -ENODEV;
 			break;
 		}
+
+		/* Some ACPI tables contain duplicate power resource references */
+		if (acpi_power_resource_is_dup(package, start, i))
+			continue;
+
 		err = acpi_add_power_resource(rhandle);
 		if (err)
 			break;
@@ -201,6 +209,7 @@ static int acpi_power_get_list_state(struct list_head *list, int *state)
 		return -EINVAL;
 
 	/* The state of the list is 'on' IFF all resources are 'on'. */
+	cur_state = 0;
 	list_for_each_entry(entry, list, node) {
 		struct acpi_power_resource *resource = entry->resource;
 		acpi_handle handle = resource->device.handle;
@@ -352,7 +361,7 @@ static struct attribute *attrs[] = {
 	NULL,
 };
 
-static struct attribute_group attr_groups[] = {
+static const struct attribute_group attr_groups[] = {
 	[ACPI_STATE_D0] = {
 		.name = "power_resources_D0",
 		.attrs = attrs,
@@ -371,14 +380,14 @@ static struct attribute_group attr_groups[] = {
 	},
 };
 
-static struct attribute_group wakeup_attr_group = {
+static const struct attribute_group wakeup_attr_group = {
 	.name = "power_resources_wakeup",
 	.attrs = attrs,
 };
 
 static void acpi_power_hide_list(struct acpi_device *adev,
 				 struct list_head *resources,
-				 struct attribute_group *attr_group)
+				 const struct attribute_group *attr_group)
 {
 	struct acpi_power_resource_entry *entry;
 
@@ -397,7 +406,7 @@ static void acpi_power_hide_list(struct acpi_device *adev,
 
 static void acpi_power_expose_list(struct acpi_device *adev,
 				   struct list_head *resources,
-				   struct attribute_group *attr_group)
+				   const struct attribute_group *attr_group)
 {
 	struct acpi_power_resource_entry *entry;
 	int ret;
@@ -425,7 +434,7 @@ static void acpi_power_expose_list(struct acpi_device *adev,
 
 static void acpi_power_expose_hide(struct acpi_device *adev,
 				   struct list_head *resources,
-				   struct attribute_group *attr_group,
+				   const struct attribute_group *attr_group,
 				   bool expose)
 {
 	if (expose)
@@ -513,12 +522,12 @@ int acpi_device_sleep_wake(struct acpi_device *dev,
 	/*
 	 * Try to execute _DSW first.
 	 *
-	 * Three agruments are needed for the _DSW object:
+	 * Three arguments are needed for the _DSW object:
 	 * Argument 0: enable/disable the wake capabilities
 	 * Argument 1: target system state
 	 * Argument 2: target device state
 	 * When _DSW object is called to disable the wake capabilities, maybe
-	 * the first argument is filled. The values of the other two agruments
+	 * the first argument is filled. The values of the other two arguments
 	 * are meaningless.
 	 */
 	in_arg[0].type = ACPI_TYPE_INTEGER;
@@ -864,6 +873,16 @@ void acpi_resume_power_resources(void)
 
 		mutex_unlock(&resource->resource_lock);
 	}
+
+	mutex_unlock(&power_resource_list_lock);
+}
+
+void acpi_turn_off_unused_power_resources(void)
+{
+	struct acpi_power_resource *resource;
+
+	mutex_lock(&power_resource_list_lock);
+
 	list_for_each_entry_reverse(resource, &acpi_power_resource_list, list_node) {
 		int result, state;
 

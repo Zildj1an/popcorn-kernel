@@ -1,9 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * ST Microelectronics MFD: stmpe's spi client specific driver
  *
  * Copyright (C) ST Microelectronics SA 2011
  *
- * License Terms: GNU General Public License, version 2
  * Author: Viresh Kumar <vireshk@kernel.org> for ST Microelectronics
  */
 
@@ -11,6 +11,7 @@
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/types.h>
 #include "stmpe.h"
 
@@ -108,6 +109,17 @@ static int stmpe_spi_remove(struct spi_device *spi)
 	return stmpe_remove(stmpe);
 }
 
+static const struct of_device_id stmpe_spi_of_match[] = {
+	{ .compatible = "st,stmpe610", },
+	{ .compatible = "st,stmpe801", },
+	{ .compatible = "st,stmpe811", },
+	{ .compatible = "st,stmpe1601", },
+	{ .compatible = "st,stmpe2401", },
+	{ .compatible = "st,stmpe2403", },
+	{ /* sentinel */ },
+};
+MODULE_DEVICE_TABLE(of, stmpe_spi_of_match);
+
 static const struct spi_device_id stmpe_spi_id[] = {
 	{ "stmpe610", STMPE610 },
 	{ "stmpe801", STMPE801 },
@@ -122,7 +134,7 @@ MODULE_DEVICE_TABLE(spi, stmpe_id);
 static struct spi_driver stmpe_spi_driver = {
 	.driver = {
 		.name	= "stmpe-spi",
-		.owner	= THIS_MODULE,
+		.of_match_table = of_match_ptr(stmpe_spi_of_match),
 #ifdef CONFIG_PM
 		.pm	= &stmpe_dev_pm_ops,
 #endif

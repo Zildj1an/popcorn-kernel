@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * CS5536 General timer functions
  *
@@ -8,16 +9,11 @@
  * Author: Wu zhangjin, wuzhangjin@gmail.com
  *
  * Reference: AMD Geode(TM) CS5536 Companion Device Data Book
- *
- *  This program is free software; you can redistribute	 it and/or modify it
- *  under  the terms of	 the GNU General  Public License as published by the
- *  Free Software Foundation;  either version 2 of the	License, or (at your
- *  option) any later version.
  */
 
 #include <linux/io.h>
 #include <linux/init.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/jiffies.h>
 #include <linux/spinlock.h>
 #include <linux/interrupt.h>
@@ -51,40 +47,36 @@ void enable_mfgpt0_counter(void)
 }
 EXPORT_SYMBOL(enable_mfgpt0_counter);
 
-static void init_mfgpt_timer(enum clock_event_mode mode,
-			     struct clock_event_device *evt)
+static int mfgpt_timer_set_periodic(struct clock_event_device *evt)
 {
 	raw_spin_lock(&mfgpt_lock);
 
-	switch (mode) {
-	case CLOCK_EVT_MODE_PERIODIC:
-		outw(COMPARE, MFGPT0_CMP2);	/* set comparator2 */
-		outw(0, MFGPT0_CNT);	/* set counter to 0 */
-		enable_mfgpt0_counter();
-		break;
+	outw(COMPARE, MFGPT0_CMP2);	/* set comparator2 */
+	outw(0, MFGPT0_CNT);		/* set counter to 0 */
+	enable_mfgpt0_counter();
 
-	case CLOCK_EVT_MODE_SHUTDOWN:
-	case CLOCK_EVT_MODE_UNUSED:
-		if (evt->mode == CLOCK_EVT_MODE_PERIODIC ||
-		    evt->mode == CLOCK_EVT_MODE_ONESHOT)
-			disable_mfgpt0_counter();
-		break;
-
-	case CLOCK_EVT_MODE_ONESHOT:
-		/* The oneshot mode have very high deviation, Not use it! */
-		break;
-
-	case CLOCK_EVT_MODE_RESUME:
-		/* Nothing to do here */
-		break;
-	}
 	raw_spin_unlock(&mfgpt_lock);
+	return 0;
+}
+
+static int mfgpt_timer_shutdown(struct clock_event_device *evt)
+{
+	if (clockevent_state_periodic(evt) || clockevent_state_oneshot(evt)) {
+		raw_spin_lock(&mfgpt_lock);
+		disable_mfgpt0_counter();
+		raw_spin_unlock(&mfgpt_lock);
+	}
+
+	return 0;
 }
 
 static struct clock_event_device mfgpt_clockevent = {
 	.name = "mfgpt",
 	.features = CLOCK_EVT_FEAT_PERIODIC,
-	.set_mode = init_mfgpt_timer,
+
+	/* The oneshot mode have very high deviation, don't use it! */
+	.set_state_shutdown = mfgpt_timer_shutdown,
+	.set_state_periodic = mfgpt_timer_set_periodic,
 	.irq = CS5536_MFGPT_INTR,
 };
 
@@ -127,7 +119,9 @@ void __init setup_mfgpt0_timer(void)
 	cd->cpumask = cpumask_of(cpu);
 	clockevent_set_clock(cd, MFGPT_TICK_RATE);
 	cd->max_delta_ns = clockevent_delta2ns(0xffff, cd);
+	cd->max_delta_ticks = 0xffff;
 	cd->min_delta_ns = clockevent_delta2ns(0xf, cd);
+	cd->min_delta_ticks = 0xf;
 
 	/* Enable MFGPT0 Comparator 2 Output to the Interrupt Mapper */
 	_wrmsr(DIVIL_MSR_REG(MFGPT_IRQ), 0, 0x100);
@@ -148,7 +142,7 @@ void __init setup_mfgpt0_timer(void)
  * to just read by itself. So use jiffies to emulate a free
  * running counter:
  */
-static cycle_t mfgpt_read(struct clocksource *cs)
+static u64 mfgpt_read(struct clocksource *cs)
 {
 	unsigned long flags;
 	int count;
@@ -192,7 +186,7 @@ static cycle_t mfgpt_read(struct clocksource *cs)
 
 	raw_spin_unlock_irqrestore(&mfgpt_lock, flags);
 
-	return (cycle_t) (jifs * COMPARE) + count;
+	return (u64) (jifs * COMPARE) + count;
 }
 
 static struct clocksource clocksource_mfgpt = {

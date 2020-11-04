@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*******************************************************************************
  * This file contains the iSCSI Target specific Task Management functions.
  *
@@ -5,15 +6,6 @@
  *
  * Author: Nicholas A. Bellinger <nab@linux-iscsi.org>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  ******************************************************************************/
 
 #include <asm/unaligned.h>
@@ -50,7 +42,7 @@ u8 iscsit_tmr_abort_task(
 		pr_err("Unable to locate RefTaskTag: 0x%08x on CID:"
 			" %hu.\n", hdr->rtt, conn->cid);
 		return (iscsi_sna_gte(be32_to_cpu(hdr->refcmdsn), conn->sess->exp_cmd_sn) &&
-			iscsi_sna_lte(be32_to_cpu(hdr->refcmdsn), conn->sess->max_cmd_sn)) ?
+			iscsi_sna_lte(be32_to_cpu(hdr->refcmdsn), (u32) atomic_read(&conn->sess->max_cmd_sn))) ?
 			ISCSI_TMF_RSP_COMPLETE : ISCSI_TMF_RSP_NO_TASK;
 	}
 	if (ref_cmd->cmd_sn != be32_to_cpu(hdr->refcmdsn)) {
@@ -82,7 +74,7 @@ int iscsit_tmr_task_warm_reset(
 		pr_err("TMR Opcode TARGET_WARM_RESET authorization"
 			" failed for Initiator Node: %s\n",
 			sess->se_sess->se_node_acl->initiatorname);
-		 return -1;
+		return -1;
 	}
 	/*
 	 * Do the real work in transport_generic_do_tmr().
@@ -440,14 +432,14 @@ static int iscsit_task_reassign_complete(
 		break;
 	default:
 		 pr_err("Illegal iSCSI Opcode 0x%02x during"
-			" command realligence\n", cmd->iscsi_opcode);
+			" command reallegiance\n", cmd->iscsi_opcode);
 		return -1;
 	}
 
 	if (ret != 0)
 		return ret;
 
-	pr_debug("Completed connection realligence for Opcode: 0x%02x,"
+	pr_debug("Completed connection reallegiance for Opcode: 0x%02x,"
 		" ITT: 0x%08x to CID: %hu.\n", cmd->iscsi_opcode,
 			cmd->init_task_tag, conn->cid);
 

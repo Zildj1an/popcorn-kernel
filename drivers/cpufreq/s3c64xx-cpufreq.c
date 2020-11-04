@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright 2009 Wolfson Microelectronics plc
  *
  * S3C64xx CPUfreq Support
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #define pr_fmt(fmt) "cpufreq: " fmt
@@ -107,7 +104,7 @@ static int s3c64xx_cpufreq_set_target(struct cpufreq_policy *policy,
 }
 
 #ifdef CONFIG_REGULATOR
-static void __init s3c64xx_cpufreq_config_regulator(void)
+static void s3c64xx_cpufreq_config_regulator(void)
 {
 	int count, v, i, found;
 	struct cpufreq_frequency_table *freq;

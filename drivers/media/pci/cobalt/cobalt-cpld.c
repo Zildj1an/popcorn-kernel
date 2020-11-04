@@ -1,21 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  Cobalt CPLD functions
  *
  *  Copyright 2012-2015 Cisco Systems, Inc. and/or its affiliates.
  *  All rights reserved.
- *
- *  This program is free software; you may redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; version 2 of the License.
- *
- *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- *  EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- *  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- *  NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- *  BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- *  ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- *  CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- *  SOFTWARE.
  */
 
 #include <linux/delay.h>
@@ -71,9 +59,9 @@ static void cpld_info_ver3(struct cobalt *cobalt)
 	cobalt_info("\t\tMAXII program revision:  0x%04x\n",
 		    cpld_read(cobalt, 0x30));
 	cobalt_info("CPLD temp and voltage ADT7411 registers (read only)\n");
-	cobalt_info("\t\tBoard temperature:  %u Celcius\n",
+	cobalt_info("\t\tBoard temperature:  %u Celsius\n",
 		    cpld_read(cobalt, 0x34) / 4);
-	cobalt_info("\t\tFPGA temperature:   %u Celcius\n",
+	cobalt_info("\t\tFPGA temperature:   %u Celsius\n",
 		    cpld_read(cobalt, 0x38) / 4);
 	rd = cpld_read(cobalt, 0x3c);
 	tmp = (rd * 33 * 1000) / (483 * 10);
@@ -290,8 +278,8 @@ bool cobalt_cpld_set_freq(struct cobalt *cobalt, unsigned f_out)
 	   0x01, 0xc7, 0xfc, 0x7f, 0x53, 0x62).
 	 */
 
-	cobalt_dbg(1, "%u: %02x %02x %02x %02x %02x %02x\n", f_out,
-			regs[0], regs[1], regs[2], regs[3], regs[4], regs[5]);
+	cobalt_dbg(1, "%u: %6ph\n", f_out, regs);
+
 	while (retries--) {
 		u8 read_regs[6];
 
@@ -330,9 +318,7 @@ bool cobalt_cpld_set_freq(struct cobalt *cobalt, unsigned f_out)
 
 		if (!memcmp(read_regs, regs, sizeof(read_regs)))
 			break;
-		cobalt_dbg(1, "retry: %02x %02x %02x %02x %02x %02x\n",
-			read_regs[0], read_regs[1], read_regs[2],
-			read_regs[3], read_regs[4], read_regs[5]);
+		cobalt_dbg(1, "retry: %6ph\n", read_regs);
 	}
 	if (2 - retries)
 		cobalt_info("Needed %d retries\n", 2 - retries);

@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * IMG SPFI controller driver
  *
  * Copyright (C) 2007,2008,2013 Imagination Technologies Ltd.
  * Copyright (C) 2014 Google, Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
  */
 
 #include <linux/clk.h>
@@ -103,6 +100,10 @@ struct img_spfi {
 	struct dma_chan *tx_ch;
 	bool tx_dma_busy;
 	bool rx_dma_busy;
+};
+
+struct img_spfi_device_data {
+	bool gpio_requested;
 };
 
 static inline u32 spfi_readl(struct img_spfi *spfi, u32 reg)
@@ -267,14 +268,14 @@ static int img_spfi_start_pio(struct spi_master *master,
 		cpu_relax();
 	}
 
-	ret = spfi_wait_all_done(spfi);
-	if (ret < 0)
-		return ret;
-
 	if (rx_bytes > 0 || tx_bytes > 0) {
 		dev_err(spfi->dev, "PIO transfer timed out\n");
 		return -ETIMEDOUT;
 	}
+
+	ret = spfi_wait_all_done(spfi);
+	if (ret < 0)
+		return ret;
 
 	return 0;
 }
@@ -415,6 +416,9 @@ static int img_spfi_prepare(struct spi_master *master, struct spi_message *msg)
 	u32 val;
 
 	val = spfi_readl(spfi, SPFI_PORT_STATE);
+	val &= ~(SPFI_PORT_STATE_DEV_SEL_MASK <<
+		 SPFI_PORT_STATE_DEV_SEL_SHIFT);
+	val |= msg->spi->chip_select << SPFI_PORT_STATE_DEV_SEL_SHIFT;
 	if (msg->spi->mode & SPI_CPHA)
 		val |= SPFI_PORT_STATE_CK_PHASE(msg->spi->chip_select);
 	else
@@ -440,21 +444,50 @@ static int img_spfi_unprepare(struct spi_master *master,
 
 static int img_spfi_setup(struct spi_device *spi)
 {
-	int ret;
+	int ret = -EINVAL;
+	struct img_spfi_device_data *spfi_data = spi_get_ctldata(spi);
 
-	ret = gpio_request_one(spi->cs_gpio, (spi->mode & SPI_CS_HIGH) ?
-			       GPIOF_OUT_INIT_LOW : GPIOF_OUT_INIT_HIGH,
-			       dev_name(&spi->dev));
-	if (ret)
-		dev_err(&spi->dev, "can't request chipselect gpio %d\n",
+	if (!spfi_data) {
+		spfi_data = kzalloc(sizeof(*spfi_data), GFP_KERNEL);
+		if (!spfi_data)
+			return -ENOMEM;
+		spfi_data->gpio_requested = false;
+		spi_set_ctldata(spi, spfi_data);
+	}
+	if (!spfi_data->gpio_requested) {
+		ret = gpio_request_one(spi->cs_gpio,
+				       (spi->mode & SPI_CS_HIGH) ?
+				       GPIOF_OUT_INIT_LOW : GPIOF_OUT_INIT_HIGH,
+				       dev_name(&spi->dev));
+		if (ret)
+			dev_err(&spi->dev, "can't request chipselect gpio %d\n",
 				spi->cs_gpio);
+		else
+			spfi_data->gpio_requested = true;
+	} else {
+		if (gpio_is_valid(spi->cs_gpio)) {
+			int mode = ((spi->mode & SPI_CS_HIGH) ?
+				    GPIOF_OUT_INIT_LOW : GPIOF_OUT_INIT_HIGH);
 
+			ret = gpio_direction_output(spi->cs_gpio, mode);
+			if (ret)
+				dev_err(&spi->dev, "chipselect gpio %d setup failed (%d)\n",
+					spi->cs_gpio, ret);
+		}
+	}
 	return ret;
 }
 
 static void img_spfi_cleanup(struct spi_device *spi)
 {
-	gpio_free(spi->cs_gpio);
+	struct img_spfi_device_data *spfi_data = spi_get_ctldata(spi);
+
+	if (spfi_data) {
+		if (spfi_data->gpio_requested)
+			gpio_free(spi->cs_gpio);
+		kfree(spfi_data);
+		spi_set_ctldata(spi, NULL);
+	}
 }
 
 static void img_spfi_config(struct spi_master *master, struct spi_device *spi,
@@ -548,6 +581,7 @@ static int img_spfi_probe(struct platform_device *pdev)
 	struct img_spfi *spfi;
 	struct resource *res;
 	int ret;
+	u32 max_speed_hz;
 
 	master = spi_alloc_master(&pdev->dev, sizeof(*spfi));
 	if (!master)
@@ -612,6 +646,19 @@ static int img_spfi_probe(struct platform_device *pdev)
 	master->max_speed_hz = clk_get_rate(spfi->spfi_clk) / 4;
 	master->min_speed_hz = clk_get_rate(spfi->spfi_clk) / 512;
 
+	/*
+	 * Maximum speed supported by spfi is limited to the lower value
+	 * between 1/4 of the SPFI clock or to "spfi-max-frequency"
+	 * defined in the device tree.
+	 * If no value is defined in the device tree assume the maximum
+	 * speed supported to be 1/4 of the SPFI clock.
+	 */
+	if (!of_property_read_u32(spfi->dev->of_node, "spfi-max-frequency",
+				  &max_speed_hz)) {
+		if (master->max_speed_hz > max_speed_hz)
+			master->max_speed_hz = max_speed_hz;
+	}
+
 	master->setup = img_spfi_setup;
 	master->cleanup = img_spfi_cleanup;
 	master->transfer_one = img_spfi_transfer_one;
@@ -672,8 +719,6 @@ static int img_spfi_remove(struct platform_device *pdev)
 		clk_disable_unprepare(spfi->spfi_clk);
 		clk_disable_unprepare(spfi->sys_clk);
 	}
-
-	spi_master_put(master);
 
 	return 0;
 }

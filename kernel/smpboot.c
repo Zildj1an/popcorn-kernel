@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Common SMP CPU bringup/teardown functions
  */
@@ -9,6 +10,7 @@
 #include <linux/list.h>
 #include <linux/slab.h>
 #include <linux/sched.h>
+#include <linux/sched/task.h>
 #include <linux/export.h>
 #include <linux/percpu.h>
 #include <linux/kthread.h>
@@ -113,7 +115,8 @@ static int smpboot_thread_fn(void *data)
 		if (kthread_should_stop()) {
 			__set_current_state(TASK_RUNNING);
 			preempt_enable();
-			if (ht->cleanup)
+			/* cleanup must mirror setup */
+			if (ht->cleanup && td->status != HP_THREAD_NONE)
 				ht->cleanup(td->cpu, cpu_online(td->cpu));
 			kfree(td);
 			return 0;
@@ -185,6 +188,11 @@ __smpboot_create_thread(struct smp_hotplug_thread *ht, unsigned int cpu)
 		kfree(td);
 		return PTR_ERR(tsk);
 	}
+	/*
+	 * Park the thread so that it could start right on the CPU
+	 * when it is available.
+	 */
+	kthread_park(tsk);
 	get_task_struct(tsk);
 	*per_cpu_ptr(ht->store, cpu) = tsk;
 	if (ht->create) {
@@ -221,20 +229,19 @@ static void smpboot_unpark_thread(struct smp_hotplug_thread *ht, unsigned int cp
 {
 	struct task_struct *tsk = *per_cpu_ptr(ht->store, cpu);
 
-	if (ht->pre_unpark)
-		ht->pre_unpark(cpu);
-	kthread_unpark(tsk);
+	if (!ht->selfparking)
+		kthread_unpark(tsk);
 }
 
-void smpboot_unpark_threads(unsigned int cpu)
+int smpboot_unpark_threads(unsigned int cpu)
 {
 	struct smp_hotplug_thread *cur;
 
 	mutex_lock(&smpboot_threads_lock);
 	list_for_each_entry(cur, &hotplug_threads, list)
-		if (cpumask_test_cpu(cpu, cur->cpumask))
-			smpboot_unpark_thread(cur, cpu);
+		smpboot_unpark_thread(cur, cpu);
 	mutex_unlock(&smpboot_threads_lock);
+	return 0;
 }
 
 static void smpboot_park_thread(struct smp_hotplug_thread *ht, unsigned int cpu)
@@ -245,7 +252,7 @@ static void smpboot_park_thread(struct smp_hotplug_thread *ht, unsigned int cpu)
 		kthread_park(tsk);
 }
 
-void smpboot_park_threads(unsigned int cpu)
+int smpboot_park_threads(unsigned int cpu)
 {
 	struct smp_hotplug_thread *cur;
 
@@ -253,20 +260,12 @@ void smpboot_park_threads(unsigned int cpu)
 	list_for_each_entry_reverse(cur, &hotplug_threads, list)
 		smpboot_park_thread(cur, cpu);
 	mutex_unlock(&smpboot_threads_lock);
+	return 0;
 }
 
 static void smpboot_destroy_threads(struct smp_hotplug_thread *ht)
 {
 	unsigned int cpu;
-
-	/* Unpark any threads that were voluntarily parked. */
-	for_each_cpu_not(cpu, ht->cpumask) {
-		if (cpu_online(cpu)) {
-			struct task_struct *tsk = *per_cpu_ptr(ht->store, cpu);
-			if (tsk)
-				kthread_unpark(tsk);
-		}
-	}
 
 	/* We need to destroy also the parked threads of offline cpus */
 	for_each_possible_cpu(cpu) {
@@ -281,7 +280,8 @@ static void smpboot_destroy_threads(struct smp_hotplug_thread *ht)
 }
 
 /**
- * smpboot_register_percpu_thread - Register a per_cpu thread related to hotplug
+ * smpboot_register_percpu_thread - Register a per_cpu thread related
+ * 					    to hotplug
  * @plug_thread:	Hotplug thread descriptor
  *
  * Creates and starts the threads on all online cpus.
@@ -290,10 +290,6 @@ int smpboot_register_percpu_thread(struct smp_hotplug_thread *plug_thread)
 {
 	unsigned int cpu;
 	int ret = 0;
-
-	if (!alloc_cpumask_var(&plug_thread->cpumask, GFP_KERNEL))
-		return -ENOMEM;
-	cpumask_copy(plug_thread->cpumask, cpu_possible_mask);
 
 	get_online_cpus();
 	mutex_lock(&smpboot_threads_lock);
@@ -327,52 +323,8 @@ void smpboot_unregister_percpu_thread(struct smp_hotplug_thread *plug_thread)
 	smpboot_destroy_threads(plug_thread);
 	mutex_unlock(&smpboot_threads_lock);
 	put_online_cpus();
-	free_cpumask_var(plug_thread->cpumask);
 }
 EXPORT_SYMBOL_GPL(smpboot_unregister_percpu_thread);
-
-/**
- * smpboot_update_cpumask_percpu_thread - Adjust which per_cpu hotplug threads stay parked
- * @plug_thread:	Hotplug thread descriptor
- * @new:		Revised mask to use
- *
- * The cpumask field in the smp_hotplug_thread must not be updated directly
- * by the client, but only by calling this function.
- * This function can only be called on a registered smp_hotplug_thread.
- */
-int smpboot_update_cpumask_percpu_thread(struct smp_hotplug_thread *plug_thread,
-					 const struct cpumask *new)
-{
-	struct cpumask *old = plug_thread->cpumask;
-	cpumask_var_t tmp;
-	unsigned int cpu;
-
-	if (!alloc_cpumask_var(&tmp, GFP_KERNEL))
-		return -ENOMEM;
-
-	get_online_cpus();
-	mutex_lock(&smpboot_threads_lock);
-
-	/* Park threads that were exclusively enabled on the old mask. */
-	cpumask_andnot(tmp, old, new);
-	for_each_cpu_and(cpu, tmp, cpu_online_mask)
-		smpboot_park_thread(plug_thread, cpu);
-
-	/* Unpark threads that are exclusively enabled on the new mask. */
-	cpumask_andnot(tmp, new, old);
-	for_each_cpu_and(cpu, tmp, cpu_online_mask)
-		smpboot_unpark_thread(plug_thread, cpu);
-
-	cpumask_copy(old, new);
-
-	mutex_unlock(&smpboot_threads_lock);
-	put_online_cpus();
-
-	free_cpumask_var(tmp);
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(smpboot_update_cpumask_percpu_thread);
 
 static DEFINE_PER_CPU(atomic_t, cpu_hotplug_state) = ATOMIC_INIT(CPU_POST_DEAD);
 

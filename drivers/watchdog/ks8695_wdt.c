@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Watchdog driver for Kendin/Micrel KS8695.
  *
  * (C) 2007 Andrew Victor
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -142,7 +139,7 @@ static int ks8695_wdt_open(struct inode *inode, struct file *file)
 		return -EBUSY;
 
 	ks8695_wdt_start();
-	return nonseekable_open(inode, file);
+	return stream_open(inode, file);
 }
 
 /*
@@ -254,13 +251,10 @@ static int ks8695wdt_probe(struct platform_device *pdev)
 
 static int ks8695wdt_remove(struct platform_device *pdev)
 {
-	int res;
+	misc_deregister(&ks8695wdt_miscdev);
+	ks8695wdt_miscdev.parent = NULL;
 
-	res = misc_deregister(&ks8695wdt_miscdev);
-	if (!res)
-		ks8695wdt_miscdev.parent = NULL;
-
-	return res;
+	return 0;
 }
 
 static void ks8695wdt_shutdown(struct platform_device *pdev)

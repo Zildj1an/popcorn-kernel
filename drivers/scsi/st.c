@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
    SCSI Tape Driver for Linux version 1.1 and newer. See the accompanying
    file Documentation/scsi/st.txt for more information.
@@ -9,7 +10,7 @@
    Steve Hirsch, Andreas Koppenh"ofer, Michael Leodolter, Eyal Lebedinsky,
    Michael Schaefer, J"org Weule, and Eric Youngdale.
 
-   Copyright 1992 - 2010 Kai Makisara
+   Copyright 1992 - 2016 Kai Makisara
    email Kai.Makisara@kolumbus.fi
 
    Some small formal changes - aeb, 950809
@@ -17,13 +18,13 @@
    Last modified: 18-JAN-1998 Richard Gooch <rgooch@atnf.csiro.au> Devfs support
  */
 
-static const char *verstr = "20101219";
+static const char *verstr = "20160209";
 
 #include <linux/module.h>
 
 #include <linux/fs.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/mm.h>
 #include <linux/init.h>
 #include <linux/string.h>
@@ -41,7 +42,7 @@ static const char *verstr = "20101219";
 #include <linux/delay.h>
 #include <linux/mutex.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/dma.h>
 
 #include <scsi/scsi.h>
@@ -85,6 +86,7 @@ static int debug_flag;
 
 static struct class st_sysfs_class;
 static const struct attribute_group *st_dev_groups[];
+static const struct attribute_group *st_drv_groups[];
 
 MODULE_AUTHOR("Kai Makisara");
 MODULE_DESCRIPTION("SCSI tape (st) driver");
@@ -168,7 +170,7 @@ static int debugging = DEBUG;
 
 /* Remove mode bits and auto-rewind bit (7) */
 #define TAPE_NR(x) ( ((iminor(x) & ~255) >> (ST_NBR_MODE_BITS + 1)) | \
-    (iminor(x) & ~(-1 << ST_MODE_SHIFT)) )
+	(iminor(x) & ((1 << ST_MODE_SHIFT)-1)))
 #define TAPE_MODE(x) ((iminor(x) & ST_MODE_MASK) >> ST_MODE_SHIFT)
 
 /* Construct the minor number from the device (d), mode (m), and non-rewind (n) data */
@@ -198,15 +200,13 @@ static int sgl_unmap_user_pages(struct st_buffer *, const unsigned int, int);
 static int st_probe(struct device *);
 static int st_remove(struct device *);
 
-static int do_create_sysfs_files(void);
-static void do_remove_sysfs_files(void);
-
 static struct scsi_driver st_template = {
 	.gendrv = {
 		.name		= "st",
 		.owner		= THIS_MODULE,
 		.probe		= st_probe,
 		.remove		= st_remove,
+		.groups		= st_drv_groups,
 	},
 };
 
@@ -338,12 +338,14 @@ static void st_analyze_sense(struct st_request *SRpnt, struct st_cmdstatus *s)
 		switch (sense[0] & 0x7f) {
 		case 0x71:
 			s->deferred = 1;
+			/* fall through */
 		case 0x70:
 			s->fixed_format = 1;
 			s->flags = sense[2] & 0xe0;
 			break;
 		case 0x73:
 			s->deferred = 1;
+			/* fall through */
 		case 0x72:
 			s->fixed_format = 0;
 			ucp = scsi_sense_desc_find(sense, SCSI_SENSE_BUFFERSIZE, 4);
@@ -476,12 +478,12 @@ static void st_do_stats(struct scsi_tape *STp, struct request *req)
 	ktime_t now;
 
 	now = ktime_get();
-	if (req->cmd[0] == WRITE_6) {
+	if (scsi_req(req)->cmd[0] == WRITE_6) {
 		now = ktime_sub(now, STp->stats->write_time);
 		atomic64_add(ktime_to_ns(now), &STp->stats->tot_write_time);
 		atomic64_add(ktime_to_ns(now), &STp->stats->tot_io_time);
 		atomic64_inc(&STp->stats->write_cnt);
-		if (req->errors) {
+		if (scsi_req(req)->result) {
 			atomic64_add(atomic_read(&STp->stats->last_write_size)
 				- STp->buffer->cmdstat.residual,
 				&STp->stats->write_byte_cnt);
@@ -490,12 +492,12 @@ static void st_do_stats(struct scsi_tape *STp, struct request *req)
 		} else
 			atomic64_add(atomic_read(&STp->stats->last_write_size),
 				&STp->stats->write_byte_cnt);
-	} else if (req->cmd[0] == READ_6) {
+	} else if (scsi_req(req)->cmd[0] == READ_6) {
 		now = ktime_sub(now, STp->stats->read_time);
 		atomic64_add(ktime_to_ns(now), &STp->stats->tot_read_time);
 		atomic64_add(ktime_to_ns(now), &STp->stats->tot_io_time);
 		atomic64_inc(&STp->stats->read_cnt);
-		if (req->errors) {
+		if (scsi_req(req)->result) {
 			atomic64_add(atomic_read(&STp->stats->last_read_size)
 				- STp->buffer->cmdstat.residual,
 				&STp->stats->read_byte_cnt);
@@ -512,23 +514,26 @@ static void st_do_stats(struct scsi_tape *STp, struct request *req)
 	atomic64_dec(&STp->stats->in_flight);
 }
 
-static void st_scsi_execute_end(struct request *req, int uptodate)
+static void st_scsi_execute_end(struct request *req, blk_status_t status)
 {
 	struct st_request *SRpnt = req->end_io_data;
+	struct scsi_request *rq = scsi_req(req);
 	struct scsi_tape *STp = SRpnt->stp;
 	struct bio *tmp;
 
-	STp->buffer->cmdstat.midlevel_result = SRpnt->result = req->errors;
-	STp->buffer->cmdstat.residual = req->resid_len;
+	STp->buffer->cmdstat.midlevel_result = SRpnt->result = rq->result;
+	STp->buffer->cmdstat.residual = rq->resid_len;
 
 	st_do_stats(STp, req);
 
 	tmp = SRpnt->bio;
+	if (rq->sense_len)
+		memcpy(SRpnt->sense, rq->sense, SCSI_SENSE_BUFFERSIZE);
 	if (SRpnt->waiting)
 		complete(SRpnt->waiting);
 
 	blk_rq_unmap_user(tmp);
-	__blk_put_request(req->q, req);
+	blk_put_request(req);
 }
 
 static int st_scsi_execute(struct st_request *SRpnt, const unsigned char *cmd,
@@ -536,18 +541,18 @@ static int st_scsi_execute(struct st_request *SRpnt, const unsigned char *cmd,
 			   int timeout, int retries)
 {
 	struct request *req;
+	struct scsi_request *rq;
 	struct rq_map_data *mdata = &SRpnt->stp->buffer->map_data;
 	int err = 0;
-	int write = (data_direction == DMA_TO_DEVICE);
 	struct scsi_tape *STp = SRpnt->stp;
 
-	req = blk_get_request(SRpnt->stp->device->request_queue, write,
-			      GFP_KERNEL);
+	req = blk_get_request(SRpnt->stp->device->request_queue,
+			data_direction == DMA_TO_DEVICE ?
+			REQ_OP_SCSI_OUT : REQ_OP_SCSI_IN, 0);
 	if (IS_ERR(req))
 		return DRIVER_ERROR << 24;
-
-	blk_rq_set_block_pc(req);
-	req->cmd_flags |= REQ_QUIET;
+	rq = scsi_req(req);
+	req->rq_flags |= RQF_QUIET;
 
 	mdata->null_mapped = 1;
 
@@ -572,13 +577,11 @@ static int st_scsi_execute(struct st_request *SRpnt, const unsigned char *cmd,
 	}
 
 	SRpnt->bio = req->bio;
-	req->cmd_len = COMMAND_SIZE(cmd[0]);
-	memset(req->cmd, 0, BLK_MAX_CDB);
-	memcpy(req->cmd, cmd, req->cmd_len);
-	req->sense = SRpnt->sense;
-	req->sense_len = 0;
+	rq->cmd_len = COMMAND_SIZE(cmd[0]);
+	memset(rq->cmd, 0, BLK_MAX_CDB);
+	memcpy(rq->cmd, cmd, rq->cmd_len);
 	req->timeout = timeout;
-	req->retries = retries;
+	rq->retries = retries;
 	req->end_io_data = SRpnt;
 
 	blk_execute_rq_nowait(req->q, NULL, req, 1, st_scsi_execute_end);
@@ -828,10 +831,7 @@ static int st_flush_write_buffer(struct scsi_tape * STp)
 static int flush_buffer(struct scsi_tape *STp, int seek_next)
 {
 	int backspace, result;
-	struct st_buffer *STbuffer;
 	struct st_partstat *STps;
-
-	STbuffer = STp->buffer;
 
 	/*
 	 * If there was a bus reset, block further access
@@ -1975,9 +1975,12 @@ static long read_tape(struct scsi_tape *STp, long count,
 					transfer = (int)cmdstatp->uremainder64;
 				else
 					transfer = 0;
-				if (STp->block_size == 0 &&
-				    cmdstatp->sense_hdr.sense_key == MEDIUM_ERROR)
-					transfer = bytes;
+				if (cmdstatp->sense_hdr.sense_key == MEDIUM_ERROR) {
+					if (STp->block_size == 0)
+						transfer = bytes;
+					/* Some drives set ILI with MEDIUM ERROR */
+					cmdstatp->flags &= ~SENSE_ILI;
+				}
 
 				if (cmdstatp->flags & SENSE_ILI) {	/* ILI */
 					if (STp->block_size == 0 &&
@@ -2721,6 +2724,7 @@ static int st_int_ioctl(struct scsi_tape *STp, unsigned int cmd_in, unsigned lon
 	switch (cmd_in) {
 	case MTFSFM:
 		chg_eof = 0;	/* Changed from the FSF after this */
+		/* fall through */
 	case MTFSF:
 		cmd[0] = SPACE;
 		cmd[1] = 0x01;	/* Space FileMarks */
@@ -2735,6 +2739,7 @@ static int st_int_ioctl(struct scsi_tape *STp, unsigned int cmd_in, unsigned lon
 		break;
 	case MTBSFM:
 		chg_eof = 0;	/* Changed from the FSF after this */
+		/* fall through */
 	case MTBSF:
 		cmd[0] = SPACE;
 		cmd[1] = 0x01;	/* Space FileMarks */
@@ -3297,7 +3302,10 @@ static int switch_partition(struct scsi_tape *STp)
 #define PP_OFF_RESERVED        7
 
 #define PP_BIT_IDP             0x20
+#define PP_BIT_FDP             0x80
 #define PP_MSK_PSUM_MB         0x10
+#define PP_MSK_PSUM_UNITS      0x18
+#define PP_MSK_POFM            0x04
 
 /* Get the number of partitions on the tape. As a side effect reads the
    mode page into the tape buffer. */
@@ -3323,6 +3331,29 @@ static int nbr_partitions(struct scsi_tape *STp)
 }
 
 
+static int format_medium(struct scsi_tape *STp, int format)
+{
+	int result = 0;
+	int timeout = STp->long_timeout;
+	unsigned char scmd[MAX_COMMAND_SIZE];
+	struct st_request *SRpnt;
+
+	memset(scmd, 0, MAX_COMMAND_SIZE);
+	scmd[0] = FORMAT_UNIT;
+	scmd[2] = format;
+	if (STp->immediate) {
+		scmd[1] |= 1;		/* Don't wait for completion */
+		timeout = STp->device->request_queue->rq_timeout;
+	}
+	DEBC_printk(STp, "Sending FORMAT MEDIUM\n");
+	SRpnt = st_do_scsi(NULL, STp, scmd, 0, DMA_NONE,
+			   timeout, MAX_RETRIES, 1);
+	if (!SRpnt)
+		result = STp->buffer->syscall_result;
+	return result;
+}
+
+
 /* Partition the tape into two partitions if size > 0 or one partition if
    size == 0.
 
@@ -3341,11 +3372,16 @@ static int nbr_partitions(struct scsi_tape *STp)
    and 10 when 1 partition is defined (information from Eric Lee Green). This is
    is acceptable also to some other old drives and enforced if the first partition
    size field is used for the first additional partition size.
+
+   For drives that advertize SCSI-3 or newer, use the SSC-3 methods.
  */
 static int partition_tape(struct scsi_tape *STp, int size)
 {
 	int result;
+	int target_partition;
+	bool scsi3 = STp->device->scsi_level >= SCSI_3, needs_format = false;
 	int pgo, psd_cnt, psdo;
+	int psum = PP_MSK_PSUM_MB, units = 0;
 	unsigned char *bp;
 
 	result = read_mode_page(STp, PART_PAGE, 0);
@@ -3353,6 +3389,12 @@ static int partition_tape(struct scsi_tape *STp, int size)
 		DEBC_printk(STp, "Can't read partition mode page.\n");
 		return result;
 	}
+	target_partition = 1;
+	if (size < 0) {
+		target_partition = 0;
+		size = -size;
+	}
+
 	/* The mode page is in the buffer. Let's modify it and write it. */
 	bp = (STp->buffer)->b_data;
 	pgo = MODE_HEADER_LENGTH + bp[MH_OFF_BDESCS_LENGTH];
@@ -3360,9 +3402,52 @@ static int partition_tape(struct scsi_tape *STp, int size)
 		    bp[pgo + MP_OFF_PAGE_LENGTH] + 2);
 
 	psd_cnt = (bp[pgo + MP_OFF_PAGE_LENGTH] + 2 - PART_PAGE_FIXED_LENGTH) / 2;
+
+	if (scsi3) {
+		needs_format = (bp[pgo + PP_OFF_FLAGS] & PP_MSK_POFM) != 0;
+		if (needs_format && size == 0) {
+			/* No need to write the mode page when clearing
+			 *  partitioning
+			 */
+			DEBC_printk(STp, "Formatting tape with one partition.\n");
+			result = format_medium(STp, 0);
+			goto out;
+		}
+		if (needs_format)  /* Leave the old value for HP DATs claiming SCSI_3 */
+			psd_cnt = 2;
+		if ((bp[pgo + PP_OFF_FLAGS] & PP_MSK_PSUM_UNITS) == PP_MSK_PSUM_UNITS) {
+			/* Use units scaling for large partitions if the device
+			 * suggests it and no precision lost. Required for IBM
+			 * TS1140/50 drives that don't support MB units.
+			 */
+			if (size >= 1000 && (size % 1000) == 0) {
+				size /= 1000;
+				psum = PP_MSK_PSUM_UNITS;
+				units = 9; /* GB */
+			}
+		}
+		/* Try it anyway if too large to specify in MB */
+		if (psum == PP_MSK_PSUM_MB && size >= 65534) {
+			size /= 1000;
+			psum = PP_MSK_PSUM_UNITS;
+			units = 9;  /* GB */
+		}
+	}
+
+	if (size >= 65535 ||  /* Does not fit into two bytes */
+	    (target_partition == 0 && psd_cnt < 2)) {
+		result = -EINVAL;
+		goto out;
+	}
+
 	psdo = pgo + PART_PAGE_FIXED_LENGTH;
-	if (psd_cnt > bp[pgo + PP_OFF_MAX_ADD_PARTS]) {
-		bp[psdo] = bp[psdo + 1] = 0xff;  /* Rest of the tape */
+	/* The second condition is for HP DDS which use only one partition size
+	 * descriptor
+	 */
+	if (target_partition > 0 &&
+	    (psd_cnt > bp[pgo + PP_OFF_MAX_ADD_PARTS] ||
+	     bp[pgo + PP_OFF_MAX_ADD_PARTS] != 1)) {
+		bp[psdo] = bp[psdo + 1] = 0xff;  /* Rest to partition 0 */
 		psdo += 2;
 	}
 	memset(bp + psdo, 0, bp[pgo + PP_OFF_NBR_ADD_PARTS] * 2);
@@ -3371,7 +3456,7 @@ static int partition_tape(struct scsi_tape *STp, int size)
 		    psd_cnt, bp[pgo + PP_OFF_MAX_ADD_PARTS],
 		    bp[pgo + PP_OFF_NBR_ADD_PARTS]);
 
-	if (size <= 0) {
+	if (size == 0) {
 		bp[pgo + PP_OFF_NBR_ADD_PARTS] = 0;
 		if (psd_cnt <= bp[pgo + PP_OFF_MAX_ADD_PARTS])
 		    bp[pgo + MP_OFF_PAGE_LENGTH] = 6;
@@ -3379,22 +3464,37 @@ static int partition_tape(struct scsi_tape *STp, int size)
 	} else {
 		bp[psdo] = (size >> 8) & 0xff;
 		bp[psdo + 1] = size & 0xff;
+		if (target_partition == 0)
+			bp[psdo + 2] = bp[psdo + 3] = 0xff;
 		bp[pgo + 3] = 1;
 		if (bp[pgo + MP_OFF_PAGE_LENGTH] < 8)
 		    bp[pgo + MP_OFF_PAGE_LENGTH] = 8;
-		DEBC_printk(STp, "Formatting tape with two partitions "
-			    "(1 = %d MB).\n", size);
+		DEBC_printk(STp,
+			    "Formatting tape with two partitions (%i = %d MB).\n",
+			    target_partition, units > 0 ? size * 1000 : size);
 	}
 	bp[pgo + PP_OFF_PART_UNITS] = 0;
 	bp[pgo + PP_OFF_RESERVED] = 0;
-	bp[pgo + PP_OFF_FLAGS] = PP_BIT_IDP | PP_MSK_PSUM_MB;
+	if (size != 1 || units != 0) {
+		bp[pgo + PP_OFF_FLAGS] = PP_BIT_IDP | psum |
+			(bp[pgo + PP_OFF_FLAGS] & 0x07);
+		bp[pgo + PP_OFF_PART_UNITS] = units;
+	} else
+		bp[pgo + PP_OFF_FLAGS] = PP_BIT_FDP |
+			(bp[pgo + PP_OFF_FLAGS] & 0x1f);
+	bp[pgo + MP_OFF_PAGE_LENGTH] = 6 + psd_cnt * 2;
 
 	result = write_mode_page(STp, PART_PAGE, 1);
+
+	if (!result && needs_format)
+		result = format_medium(STp, 1);
+
 	if (result) {
 		st_printk(KERN_INFO, STp, "Partitioning of tape failed.\n");
 		result = (-EIO);
 	}
 
+out:
 	return result;
 }
 
@@ -3571,8 +3671,13 @@ static long st_ioctl(struct file *file, unsigned int cmd_in, unsigned long arg)
 				retval = (-EINVAL);
 				goto out;
 			}
-			if ((i = st_int_ioctl(STp, MTREW, 0)) < 0 ||
-			    (i = partition_tape(STp, mtc.mt_count)) < 0) {
+			i = do_load_unload(STp, file, 1);
+			if (i < 0) {
+				retval = i;
+				goto out;
+			}
+			i = partition_tape(STp, mtc.mt_count);
+			if (i < 0) {
 				retval = i;
 				goto out;
 			}
@@ -3582,7 +3687,7 @@ static long st_ioctl(struct file *file, unsigned int cmd_in, unsigned long arg)
 				STp->ps[i].last_block_valid = 0;
 			}
 			STp->partition = STp->new_partition = 0;
-			STp->nbr_partitions = 1;	/* Bad guess ?-) */
+			STp->nbr_partitions = mtc.mt_count != 0 ? 2 : 1;
 			STps->drv_block = STps->drv_file = 0;
 			retval = 0;
 			goto out;
@@ -3775,7 +3880,7 @@ static struct st_buffer *new_tape_buffer(int need_dma, int max_sg)
 {
 	struct st_buffer *tb;
 
-	tb = kzalloc(sizeof(struct st_buffer), GFP_ATOMIC);
+	tb = kzalloc(sizeof(struct st_buffer), GFP_KERNEL);
 	if (!tb) {
 		printk(KERN_NOTICE "st: Can't allocate new tape buffer.\n");
 		return NULL;
@@ -3785,8 +3890,8 @@ static struct st_buffer *new_tape_buffer(int need_dma, int max_sg)
 	tb->dma = need_dma;
 	tb->buffer_size = 0;
 
-	tb->reserved_pages = kzalloc(max_sg * sizeof(struct page *),
-				     GFP_ATOMIC);
+	tb->reserved_pages = kcalloc(max_sg, sizeof(struct page *),
+				     GFP_KERNEL);
 	if (!tb->reserved_pages) {
 		kfree(tb);
 		return NULL;
@@ -4084,6 +4189,7 @@ static int create_one_cdev(struct scsi_tape *tape, int mode, int rew)
 	}
 	cdev->owner = THIS_MODULE;
 	cdev->ops = &st_fops;
+	STm->cdevs[rew] = cdev;
 
 	error = cdev_add(cdev, cdev_devno, 1);
 	if (error) {
@@ -4092,7 +4198,6 @@ static int create_one_cdev(struct scsi_tape *tape, int mode, int rew)
 		pr_err("st%d: Device not attached.\n", dev_num);
 		goto out_free;
 	}
-	STm->cdevs[rew] = cdev;
 
 	i = mode << (4 - ST_NBR_MODE_BITS);
 	snprintf(name, 10, "%s%s%s", rew ? "n" : "",
@@ -4111,8 +4216,9 @@ static int create_one_cdev(struct scsi_tape *tape, int mode, int rew)
 	return 0;
 out_free:
 	cdev_del(STm->cdevs[rew]);
-	STm->cdevs[rew] = NULL;
 out:
+	STm->cdevs[rew] = NULL;
+	STm->devs[rew] = NULL;
 	return error;
 }
 
@@ -4186,7 +4292,7 @@ static int st_probe(struct device *dev)
 		goto out_buffer_free;
 	}
 
-	tpnt = kzalloc(sizeof(struct scsi_tape), GFP_ATOMIC);
+	tpnt = kzalloc(sizeof(struct scsi_tape), GFP_KERNEL);
 	if (tpnt == NULL) {
 		sdev_printk(KERN_ERR, SDp,
 			    "st: Can't allocate device descriptor.\n");
@@ -4195,11 +4301,11 @@ static int st_probe(struct device *dev)
 	kref_init(&tpnt->kref);
 	tpnt->disk = disk;
 	disk->private_data = &tpnt->driver;
-	disk->queue = SDp->request_queue;
 	/* SCSI tape doesn't register this gendisk via add_disk().  Manually
 	 * take queue reference that release_disk() expects. */
-	if (!blk_get_queue(disk->queue))
+	if (!blk_get_queue(SDp->request_queue))
 		goto out_put_disk;
+	disk->queue = SDp->request_queue;
 	tpnt->driver = &st_template;
 
 	tpnt->device = SDp;
@@ -4404,14 +4510,8 @@ static int __init init_st(void)
 	if (err)
 		goto err_chrdev;
 
-	err = do_create_sysfs_files();
-	if (err)
-		goto err_scsidrv;
-
 	return 0;
 
-err_scsidrv:
-	scsi_unregister_driver(&st_template.gendrv);
 err_chrdev:
 	unregister_chrdev_region(MKDEV(SCSI_TAPE_MAJOR, 0),
 				 ST_MAX_TAPE_ENTRIES);
@@ -4422,11 +4522,11 @@ err_class:
 
 static void __exit exit_st(void)
 {
-	do_remove_sysfs_files();
 	scsi_unregister_driver(&st_template.gendrv);
 	unregister_chrdev_region(MKDEV(SCSI_TAPE_MAJOR, 0),
 				 ST_MAX_TAPE_ENTRIES);
 	class_unregister(&st_sysfs_class);
+	idr_destroy(&st_index_idr);
 	printk(KERN_INFO "st: Unloaded.\n");
 }
 
@@ -4435,68 +4535,68 @@ module_exit(exit_st);
 
 
 /* The sysfs driver interface. Read-only at the moment */
-static ssize_t st_try_direct_io_show(struct device_driver *ddp, char *buf)
+static ssize_t try_direct_io_show(struct device_driver *ddp, char *buf)
 {
-	return snprintf(buf, PAGE_SIZE, "%d\n", try_direct_io);
+	return scnprintf(buf, PAGE_SIZE, "%d\n", try_direct_io);
 }
-static DRIVER_ATTR(try_direct_io, S_IRUGO, st_try_direct_io_show, NULL);
+static DRIVER_ATTR_RO(try_direct_io);
 
-static ssize_t st_fixed_buffer_size_show(struct device_driver *ddp, char *buf)
+static ssize_t fixed_buffer_size_show(struct device_driver *ddp, char *buf)
 {
-	return snprintf(buf, PAGE_SIZE, "%d\n", st_fixed_buffer_size);
+	return scnprintf(buf, PAGE_SIZE, "%d\n", st_fixed_buffer_size);
 }
-static DRIVER_ATTR(fixed_buffer_size, S_IRUGO, st_fixed_buffer_size_show, NULL);
+static DRIVER_ATTR_RO(fixed_buffer_size);
 
-static ssize_t st_max_sg_segs_show(struct device_driver *ddp, char *buf)
+static ssize_t max_sg_segs_show(struct device_driver *ddp, char *buf)
 {
-	return snprintf(buf, PAGE_SIZE, "%d\n", st_max_sg_segs);
+	return scnprintf(buf, PAGE_SIZE, "%d\n", st_max_sg_segs);
 }
-static DRIVER_ATTR(max_sg_segs, S_IRUGO, st_max_sg_segs_show, NULL);
+static DRIVER_ATTR_RO(max_sg_segs);
 
-static ssize_t st_version_show(struct device_driver *ddd, char *buf)
+static ssize_t version_show(struct device_driver *ddd, char *buf)
 {
-	return snprintf(buf, PAGE_SIZE, "[%s]\n", verstr);
+	return scnprintf(buf, PAGE_SIZE, "[%s]\n", verstr);
 }
-static DRIVER_ATTR(version, S_IRUGO, st_version_show, NULL);
+static DRIVER_ATTR_RO(version);
 
-static int do_create_sysfs_files(void)
+#if DEBUG
+static ssize_t debug_flag_store(struct device_driver *ddp,
+	const char *buf, size_t count)
 {
-	struct device_driver *sysfs = &st_template.gendrv;
-	int err;
-
-	err = driver_create_file(sysfs, &driver_attr_try_direct_io);
-	if (err)
-		return err;
-	err = driver_create_file(sysfs, &driver_attr_fixed_buffer_size);
-	if (err)
-		goto err_try_direct_io;
-	err = driver_create_file(sysfs, &driver_attr_max_sg_segs);
-	if (err)
-		goto err_attr_fixed_buf;
-	err = driver_create_file(sysfs, &driver_attr_version);
-	if (err)
-		goto err_attr_max_sg;
-
-	return 0;
-
-err_attr_max_sg:
-	driver_remove_file(sysfs, &driver_attr_max_sg_segs);
-err_attr_fixed_buf:
-	driver_remove_file(sysfs, &driver_attr_fixed_buffer_size);
-err_try_direct_io:
-	driver_remove_file(sysfs, &driver_attr_try_direct_io);
-	return err;
+/* We only care what the first byte of the data is the rest is unused.
+ * if it's a '1' we turn on debug and if it's a '0' we disable it. All
+ * other values have -EINVAL returned if they are passed in.
+ */
+	if (count > 0) {
+		if (buf[0] == '0') {
+			debugging = NO_DEBUG;
+			return count;
+		} else if (buf[0] == '1') {
+			debugging = 1;
+			return count;
+		}
+	}
+	return -EINVAL;
 }
 
-static void do_remove_sysfs_files(void)
+static ssize_t debug_flag_show(struct device_driver *ddp, char *buf)
 {
-	struct device_driver *sysfs = &st_template.gendrv;
-
-	driver_remove_file(sysfs, &driver_attr_version);
-	driver_remove_file(sysfs, &driver_attr_max_sg_segs);
-	driver_remove_file(sysfs, &driver_attr_fixed_buffer_size);
-	driver_remove_file(sysfs, &driver_attr_try_direct_io);
+	return scnprintf(buf, PAGE_SIZE, "%d\n", debugging);
 }
+static DRIVER_ATTR_RW(debug_flag);
+#endif
+
+static struct attribute *st_drv_attrs[] = {
+	&driver_attr_try_direct_io.attr,
+	&driver_attr_fixed_buffer_size.attr,
+	&driver_attr_max_sg_segs.attr,
+	&driver_attr_version.attr,
+#if DEBUG
+	&driver_attr_debug_flag.attr,
+#endif
+	NULL,
+};
+ATTRIBUTE_GROUPS(st_drv);
 
 /* The sysfs simple class interface */
 static ssize_t
@@ -4614,7 +4714,7 @@ static ssize_t read_byte_cnt_show(struct device *dev,
 static DEVICE_ATTR_RO(read_byte_cnt);
 
 /**
- * read_us_show - return read us - overall time spent waiting on reads in ns.
+ * read_ns_show - return read ns - overall time spent waiting on reads in ns.
  * @dev: struct device
  * @attr: attribute structure
  * @buf: buffer to return formatted data in
@@ -4817,19 +4917,14 @@ static int sgl_map_user_pages(struct st_buffer *STbp,
 	if (count == 0)
 		return 0;
 
-	if ((pages = kmalloc(max_pages * sizeof(*pages), GFP_KERNEL)) == NULL)
+	pages = kmalloc_array(max_pages, sizeof(*pages), GFP_KERNEL);
+	if (pages == NULL)
 		return -ENOMEM;
 
         /* Try to fault in all of the necessary pages */
         /* rw==READ means read from drive, write into memory area */
-	res = get_user_pages_unlocked(
-		current,
-		current->mm,
-		uaddr,
-		nr_pages,
-		rw == READ,
-		0, /* don't force */
-		pages);
+	res = get_user_pages_fast(uaddr, nr_pages, rw == READ ? FOLL_WRITE : 0,
+				  pages);
 
 	/* Errors and no page mapped should return here */
 	if (res < nr_pages)
@@ -4849,7 +4944,7 @@ static int sgl_map_user_pages(struct st_buffer *STbp,
  out_unmap:
 	if (res > 0) {
 		for (j=0; j < res; j++)
-			page_cache_release(pages[j]);
+			put_page(pages[j]);
 		res = 0;
 	}
 	kfree(pages);
@@ -4871,7 +4966,7 @@ static int sgl_unmap_user_pages(struct st_buffer *STbp,
 		/* FIXME: cache flush missing for rw==READ
 		 * FIXME: call the correct reference counting function
 		 */
-		page_cache_release(page);
+		put_page(page);
 	}
 	kfree(STbp->mapped_pages);
 	STbp->mapped_pages = NULL;

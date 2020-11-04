@@ -1,9 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright 2013 Matrox Graphics
- *
- * This file is subject to the terms and conditions of the GNU General
- * Public License version 2. See the file COPYING in the main
- * directory of this archive for more details.
  *
  * Author: Christopher Harvey <charvey@matrox.com>
  */
@@ -70,24 +67,27 @@ int mga_crtc_cursor_set(struct drm_crtc *crtc,
 	BUG_ON(pixels_2 != pixels_current && pixels_2 != pixels_prev);
 	BUG_ON(pixels_current == pixels_prev);
 
+	if (!handle || !file_priv) {
+		mga_hide_cursor(mdev);
+		return 0;
+	}
+
+	obj = drm_gem_object_lookup(file_priv, handle);
+	if (!obj)
+		return -ENOENT;
+
 	ret = mgag200_bo_reserve(pixels_1, true);
 	if (ret) {
 		WREG8(MGA_CURPOSXL, 0);
 		WREG8(MGA_CURPOSXH, 0);
-		return ret;
+		goto out_unref;
 	}
 	ret = mgag200_bo_reserve(pixels_2, true);
 	if (ret) {
 		WREG8(MGA_CURPOSXL, 0);
 		WREG8(MGA_CURPOSXH, 0);
 		mgag200_bo_unreserve(pixels_1);
-		return ret;
-	}
-
-	if (!handle) {
-		mga_hide_cursor(mdev);
-		ret = 0;
-		goto out1;
+		goto out_unreserve1;
 	}
 
 	/* Move cursor buffers into VRAM if they aren't already */
@@ -105,16 +105,6 @@ int mga_crtc_cursor_set(struct drm_crtc *crtc,
 			goto out1;
 		}
 	}
-
-	mutex_lock(&dev->struct_mutex);
-	obj = drm_gem_object_lookup(dev, file_priv, handle);
-	if (!obj) {
-		mutex_unlock(&dev->struct_mutex);
-		ret = -ENOENT;
-		goto out1;
-	}
-	drm_gem_object_unreference(obj);
-	mutex_unlock(&dev->struct_mutex);
 
 	bo = gem_to_mga_bo(obj);
 	ret = mgag200_bo_reserve(bo, true);
@@ -252,7 +242,11 @@ int mga_crtc_cursor_set(struct drm_crtc *crtc,
 	if (ret)
 		mga_hide_cursor(mdev);
 	mgag200_bo_unreserve(pixels_1);
+out_unreserve1:
 	mgag200_bo_unreserve(pixels_2);
+out_unref:
+	drm_gem_object_put_unlocked(obj);
+
 	return ret;
 }
 

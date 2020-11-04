@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * zbud.c
  *
@@ -96,10 +97,10 @@ struct zbud_pool {
 	struct list_head buddied;
 	struct list_head lru;
 	u64 pages_nr;
-	struct zbud_ops *ops;
+	const struct zbud_ops *ops;
 #ifdef CONFIG_ZPOOL
 	struct zpool *zpool;
-	struct zpool_ops *zpool_ops;
+	const struct zpool_ops *zpool_ops;
 #endif
 };
 
@@ -133,12 +134,12 @@ static int zbud_zpool_evict(struct zbud_pool *pool, unsigned long handle)
 		return -ENOENT;
 }
 
-static struct zbud_ops zbud_zpool_ops = {
+static const struct zbud_ops zbud_zpool_ops = {
 	.evict =	zbud_zpool_evict
 };
 
-static void *zbud_zpool_create(char *name, gfp_t gfp,
-			       struct zpool_ops *zpool_ops,
+static void *zbud_zpool_create(const char *name, gfp_t gfp,
+			       const struct zpool_ops *zpool_ops,
 			       struct zpool *zpool)
 {
 	struct zbud_pool *pool;
@@ -302,7 +303,7 @@ static int num_free_chunks(struct zbud_header *zhdr)
  * Return: pointer to the new zbud pool or NULL if the metadata allocation
  * failed.
  */
-struct zbud_pool *zbud_create_pool(gfp_t gfp, struct zbud_ops *ops)
+struct zbud_pool *zbud_create_pool(gfp_t gfp, const struct zbud_ops *ops)
 {
 	struct zbud_pool *pool;
 	int i;
@@ -463,13 +464,10 @@ void zbud_free(struct zbud_pool *pool, unsigned long handle)
 	spin_unlock(&pool->lock);
 }
 
-#define list_tail_entry(ptr, type, member) \
-	list_entry((ptr)->prev, type, member)
-
 /**
  * zbud_reclaim_page() - evicts allocations from a pool page and frees it
  * @pool:	pool from which a page will attempt to be evicted
- * @retires:	number of pages on the LRU list for which eviction will
+ * @retries:	number of pages on the LRU list for which eviction will
  *		be attempted before failing
  *
  * zbud reclaim is different from normal system reclaim in that the reclaim is
@@ -479,7 +477,7 @@ void zbud_free(struct zbud_pool *pool, unsigned long handle)
  * the user, however.
  *
  * To avoid these, this is how zbud_reclaim_page() should be called:
-
+ *
  * The user detects a page should be reclaimed and calls zbud_reclaim_page().
  * zbud_reclaim_page() will remove a zbud page from the pool LRU list and call
  * the user-defined eviction handler with the pool and handle as arguments.
@@ -514,7 +512,7 @@ int zbud_reclaim_page(struct zbud_pool *pool, unsigned int retries)
 		return -EINVAL;
 	}
 	for (i = 0; i < retries; i++) {
-		zhdr = list_tail_entry(&pool->lru, struct zbud_header, lru);
+		zhdr = list_last_entry(&pool->lru, struct zbud_header, lru);
 		list_del(&zhdr->lru);
 		list_del(&zhdr->buddy);
 		/* Protect zbud page against free */

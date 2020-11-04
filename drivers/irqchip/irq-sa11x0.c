@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2015 Dmitry Eremin-Solenikov
  * Copyright (C) 1999-2001 Nicolas Pitre
  *
  * Generic IRQ handling for the SA11x0.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #include <linux/init.h>
 #include <linux/module.h>
@@ -70,7 +67,6 @@ static int sa1100_normal_irqdomain_map(struct irq_domain *d,
 {
 	irq_set_chip_and_handler(irq, &sa1100_normal_chip,
 				 handle_level_irq);
-	set_irq_flags(irq, IRQF_VALID);
 
 	return 0;
 }

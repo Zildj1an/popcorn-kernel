@@ -34,10 +34,14 @@ Required properties (LPC):
 - compatible: "google,cros-ec-lpc"
 - reg: List of (IO address, size) pairs defining the interface uses
 
+Optional properties (all):
+- google,has-vbc-nvram: Some implementations of the EC include a small
+  nvram space used to store verified boot context data. This boolean flag
+  is used to specify whether this nvram is present or not.
 
 Example for I2C:
 
-i2c@12CA0000 {
+i2c@12ca0000 {
 	cros-ec@1e {
 		reg = <0x1e>;
 		compatible = "google,cros-ec-i2c";

@@ -1,19 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Intel MIC Platform Software Stack (MPSS)
  *
  * Copyright(c) 2014 Intel Corporation.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License, version 2, as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
- *
  * Intel SCIF driver.
- *
  */
 #ifndef SCIF_MAP_H
 #define SCIF_MAP_H
@@ -80,7 +71,7 @@ scif_unmap_single(dma_addr_t local, struct scif_dev *scifdev,
 		  size_t size)
 {
 	if (!scifdev_self(scifdev)) {
-		if (scifdev_is_p2p(scifdev) && local > scifdev->base_addr)
+		if (scifdev_is_p2p(scifdev))
 			local = local - scifdev->base_addr;
 		dma_unmap_single(&scifdev->sdev->dev, local,
 				 size, DMA_BIDIRECTIONAL);
@@ -97,7 +88,7 @@ scif_ioremap(dma_addr_t phys, size_t size, struct scif_dev *scifdev)
 		out_virt = phys_to_virt(phys);
 	else
 		out_virt = (void __force *)
-			   sdev->hw_ops->ioremap(sdev, phys, size);
+			   sdev->hw_ops->remap(sdev, phys, size);
 	return out_virt;
 }
 
@@ -107,7 +98,30 @@ scif_iounmap(void *virt, size_t len, struct scif_dev *scifdev)
 	if (!scifdev_self(scifdev)) {
 		struct scif_hw_dev *sdev = scifdev->sdev;
 
-		sdev->hw_ops->iounmap(sdev, (void __force __iomem *)virt);
+		sdev->hw_ops->unmap(sdev, (void __force __iomem *)virt);
 	}
+}
+
+static __always_inline int
+scif_map_page(dma_addr_t *dma_handle, struct page *page,
+	      struct scif_dev *scifdev)
+{
+	int err = 0;
+
+	if (scifdev_self(scifdev)) {
+		*dma_handle = page_to_phys(page);
+	} else {
+		struct scif_hw_dev *sdev = scifdev->sdev;
+		*dma_handle = dma_map_page(&sdev->dev,
+					   page, 0x0, PAGE_SIZE,
+					   DMA_BIDIRECTIONAL);
+		if (dma_mapping_error(&sdev->dev, *dma_handle))
+			err = -ENOMEM;
+		else if (scifdev_is_p2p(scifdev))
+			*dma_handle = *dma_handle + scifdev->base_addr;
+	}
+	if (err)
+		*dma_handle = 0;
+	return err;
 }
 #endif  /* SCIF_MAP_H */

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Xen implementation for transcendent memory (tmem)
  *
@@ -129,21 +130,17 @@ static int xen_tmem_new_pool(struct tmem_pool_uuid uuid,
 /* xen generic tmem ops */
 
 static int xen_tmem_put_page(u32 pool_id, struct tmem_oid oid,
-			     u32 index, unsigned long pfn)
+			     u32 index, struct page *page)
 {
-	unsigned long gmfn = xen_pv_domain() ? pfn_to_mfn(pfn) : pfn;
-
 	return xen_tmem_op(TMEM_PUT_PAGE, pool_id, oid, index,
-		gmfn, 0, 0, 0);
+			   xen_page_to_gfn(page), 0, 0, 0);
 }
 
 static int xen_tmem_get_page(u32 pool_id, struct tmem_oid oid,
-			     u32 index, unsigned long pfn)
+			     u32 index, struct page *page)
 {
-	unsigned long gmfn = xen_pv_domain() ? pfn_to_mfn(pfn) : pfn;
-
 	return xen_tmem_op(TMEM_GET_PAGE, pool_id, oid, index,
-		gmfn, 0, 0, 0);
+			   xen_page_to_gfn(page), 0, 0, 0);
 }
 
 static int xen_tmem_flush_page(u32 pool_id, struct tmem_oid oid, u32 index)
@@ -173,14 +170,13 @@ static void tmem_cleancache_put_page(int pool, struct cleancache_filekey key,
 {
 	u32 ind = (u32) index;
 	struct tmem_oid oid = *(struct tmem_oid *)&key;
-	unsigned long pfn = page_to_pfn(page);
 
 	if (pool < 0)
 		return;
 	if (ind != index)
 		return;
 	mb(); /* ensure page is quiescent; tmem may address it with an alias */
-	(void)xen_tmem_put_page((u32)pool, oid, ind, pfn);
+	(void)xen_tmem_put_page((u32)pool, oid, ind, page);
 }
 
 static int tmem_cleancache_get_page(int pool, struct cleancache_filekey key,
@@ -188,7 +184,6 @@ static int tmem_cleancache_get_page(int pool, struct cleancache_filekey key,
 {
 	u32 ind = (u32) index;
 	struct tmem_oid oid = *(struct tmem_oid *)&key;
-	unsigned long pfn = page_to_pfn(page);
 	int ret;
 
 	/* translate return values to linux semantics */
@@ -196,7 +191,7 @@ static int tmem_cleancache_get_page(int pool, struct cleancache_filekey key,
 		return -1;
 	if (ind != index)
 		return -1;
-	ret = xen_tmem_get_page((u32)pool, oid, ind, pfn);
+	ret = xen_tmem_get_page((u32)pool, oid, ind, page);
 	if (ret == 1)
 		return 0;
 	else
@@ -239,16 +234,16 @@ static int tmem_cleancache_init_fs(size_t pagesize)
 	return xen_tmem_new_pool(uuid_private, 0, pagesize);
 }
 
-static int tmem_cleancache_init_shared_fs(char *uuid, size_t pagesize)
+static int tmem_cleancache_init_shared_fs(uuid_t *uuid, size_t pagesize)
 {
 	struct tmem_pool_uuid shared_uuid;
 
-	shared_uuid.uuid_lo = *(u64 *)uuid;
-	shared_uuid.uuid_hi = *(u64 *)(&uuid[8]);
+	shared_uuid.uuid_lo = *(u64 *)&uuid->b[0];
+	shared_uuid.uuid_hi = *(u64 *)&uuid->b[8];
 	return xen_tmem_new_pool(shared_uuid, TMEM_POOL_SHARED, pagesize);
 }
 
-static struct cleancache_ops tmem_cleancache_ops = {
+static const struct cleancache_ops tmem_cleancache_ops = {
 	.put_page = tmem_cleancache_put_page,
 	.get_page = tmem_cleancache_get_page,
 	.invalidate_page = tmem_cleancache_flush_page,
@@ -287,16 +282,19 @@ static int tmem_frontswap_store(unsigned type, pgoff_t offset,
 {
 	u64 ind64 = (u64)offset;
 	u32 ind = (u32)offset;
-	unsigned long pfn = page_to_pfn(page);
 	int pool = tmem_frontswap_poolid;
 	int ret;
+
+	/* THP isn't supported */
+	if (PageTransHuge(page))
+		return -1;
 
 	if (pool < 0)
 		return -1;
 	if (ind64 != ind)
 		return -1;
 	mb(); /* ensure page is quiescent; tmem may address it with an alias */
-	ret = xen_tmem_put_page(pool, oswiz(type, ind), iswiz(ind), pfn);
+	ret = xen_tmem_put_page(pool, oswiz(type, ind), iswiz(ind), page);
 	/* translate Xen tmem return values to linux semantics */
 	if (ret == 1)
 		return 0;
@@ -313,7 +311,6 @@ static int tmem_frontswap_load(unsigned type, pgoff_t offset,
 {
 	u64 ind64 = (u64)offset;
 	u32 ind = (u32)offset;
-	unsigned long pfn = page_to_pfn(page);
 	int pool = tmem_frontswap_poolid;
 	int ret;
 
@@ -321,7 +318,7 @@ static int tmem_frontswap_load(unsigned type, pgoff_t offset,
 		return -1;
 	if (ind64 != ind)
 		return -1;
-	ret = xen_tmem_get_page(pool, oswiz(type, ind), iswiz(ind), pfn);
+	ret = xen_tmem_get_page(pool, oswiz(type, ind), iswiz(ind), page);
 	/* translate Xen tmem return values to linux semantics */
 	if (ret == 1)
 		return 0;

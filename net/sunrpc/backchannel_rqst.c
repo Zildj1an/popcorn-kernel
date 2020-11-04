@@ -76,13 +76,7 @@ static int xprt_alloc_xdr_buf(struct xdr_buf *buf, gfp_t gfp_flags)
 	page = alloc_page(gfp_flags);
 	if (page == NULL)
 		return -ENOMEM;
-	buf->head[0].iov_base = page_address(page);
-	buf->head[0].iov_len = PAGE_SIZE;
-	buf->tail[0].iov_base = NULL;
-	buf->tail[0].iov_len = 0;
-	buf->page_len = 0;
-	buf->len = 0;
-	buf->buflen = PAGE_SIZE;
+	xdr_buf_init(buf, page_address(page), PAGE_SIZE);
 	return 0;
 }
 
@@ -97,7 +91,6 @@ struct rpc_rqst *xprt_alloc_bc_req(struct rpc_xprt *xprt, gfp_t gfp_flags)
 		return NULL;
 
 	req->rq_xprt = xprt;
-	INIT_LIST_HEAD(&req->rq_list);
 	INIT_LIST_HEAD(&req->rq_bc_list);
 
 	/* Preallocate one XDR receive buffer */
@@ -138,6 +131,14 @@ out_free:
  */
 int xprt_setup_backchannel(struct rpc_xprt *xprt, unsigned int min_reqs)
 {
+	if (!xprt->ops->bc_setup)
+		return 0;
+	return xprt->ops->bc_setup(xprt, min_reqs);
+}
+EXPORT_SYMBOL_GPL(xprt_setup_backchannel);
+
+int xprt_setup_bc(struct rpc_xprt *xprt, unsigned int min_reqs)
+{
 	struct rpc_rqst *req;
 	struct list_head tmp_list;
 	int i;
@@ -169,10 +170,10 @@ int xprt_setup_backchannel(struct rpc_xprt *xprt, unsigned int min_reqs)
 	/*
 	 * Add the temporary list to the backchannel preallocation list
 	 */
-	spin_lock_bh(&xprt->bc_pa_lock);
+	spin_lock(&xprt->bc_pa_lock);
 	list_splice(&tmp_list, &xprt->bc_pa_list);
 	xprt_inc_alloc_count(xprt, min_reqs);
-	spin_unlock_bh(&xprt->bc_pa_lock);
+	spin_unlock(&xprt->bc_pa_lock);
 
 	dprintk("RPC:       setup backchannel transport done\n");
 	return 0;
@@ -192,18 +193,24 @@ out_free:
 	dprintk("RPC:       setup backchannel transport failed\n");
 	return -ENOMEM;
 }
-EXPORT_SYMBOL_GPL(xprt_setup_backchannel);
 
 /**
  * xprt_destroy_backchannel - Destroys the backchannel preallocated structures.
  * @xprt:	the transport holding the preallocated strucures
- * @max_reqs	the maximum number of preallocated structures to destroy
+ * @max_reqs:	the maximum number of preallocated structures to destroy
  *
  * Since these structures may have been allocated by multiple calls
  * to xprt_setup_backchannel, we only destroy up to the maximum number
  * of reqs specified by the caller.
  */
 void xprt_destroy_backchannel(struct rpc_xprt *xprt, unsigned int max_reqs)
+{
+	if (xprt->ops->bc_destroy)
+		xprt->ops->bc_destroy(xprt, max_reqs);
+}
+EXPORT_SYMBOL_GPL(xprt_destroy_backchannel);
+
+void xprt_destroy_bc(struct rpc_xprt *xprt, unsigned int max_reqs)
 {
 	struct rpc_rqst *req = NULL, *tmp = NULL;
 
@@ -227,9 +234,9 @@ out:
 	dprintk("RPC:        backchannel list empty= %s\n",
 		list_empty(&xprt->bc_pa_list) ? "true" : "false");
 }
-EXPORT_SYMBOL_GPL(xprt_destroy_backchannel);
 
-static struct rpc_rqst *xprt_alloc_bc_request(struct rpc_xprt *xprt, __be32 xid)
+static struct rpc_rqst *xprt_get_bc_request(struct rpc_xprt *xprt, __be32 xid,
+		struct rpc_rqst *new)
 {
 	struct rpc_rqst *req = NULL;
 
@@ -237,22 +244,20 @@ static struct rpc_rqst *xprt_alloc_bc_request(struct rpc_xprt *xprt, __be32 xid)
 	if (atomic_read(&xprt->bc_free_slots) <= 0)
 		goto not_found;
 	if (list_empty(&xprt->bc_pa_list)) {
-		req = xprt_alloc_bc_req(xprt, GFP_ATOMIC);
-		if (!req)
+		if (!new)
 			goto not_found;
-		list_add_tail(&req->rq_bc_pa_list, &xprt->bc_pa_list);
+		list_add_tail(&new->rq_bc_pa_list, &xprt->bc_pa_list);
 		xprt->bc_alloc_count++;
 	}
 	req = list_first_entry(&xprt->bc_pa_list, struct rpc_rqst,
 				rq_bc_pa_list);
 	req->rq_reply_bytes_recvd = 0;
-	req->rq_bytes_sent = 0;
 	memcpy(&req->rq_private_buf, &req->rq_rcv_buf,
 			sizeof(req->rq_private_buf));
 	req->rq_xid = xid;
 	req->rq_connect_cookie = xprt->connect_cookie;
-not_found:
 	dprintk("RPC:       backchannel req=%p\n", req);
+not_found:
 	return req;
 }
 
@@ -261,6 +266,13 @@ not_found:
  * associated with this rpc_task.
  */
 void xprt_free_bc_request(struct rpc_rqst *req)
+{
+	struct rpc_xprt *xprt = req->rq_xprt;
+
+	xprt->ops->bc_free_rqst(req);
+}
+
+void xprt_free_bc_rqst(struct rpc_rqst *req)
 {
 	struct rpc_xprt *xprt = req->rq_xprt;
 
@@ -308,18 +320,27 @@ void xprt_free_bc_request(struct rpc_rqst *req)
  */
 struct rpc_rqst *xprt_lookup_bc_request(struct rpc_xprt *xprt, __be32 xid)
 {
-	struct rpc_rqst *req;
+	struct rpc_rqst *req, *new = NULL;
 
-	spin_lock(&xprt->bc_pa_lock);
-	list_for_each_entry(req, &xprt->bc_pa_list, rq_bc_pa_list) {
-		if (req->rq_connect_cookie != xprt->connect_cookie)
-			continue;
-		if (req->rq_xid == xid)
-			goto found;
-	}
-	req = xprt_alloc_bc_request(xprt, xid);
+	do {
+		spin_lock(&xprt->bc_pa_lock);
+		list_for_each_entry(req, &xprt->bc_pa_list, rq_bc_pa_list) {
+			if (req->rq_connect_cookie != xprt->connect_cookie)
+				continue;
+			if (req->rq_xid == xid)
+				goto found;
+		}
+		req = xprt_get_bc_request(xprt, xid, new);
 found:
-	spin_unlock(&xprt->bc_pa_lock);
+		spin_unlock(&xprt->bc_pa_lock);
+		if (new) {
+			if (req != new)
+				xprt_free_bc_rqst(new);
+			break;
+		} else if (req)
+			break;
+		new = xprt_alloc_bc_req(xprt, GFP_KERNEL);
+	} while (new);
 	return req;
 }
 
@@ -348,4 +369,3 @@ void xprt_complete_bc_request(struct rpc_rqst *req, uint32_t copied)
 	wake_up(&bc_serv->sv_cb_waitq);
 	spin_unlock(&bc_serv->sv_cb_lock);
 }
-

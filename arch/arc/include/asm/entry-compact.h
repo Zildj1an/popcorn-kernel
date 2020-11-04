@@ -1,10 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2014-15 Synopsys, Inc. (www.synopsys.com)
  * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * Vineetg: March 2009 (Supporting 2 levels of Interrupts)
  *  Stack switching code can no longer reliably rely on the fact that
@@ -35,6 +32,7 @@
 #include <asm/asm-offsets.h>
 #include <asm/irqflags-compact.h>
 #include <asm/thread_info.h>	/* For THREAD_SIZE */
+
 #ifdef CONFIG_ARC_PLAT_EZNPS
 #include <plat/ctop.h>
 #endif
@@ -75,8 +73,8 @@
 	 * We need to be a bit more cautious here. What if a kernel bug in
 	 * L1 ISR, caused SP to go whaco (some small value which looks like
 	 * USER stk) and then we take L2 ISR.
-	 * Above brlo alone would treat it as a valid L1-L2 sceanrio
-	 * instead of shouting alound
+	 * Above brlo alone would treat it as a valid L1-L2 scenario
+	 * instead of shouting around
 	 * The only feasible way is to make sure this L2 happened in
 	 * L1 prelogue ONLY i.e. ilink2 is less than a pre-set marker in
 	 * L1 ISR before it switches stack
@@ -113,45 +111,14 @@
 
 .macro FAKE_RET_FROM_EXCPN
 
-	ld  r9, [sp, PT_status32]
-	bic r9, r9, (STATUS_U_MASK|STATUS_DE_MASK)
-	bset  r9, r9, STATUS_L_BIT
-	sr  r9, [erstatus]
-	mov r9, 55f
-	sr  r9, [eret]
-
+	lr	r9, [status32]
+	bclr	r9, r9, STATUS_AE_BIT
+	or	r9, r9, (STATUS_E1_MASK|STATUS_E2_MASK)
+	sr	r9, [erstatus]
+	mov	r9, 55f
+	sr	r9, [eret]
 	rtie
 55:
-.endm
-
-#define ECR_P_TRAP_FAKE_REVERT 8
-/*--------------------------------------------------------------
- * Used by the Trap handler for a unique case where trap was
- * made by an exception who faked rtie in order to switch
- * back to CPU Exception context before restoring regs
- *-------------------------------------------------------------*/
-.macro TRY_COMPLETE_FAKE_REVERT
-	/* Need at least 1 reg to code the early exception prologue */
-	PROLOG_FREEUP_REG r9, @ex_saved_reg1
-
-	/* Check if trap param indicates to revert fake */
-	lr    r9, [ecr]
-	bmsk  r9, r9, 7
-	cmp   r9, ECR_P_TRAP_FAKE_REVERT
-	bnz   66f
-
-	/* User Mode when this happened ? Yes: return to trap */
-	lr  r9, [erstatus]
-	bbit1   r9, STATUS_U_BIT, 66f
-
-	/* Restore r9 used to code the early prologue */
-	PROLOG_RESTORE_REG  r9, @ex_saved_reg1
-
-	/* Return to faking exception */
-	b ret_as_exception
-66:
-	/* Restore r9 used to code the early prologue */
-	PROLOG_RESTORE_REG  r9, @ex_saved_reg1
 .endm
 
 /*--------------------------------------------------------------
@@ -223,7 +190,6 @@
 	PUSHAX	erbta
 
 #ifdef CONFIG_ARC_PLAT_EZNPS
-	nop
 	.word CTOP_INST_SCHD_RW
 	PUSHAX  CTOP_AUX_GPA1
 	PUSHAX  CTOP_AUX_EFLAGS
@@ -246,7 +212,6 @@
  *-------------------------------------------------------------*/
 .macro EXCEPTION_EPILOGUE
 #ifdef CONFIG_ARC_PLAT_EZNPS
-	nop
 	.word CTOP_INST_SCHD_RW
 	POPAX   CTOP_AUX_EFLAGS
 	POPAX   CTOP_AUX_GPA1
@@ -265,10 +230,10 @@
 	POP	fp
 	POP	gp
 	RESTORE_R12_TO_R0
+
 #ifdef CONFIG_ARC_CURR_IN_REG
 	ld	r25, [sp, 12]
 #endif
-
 	ld  sp, [sp] /* restore original sp */
 	/* orig_r0, ECR, user_r25 skipped automatically */
 .endm
@@ -282,7 +247,7 @@
 	/* free up r9 as scratchpad */
 	PROLOG_FREEUP_REG r9, @int\LVL\()_saved_reg
 
-	/* Which mode (user/kernel) was the system in when intr occured */
+	/* Which mode (user/kernel) was the system in when intr occurred */
 	lr  r9, [status32_l\LVL\()]
 
 	SWITCH_TO_KERNEL_STK
@@ -314,7 +279,6 @@
 	PUSHAX	bta_l\LVL\()
 
 #ifdef CONFIG_ARC_PLAT_EZNPS
-	nop
 	.word CTOP_INST_SCHD_RW
 	PUSHAX  CTOP_AUX_GPA1
 	PUSHAX  CTOP_AUX_EFLAGS
@@ -332,7 +296,6 @@
  *-------------------------------------------------------------*/
 .macro INTERRUPT_EPILOGUE  LVL
 #ifdef CONFIG_ARC_PLAT_EZNPS
-	nop
 	.word CTOP_INST_SCHD_RW
 	POPAX   CTOP_AUX_EFLAGS
 	POPAX   CTOP_AUX_GPA1
@@ -351,10 +314,10 @@
 	POP	fp
 	POP	gp
 	RESTORE_R12_TO_R0
+
 #ifdef CONFIG_ARC_CURR_IN_REG
 	ld	r25, [sp, 12]
 #endif
-
 	ld  sp, [sp] /* restore original sp */
 	/* orig_r0, ECR, user_r25 skipped automatically */
 .endm
@@ -364,18 +327,13 @@
 	bic \reg, sp, (THREAD_SIZE - 1)
 .endm
 
+#ifndef CONFIG_ARC_PLAT_EZNPS
 /* Get CPU-ID of this core */
 .macro  GET_CPU_ID  reg
-#ifdef CONFIG_ARC_PLAT_EZNPS
-	lr  \reg, [CTOP_AUX_LOGIC_GLOBAL_ID]
-#ifndef CONFIG_EZNPS_MTM_EXT
-	lsr \reg, \reg, 4
-#endif
-#else
 	lr  \reg, [identity]
 	lsr \reg, \reg, 8
 	bmsk \reg, \reg, 7
-#endif
 .endm
+#endif
 
 #endif  /* __ASM_ARC_ENTRY_COMPACT_H */

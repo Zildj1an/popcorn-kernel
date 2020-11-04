@@ -1,10 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright 2014 Linaro Ltd.
  * Copyright (C) 2014 ZTE Corporation.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #ifndef __DT_BINDINGS_CLOCK_ZX296702_H
@@ -153,7 +150,16 @@
 #define ZX296702_I2S0_WCLK			9
 #define ZX296702_I2S0_PCLK			10
 #define ZX296702_I2S0_DIV			11
-#define ZX296702_LSP0CLK_END			12
+#define ZX296702_I2S1_WCLK_MUX			12
+#define ZX296702_I2S1_WCLK			13
+#define ZX296702_I2S1_PCLK			14
+#define ZX296702_I2S1_DIV			15
+#define ZX296702_I2S2_WCLK_MUX			16
+#define ZX296702_I2S2_WCLK			17
+#define ZX296702_I2S2_PCLK			18
+#define ZX296702_I2S2_DIV			19
+#define ZX296702_GPIO_CLK			20
+#define ZX296702_LSP0CLK_END			21
 
 #define ZX296702_UART0_WCLK_MUX			0
 #define ZX296702_UART0_WCLK			1
@@ -165,6 +171,10 @@
 #define ZX296702_SDMMC0_WCLK_DIV		7
 #define ZX296702_SDMMC0_WCLK			8
 #define ZX296702_SDMMC0_PCLK			9
-#define ZX296702_LSP1CLK_END			10
+#define ZX296702_SPDIF1_WCLK_MUX		10
+#define ZX296702_SPDIF1_WCLK			11
+#define ZX296702_SPDIF1_PCLK			12
+#define ZX296702_SPDIF1_DIV			13
+#define ZX296702_LSP1CLK_END			14
 
 #endif /* __DT_BINDINGS_CLOCK_ZX296702_H */

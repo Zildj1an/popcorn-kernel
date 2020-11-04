@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * mpx.c - Memory Protection eXtensions
  *
@@ -7,11 +8,13 @@
  */
 #include <linux/kernel.h>
 #include <linux/slab.h>
+#include <linux/mm_types.h>
+#include <linux/mman.h>
 #include <linux/syscalls.h>
 #include <linux/sched/sysctl.h>
 
 #include <asm/insn.h>
-#include <asm/mman.h>
+#include <asm/insn-eval.h>
 #include <asm/mmu_context.h>
 #include <asm/mpx.h>
 #include <asm/processor.h>
@@ -42,175 +45,21 @@ static inline unsigned long mpx_bt_size_bytes(struct mm_struct *mm)
  */
 static unsigned long mpx_mmap(unsigned long len)
 {
-	unsigned long ret;
-	unsigned long addr, pgoff;
 	struct mm_struct *mm = current->mm;
-	vm_flags_t vm_flags;
-	struct vm_area_struct *vma;
+	unsigned long addr, populate;
 
 	/* Only bounds table can be allocated here */
 	if (len != mpx_bt_size_bytes(mm))
 		return -EINVAL;
 
 	down_write(&mm->mmap_sem);
-
-	/* Too many mappings? */
-	if (mm->map_count > sysctl_max_map_count) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	/* Obtain the address to map to. we verify (or select) it and ensure
-	 * that it represents a valid section of the address space.
-	 */
-	addr = get_unmapped_area(NULL, 0, len, 0, MAP_ANONYMOUS | MAP_PRIVATE);
-	if (addr & ~PAGE_MASK) {
-		ret = addr;
-		goto out;
-	}
-
-	vm_flags = VM_READ | VM_WRITE | VM_MPX |
-			mm->def_flags | VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC;
-
-	/* Set pgoff according to addr for anon_vma */
-	pgoff = addr >> PAGE_SHIFT;
-
-	ret = mmap_region(NULL, addr, len, vm_flags, pgoff);
-	if (IS_ERR_VALUE(ret))
-		goto out;
-
-	vma = find_vma(mm, ret);
-	if (!vma) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	if (vm_flags & VM_LOCKED) {
-		up_write(&mm->mmap_sem);
-		mm_populate(ret, len);
-		return ret;
-	}
-
-out:
+	addr = do_mmap(NULL, 0, len, PROT_READ | PROT_WRITE,
+		       MAP_ANONYMOUS | MAP_PRIVATE, VM_MPX, 0, &populate, NULL);
 	up_write(&mm->mmap_sem);
-	return ret;
-}
+	if (populate)
+		mm_populate(addr, populate);
 
-enum reg_type {
-	REG_TYPE_RM = 0,
-	REG_TYPE_INDEX,
-	REG_TYPE_BASE,
-};
-
-static int get_reg_offset(struct insn *insn, struct pt_regs *regs,
-			  enum reg_type type)
-{
-	int regno = 0;
-
-	static const int regoff[] = {
-		offsetof(struct pt_regs, ax),
-		offsetof(struct pt_regs, cx),
-		offsetof(struct pt_regs, dx),
-		offsetof(struct pt_regs, bx),
-		offsetof(struct pt_regs, sp),
-		offsetof(struct pt_regs, bp),
-		offsetof(struct pt_regs, si),
-		offsetof(struct pt_regs, di),
-#ifdef CONFIG_X86_64
-		offsetof(struct pt_regs, r8),
-		offsetof(struct pt_regs, r9),
-		offsetof(struct pt_regs, r10),
-		offsetof(struct pt_regs, r11),
-		offsetof(struct pt_regs, r12),
-		offsetof(struct pt_regs, r13),
-		offsetof(struct pt_regs, r14),
-		offsetof(struct pt_regs, r15),
-#endif
-	};
-	int nr_registers = ARRAY_SIZE(regoff);
-	/*
-	 * Don't possibly decode a 32-bit instructions as
-	 * reading a 64-bit-only register.
-	 */
-	if (IS_ENABLED(CONFIG_X86_64) && !insn->x86_64)
-		nr_registers -= 8;
-
-	switch (type) {
-	case REG_TYPE_RM:
-		regno = X86_MODRM_RM(insn->modrm.value);
-		if (X86_REX_B(insn->rex_prefix.value) == 1)
-			regno += 8;
-		break;
-
-	case REG_TYPE_INDEX:
-		regno = X86_SIB_INDEX(insn->sib.value);
-		if (X86_REX_X(insn->rex_prefix.value) == 1)
-			regno += 8;
-		break;
-
-	case REG_TYPE_BASE:
-		regno = X86_SIB_BASE(insn->sib.value);
-		if (X86_REX_B(insn->rex_prefix.value) == 1)
-			regno += 8;
-		break;
-
-	default:
-		pr_err("invalid register type");
-		BUG();
-		break;
-	}
-
-	if (regno > nr_registers) {
-		WARN_ONCE(1, "decoded an instruction with an invalid register");
-		return -EINVAL;
-	}
-	return regoff[regno];
-}
-
-/*
- * return the address being referenced be instruction
- * for rm=3 returning the content of the rm reg
- * for rm!=3 calculates the address using SIB and Disp
- */
-static void __user *mpx_get_addr_ref(struct insn *insn, struct pt_regs *regs)
-{
-	unsigned long addr, base, indx;
-	int addr_offset, base_offset, indx_offset;
-	insn_byte_t sib;
-
-	insn_get_modrm(insn);
-	insn_get_sib(insn);
-	sib = insn->sib.value;
-
-	if (X86_MODRM_MOD(insn->modrm.value) == 3) {
-		addr_offset = get_reg_offset(insn, regs, REG_TYPE_RM);
-		if (addr_offset < 0)
-			goto out_err;
-		addr = regs_get_register(regs, addr_offset);
-	} else {
-		if (insn->sib.nbytes) {
-			base_offset = get_reg_offset(insn, regs, REG_TYPE_BASE);
-			if (base_offset < 0)
-				goto out_err;
-
-			indx_offset = get_reg_offset(insn, regs, REG_TYPE_INDEX);
-			if (indx_offset < 0)
-				goto out_err;
-
-			base = regs_get_register(regs, base_offset);
-			indx = regs_get_register(regs, indx_offset);
-			addr = base + indx * (1 << X86_SIB_SCALE(sib));
-		} else {
-			addr_offset = get_reg_offset(insn, regs, REG_TYPE_RM);
-			if (addr_offset < 0)
-				goto out_err;
-			addr = regs_get_register(regs, addr_offset);
-		}
-		addr += insn->displacement.value;
-	}
-	return (void __user *)addr;
-out_err:
-	return (void __user *)-1;
+	return addr;
 }
 
 static int mpx_insn_decode(struct insn *insn,
@@ -269,13 +118,11 @@ bad_opcode:
  * anything it wants in to the instructions.  We can not
  * trust anything about it.  They might not be valid
  * instructions or might encode invalid registers, etc...
- *
- * The caller is expected to kfree() the returned siginfo_t.
  */
-siginfo_t *mpx_generate_siginfo(struct pt_regs *regs)
+int mpx_fault_info(struct mpx_fault_info *info, struct pt_regs *regs)
 {
-	const struct bndreg *bndregs, *bndreg;
-	siginfo_t *info = NULL;
+	const struct mpx_bndreg_state *bndregs;
+	const struct mpx_bndreg *bndreg;
 	struct insn insn;
 	uint8_t bndregno;
 	int err;
@@ -295,19 +142,14 @@ siginfo_t *mpx_generate_siginfo(struct pt_regs *regs)
 		goto err_out;
 	}
 	/* get bndregs field from current task's xsave area */
-	bndregs = get_xsave_field_ptr(XSTATE_BNDREGS);
+	bndregs = get_xsave_field_ptr(XFEATURE_BNDREGS);
 	if (!bndregs) {
 		err = -EINVAL;
 		goto err_out;
 	}
 	/* now go select the individual register in the set of 4 */
-	bndreg = &bndregs[bndregno];
+	bndreg = &bndregs->bndreg[bndregno];
 
-	info = kzalloc(sizeof(*info), GFP_KERNEL);
-	if (!info) {
-		err = -ENOMEM;
-		goto err_out;
-	}
 	/*
 	 * The registers are always 64-bit, but the upper 32
 	 * bits are ignored in 32-bit mode.  Also, note that the
@@ -318,32 +160,28 @@ siginfo_t *mpx_generate_siginfo(struct pt_regs *regs)
 	 * complains when casting from integers to different-size
 	 * pointers.
 	 */
-	info->si_lower = (void __user *)(unsigned long)bndreg->lower_bound;
-	info->si_upper = (void __user *)(unsigned long)~bndreg->upper_bound;
-	info->si_addr_lsb = 0;
-	info->si_signo = SIGSEGV;
-	info->si_errno = 0;
-	info->si_code = SEGV_BNDERR;
-	info->si_addr = mpx_get_addr_ref(&insn, regs);
+	info->lower = (void __user *)(unsigned long)bndreg->lower_bound;
+	info->upper = (void __user *)(unsigned long)~bndreg->upper_bound;
+	info->addr  = insn_get_addr_ref(&insn, regs);
+
 	/*
 	 * We were not able to extract an address from the instruction,
 	 * probably because there was something invalid in it.
 	 */
-	if (info->si_addr == (void *)-1) {
+	if (info->addr == (void __user *)-1) {
 		err = -EINVAL;
 		goto err_out;
 	}
-	trace_mpx_bounds_register_exception(info->si_addr, bndreg);
-	return info;
+	trace_mpx_bounds_register_exception(info->addr, bndreg);
+	return 0;
 err_out:
 	/* info might be NULL, but kfree() handles that */
-	kfree(info);
-	return ERR_PTR(err);
+	return err;
 }
 
 static __user void *mpx_get_bounds_dir(void)
 {
-	const struct bndcsr *bndcsr;
+	const struct mpx_bndcsr *bndcsr;
 
 	if (!cpu_feature_enabled(X86_FEATURE_MPX))
 		return MPX_INVALID_BOUNDS_DIR;
@@ -352,7 +190,7 @@ static __user void *mpx_get_bounds_dir(void)
 	 * The bounds directory pointer is stored in a register
 	 * only accessible if we first do an xsave.
 	 */
-	bndcsr = get_xsave_field_ptr(XSTATE_BNDCSR);
+	bndcsr = get_xsave_field_ptr(XFEATURE_BNDCSR);
 	if (!bndcsr)
 		return MPX_INVALID_BOUNDS_DIR;
 
@@ -386,14 +224,23 @@ int mpx_enable_management(void)
 	 * The copy_xregs_to_kernel() beneath get_xsave_field_ptr() is
 	 * expected to be relatively expensive. Storing the bounds
 	 * directory here means that we do not have to do xsave in the
-	 * unmap path; we can just use mm->bd_addr instead.
+	 * unmap path; we can just use mm->context.bd_addr instead.
 	 */
 	bd_base = mpx_get_bounds_dir();
 	down_write(&mm->mmap_sem);
-	mm->bd_addr = bd_base;
-	if (mm->bd_addr == MPX_INVALID_BOUNDS_DIR)
-		ret = -ENXIO;
 
+	/* MPX doesn't support addresses above 47 bits yet. */
+	if (find_vma(mm, DEFAULT_MAP_WINDOW)) {
+		pr_warn_once("%s (%d): MPX cannot handle addresses "
+				"above 47-bits. Disabling.",
+				current->comm, current->pid);
+		ret = -ENXIO;
+		goto out;
+	}
+	mm->context.bd_addr = bd_base;
+	if (mm->context.bd_addr == MPX_INVALID_BOUNDS_DIR)
+		ret = -ENXIO;
+out:
 	up_write(&mm->mmap_sem);
 	return ret;
 }
@@ -406,7 +253,7 @@ int mpx_disable_management(void)
 		return -ENXIO;
 
 	down_write(&mm->mmap_sem);
-	mm->bd_addr = MPX_INVALID_BOUNDS_DIR;
+	mm->context.bd_addr = MPX_INVALID_BOUNDS_DIR;
 	up_write(&mm->mmap_sem);
 	return 0;
 }
@@ -526,10 +373,10 @@ out_unmap:
 static int do_mpx_bt_fault(void)
 {
 	unsigned long bd_entry, bd_base;
-	const struct bndcsr *bndcsr;
+	const struct mpx_bndcsr *bndcsr;
 	struct mm_struct *mm = current->mm;
 
-	bndcsr = get_xsave_field_ptr(XSTATE_BNDCSR);
+	bndcsr = get_xsave_field_ptr(XFEATURE_BNDCSR);
 	if (!bndcsr)
 		return -EINVAL;
 	/*
@@ -561,15 +408,7 @@ int mpx_handle_bd_fault(void)
 	if (!kernel_managing_mpx_tables(current->mm))
 		return -EINVAL;
 
-	if (do_mpx_bt_fault()) {
-		force_sig(SIGSEGV, current);
-		/*
-		 * The force_sig() is essentially "handling" this
-		 * exception, so we do not pass up the error
-		 * from do_mpx_bt_fault().
-		 */
-	}
-	return 0;
+	return do_mpx_bt_fault();
 }
 
 /*
@@ -580,10 +419,9 @@ static int mpx_resolve_fault(long __user *addr, int write)
 {
 	long gup_ret;
 	int nr_pages = 1;
-	int force = 0;
 
-	gup_ret = get_user_pages(current, current->mm, (unsigned long)addr,
-				 nr_pages, write, force, NULL, NULL);
+	gup_ret = get_user_pages((unsigned long)addr, nr_pages,
+			write ? FOLL_WRITE : 0,	NULL, NULL);
 	/*
 	 * get_user_pages() returns number of pages gotten.
 	 * 0 means we failed to fault in and get anything,
@@ -622,6 +460,29 @@ static unsigned long mpx_bd_entry_to_bt_addr(struct mm_struct *mm,
 }
 
 /*
+ * We only want to do a 4-byte get_user() on 32-bit.  Otherwise,
+ * we might run off the end of the bounds table if we are on
+ * a 64-bit kernel and try to get 8 bytes.
+ */
+static int get_user_bd_entry(struct mm_struct *mm, unsigned long *bd_entry_ret,
+		long __user *bd_entry_ptr)
+{
+	u32 bd_entry_32;
+	int ret;
+
+	if (is_64bit_mm(mm))
+		return get_user(*bd_entry_ret, bd_entry_ptr);
+
+	/*
+	 * Note that get_user() uses the type of the *pointer* to
+	 * establish the size of the get, not the destination.
+	 */
+	ret = get_user(bd_entry_32, (u32 __user *)bd_entry_ptr);
+	*bd_entry_ret = bd_entry_32;
+	return ret;
+}
+
+/*
  * Get the base of bounds tables pointed by specific bounds
  * directory entry.
  */
@@ -634,14 +495,14 @@ static int get_bt_addr(struct mm_struct *mm,
 	unsigned long bd_entry;
 	unsigned long bt_addr;
 
-	if (!access_ok(VERIFY_READ, (bd_entry_ptr), sizeof(*bd_entry_ptr)))
+	if (!access_ok((bd_entry_ptr), sizeof(*bd_entry_ptr)))
 		return -EFAULT;
 
 	while (1) {
 		int need_write = 0;
 
 		pagefault_disable();
-		ret = get_user(bd_entry, bd_entry_ptr);
+		ret = get_user_bd_entry(mm, &bd_entry, bd_entry_ptr);
 		pagefault_enable();
 		if (!ret)
 			break;
@@ -736,11 +597,23 @@ static unsigned long mpx_get_bt_entry_offset_bytes(struct mm_struct *mm,
  */
 static inline unsigned long bd_entry_virt_space(struct mm_struct *mm)
 {
-	unsigned long long virt_space = (1ULL << boot_cpu_data.x86_virt_bits);
-	if (is_64bit_mm(mm))
-		return virt_space / MPX_BD_NR_ENTRIES_64;
-	else
-		return virt_space / MPX_BD_NR_ENTRIES_32;
+	unsigned long long virt_space;
+	unsigned long long GB = (1ULL << 30);
+
+	/*
+	 * This covers 32-bit emulation as well as 32-bit kernels
+	 * running on 64-bit hardware.
+	 */
+	if (!is_64bit_mm(mm))
+		return (4ULL * GB) / MPX_BD_NR_ENTRIES_32;
+
+	/*
+	 * 'x86_virt_bits' returns what the hardware is capable
+	 * of, and returns the full >32-bit address space when
+	 * running 32-bit kernels on 64-bit hardware.
+	 */
+	virt_space = (1ULL << boot_cpu_data.x86_virt_bits);
+	return virt_space / MPX_BD_NR_ENTRIES_64;
 }
 
 /*
@@ -798,7 +671,7 @@ static noinline int zap_bt_entries_mapping(struct mm_struct *mm,
 			return -EINVAL;
 
 		len = min(vma->vm_end, end) - addr;
-		zap_page_range(vma, addr, len, NULL);
+		zap_page_range(vma, addr, len);
 		trace_mpx_unmap_zap(addr, addr+len);
 
 		vma = vma->vm_next;
@@ -895,7 +768,7 @@ static int unmap_entire_bt(struct mm_struct *mm,
 	 * avoid recursion, do_munmap() will check whether it comes
 	 * from one bounds table through VM_MPX flag.
 	 */
-	return do_munmap(mm, bt_addr, mpx_bt_size_bytes(mm));
+	return do_munmap(mm, bt_addr, mpx_bt_size_bytes(mm), NULL);
 }
 
 static int try_unmap_single_bt(struct mm_struct *mm,
@@ -949,7 +822,7 @@ static int try_unmap_single_bt(struct mm_struct *mm,
 		end = bta_end_vaddr;
 	}
 
-	bde_vaddr = mm->bd_addr + mpx_get_bd_entry_offset(mm, start);
+	bde_vaddr = mm->context.bd_addr + mpx_get_bd_entry_offset(mm, start);
 	ret = get_bt_addr(mm, bde_vaddr, &bt_addr);
 	/*
 	 * No bounds table there, so nothing to unmap.
@@ -1008,9 +881,10 @@ static int mpx_unmap_tables(struct mm_struct *mm,
  * the virtual address region start...end have already been split if
  * necessary, and the 'vma' is the first vma in this range (start -> end).
  */
-void mpx_notify_unmap(struct mm_struct *mm, struct vm_area_struct *vma,
-		unsigned long start, unsigned long end)
+void mpx_notify_unmap(struct mm_struct *mm, unsigned long start,
+		      unsigned long end)
 {
+	struct vm_area_struct *vma;
 	int ret;
 
 	/*
@@ -1029,13 +903,36 @@ void mpx_notify_unmap(struct mm_struct *mm, struct vm_area_struct *vma,
 	 * which should not occur normally. Being strict about it here
 	 * helps ensure that we do not have an exploitable stack overflow.
 	 */
-	do {
+	vma = find_vma(mm, start);
+	while (vma && vma->vm_start < end) {
 		if (vma->vm_flags & VM_MPX)
 			return;
 		vma = vma->vm_next;
-	} while (vma && vma->vm_start < end);
+	}
 
 	ret = mpx_unmap_tables(mm, start, end);
 	if (ret)
 		force_sig(SIGSEGV, current);
+}
+
+/* MPX cannot handle addresses above 47 bits yet. */
+unsigned long mpx_unmapped_area_check(unsigned long addr, unsigned long len,
+		unsigned long flags)
+{
+	if (!kernel_managing_mpx_tables(current->mm))
+		return addr;
+	if (addr + len <= DEFAULT_MAP_WINDOW)
+		return addr;
+	if (flags & MAP_FIXED)
+		return -ENOMEM;
+
+	/*
+	 * Requested len is larger than the whole area we're allowed to map in.
+	 * Resetting hinting address wouldn't do much good -- fail early.
+	 */
+	if (len > DEFAULT_MAP_WINDOW)
+		return -ENOMEM;
+
+	/* Look for unmap area within DEFAULT_MAP_WINDOW */
+	return 0;
 }

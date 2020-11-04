@@ -1,19 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2007-2013 Nicira, Inc.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of version 2 of the GNU General Public
- * License as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301, USA
  */
 
 #ifndef FLOW_TABLE_H
@@ -29,7 +16,6 @@
 #include <linux/in6.h>
 #include <linux/jiffies.h>
 #include <linux/time.h>
-#include <linux/flex_array.h>
 
 #include <net/inet_ecn.h>
 #include <net/ip_tunnels.h>
@@ -37,7 +23,7 @@
 #include "flow.h"
 
 struct table_instance {
-	struct flex_array *buckets;
+	struct hlist_head *buckets;
 	unsigned int n_buckets;
 	struct rcu_head rcu;
 	int node_ver;
@@ -86,5 +72,5 @@ struct sw_flow *ovs_flow_tbl_lookup_ufid(struct flow_table *,
 bool ovs_flow_cmp(const struct sw_flow *, const struct sw_flow_match *);
 
 void ovs_flow_mask_key(struct sw_flow_key *dst, const struct sw_flow_key *src,
-		       const struct sw_flow_mask *mask);
+		       bool full, const struct sw_flow_mask *mask);
 #endif /* flow_table.h */

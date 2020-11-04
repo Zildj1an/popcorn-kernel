@@ -1,19 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * dwmac-sunxi.c - Allwinner sunxi DWMAC specific glue layer
  *
  * Copyright (C) 2013 Chen-Yu Tsai
  *
  * Chen-Yu Tsai  <wens@csie.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/stmmac.h>
@@ -32,35 +23,6 @@ struct sunxi_priv_data {
 	struct clk *tx_clk;
 	struct regulator *regulator;
 };
-
-static void *sun7i_gmac_setup(struct platform_device *pdev)
-{
-	struct sunxi_priv_data *gmac;
-	struct device *dev = &pdev->dev;
-
-	gmac = devm_kzalloc(dev, sizeof(*gmac), GFP_KERNEL);
-	if (!gmac)
-		return ERR_PTR(-ENOMEM);
-
-	gmac->interface = of_get_phy_mode(dev->of_node);
-
-	gmac->tx_clk = devm_clk_get(dev, "allwinner_gmac_tx");
-	if (IS_ERR(gmac->tx_clk)) {
-		dev_err(dev, "could not get tx clock\n");
-		return gmac->tx_clk;
-	}
-
-	/* Optional regulator for PHY */
-	gmac->regulator = devm_regulator_get_optional(dev, "phy");
-	if (IS_ERR(gmac->regulator)) {
-		if (PTR_ERR(gmac->regulator) == -EPROBE_DEFER)
-			return ERR_PTR(-EPROBE_DEFER);
-		dev_info(dev, "no regulator found\n");
-		gmac->regulator = NULL;
-	}
-
-	return gmac;
-}
 
 #define SUN7I_GMAC_GMII_RGMII_RATE	125000000
 #define SUN7I_GMAC_MII_RATE		25000000
@@ -88,7 +50,9 @@ static int sun7i_gmac_init(struct platform_device *pdev, void *priv)
 		gmac->clk_enabled = 1;
 	} else {
 		clk_set_rate(gmac->tx_clk, SUN7I_GMAC_MII_RATE);
-		clk_prepare(gmac->tx_clk);
+		ret = clk_prepare(gmac->tx_clk);
+		if (ret)
+			return ret;
 	}
 
 	return 0;
@@ -132,25 +96,83 @@ static void sun7i_fix_speed(void *priv, unsigned int speed)
 	}
 }
 
-/* of_data specifying hardware features and callbacks.
- * hardware features were copied from Allwinner drivers. */
-static const struct stmmac_of_data sun7i_gmac_data = {
-	.has_gmac = 1,
-	.tx_coe = 1,
-	.fix_mac_speed = sun7i_fix_speed,
-	.setup = sun7i_gmac_setup,
-	.init = sun7i_gmac_init,
-	.exit = sun7i_gmac_exit,
-};
+static int sun7i_gmac_probe(struct platform_device *pdev)
+{
+	struct plat_stmmacenet_data *plat_dat;
+	struct stmmac_resources stmmac_res;
+	struct sunxi_priv_data *gmac;
+	struct device *dev = &pdev->dev;
+	int ret;
+
+	ret = stmmac_get_platform_resources(pdev, &stmmac_res);
+	if (ret)
+		return ret;
+
+	plat_dat = stmmac_probe_config_dt(pdev, &stmmac_res.mac);
+	if (IS_ERR(plat_dat))
+		return PTR_ERR(plat_dat);
+
+	gmac = devm_kzalloc(dev, sizeof(*gmac), GFP_KERNEL);
+	if (!gmac) {
+		ret = -ENOMEM;
+		goto err_remove_config_dt;
+	}
+
+	gmac->interface = of_get_phy_mode(dev->of_node);
+
+	gmac->tx_clk = devm_clk_get(dev, "allwinner_gmac_tx");
+	if (IS_ERR(gmac->tx_clk)) {
+		dev_err(dev, "could not get tx clock\n");
+		ret = PTR_ERR(gmac->tx_clk);
+		goto err_remove_config_dt;
+	}
+
+	/* Optional regulator for PHY */
+	gmac->regulator = devm_regulator_get_optional(dev, "phy");
+	if (IS_ERR(gmac->regulator)) {
+		if (PTR_ERR(gmac->regulator) == -EPROBE_DEFER) {
+			ret = -EPROBE_DEFER;
+			goto err_remove_config_dt;
+		}
+		dev_info(dev, "no regulator found\n");
+		gmac->regulator = NULL;
+	}
+
+	/* platform data specifying hardware features and callbacks.
+	 * hardware features were copied from Allwinner drivers. */
+	plat_dat->tx_coe = 1;
+	plat_dat->has_gmac = true;
+	plat_dat->bsp_priv = gmac;
+	plat_dat->init = sun7i_gmac_init;
+	plat_dat->exit = sun7i_gmac_exit;
+	plat_dat->fix_mac_speed = sun7i_fix_speed;
+
+	ret = sun7i_gmac_init(pdev, plat_dat->bsp_priv);
+	if (ret)
+		goto err_remove_config_dt;
+
+	ret = stmmac_dvr_probe(&pdev->dev, plat_dat, &stmmac_res);
+	if (ret)
+		goto err_gmac_exit;
+
+	return 0;
+
+err_gmac_exit:
+	sun7i_gmac_exit(pdev, plat_dat->bsp_priv);
+err_remove_config_dt:
+	stmmac_remove_config_dt(pdev, plat_dat);
+
+	return ret;
+}
 
 static const struct of_device_id sun7i_dwmac_match[] = {
-	{ .compatible = "allwinner,sun7i-a20-gmac", .data = &sun7i_gmac_data},
+	{ .compatible = "allwinner,sun7i-a20-gmac" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, sun7i_dwmac_match);
 
 static struct platform_driver sun7i_dwmac_driver = {
-	.probe  = stmmac_pltfr_probe,
+	.probe  = sun7i_gmac_probe,
 	.remove = stmmac_pltfr_remove,
 	.driver = {
 		.name           = "sun7i-dwmac",

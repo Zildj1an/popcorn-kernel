@@ -1,9 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * board-sg.c -- support for the SnapGear KS8695 based boards
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
@@ -16,7 +13,7 @@
 #include <linux/mtd/partitions.h>
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
-#include <mach/devices.h>
+#include "devices.h"
 #include "generic.h"
 
 /*

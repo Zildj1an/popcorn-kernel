@@ -1,19 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * drivers/net/ethernet/netx-eth.c
  *
  * Copyright (c) 2005 Sascha Hauer <s.hauer@pengutronix.de>, Pengutronix
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <linux/init.h>
@@ -304,7 +293,6 @@ static const struct net_device_ops netx_eth_netdev_ops = {
 	.ndo_start_xmit		= netx_eth_hard_start_xmit,
 	.ndo_tx_timeout		= netx_eth_timeout,
 	.ndo_set_rx_mode	= netx_eth_set_multicast_list,
-	.ndo_change_mtu		= eth_change_mtu,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address	= eth_mac_addr,
 };
@@ -313,7 +301,8 @@ static int netx_eth_enable(struct net_device *ndev)
 {
 	struct netx_eth_priv *priv = netdev_priv(ndev);
 	unsigned int mac4321, mac65;
-	int running, i;
+	int running, i, ret;
+	bool inv_mac_addr = false;
 
 	ndev->netdev_ops = &netx_eth_netdev_ops;
 	ndev->watchdog_timeo = msecs_to_jiffies(5000);
@@ -358,15 +347,18 @@ static int netx_eth_enable(struct net_device *ndev)
 	xc_start(priv->xc);
 
 	if (!is_valid_ether_addr(ndev->dev_addr))
-		printk("%s: Invalid ethernet MAC address.  Please "
-		       "set using ifconfig\n", ndev->name);
+		inv_mac_addr = true;
 
 	for (i=2; i<=18; i++)
 		pfifo_push(EMPTY_PTR_FIFO(priv->id),
 			FIFO_PTR_FRAMENO(i) | FIFO_PTR_SEGMENT(priv->id));
 
-	return register_netdev(ndev);
+	ret = register_netdev(ndev);
+	if (inv_mac_addr)
+		printk("%s: Invalid ethernet MAC address. Please set using ip\n",
+		       ndev->name);
 
+	return ret;
 }
 
 static int netx_eth_drv_probe(struct platform_device *pdev)

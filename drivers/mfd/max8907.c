@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * max8907.c - mfd driver for MAX8907
  *
  * Copyright (C) 2010 Gyungoh Yoo <jack.yoo@maxim-ic.com>
  * Copyright (C) 2010-2012, NVIDIA CORPORATION. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/err.h>
@@ -321,7 +318,6 @@ MODULE_DEVICE_TABLE(i2c, max8907_i2c_id);
 static struct i2c_driver max8907_i2c_driver = {
 	.driver = {
 		.name = "max8907",
-		.owner = THIS_MODULE,
 		.of_match_table = of_match_ptr(max8907_of_match),
 	},
 	.probe = max8907_i2c_probe,

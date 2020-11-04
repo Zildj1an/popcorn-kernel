@@ -1,19 +1,16 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Register definition file for s3c24xx/s3c64xx SoC CAMIF driver
  *
  * Copyright (C) 2012 Sylwester Nawrocki <sylvester.nawrocki@gmail.com>
  * Copyright (C) 2012 Tomasz Figa <tomasz.figa@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
 */
 
 #ifndef CAMIF_REGS_H_
 #define CAMIF_REGS_H_
 
 #include "camif-core.h"
-#include <media/s3c_camif.h>
+#include <media/drv-intf/s3c_camif.h>
 
 /*
  * The id argument indicates the processing path:

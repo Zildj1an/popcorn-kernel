@@ -1,13 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * AEAD: Authenticated Encryption with Associated Data
  * 
- * Copyright (c) 2007 Herbert Xu <herbert@gondor.apana.org.au>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option) 
- * any later version.
- *
+ * Copyright (c) 2007-2015 Herbert Xu <herbert@gondor.apana.org.au>
  */
 
 #ifndef _CRYPTO_AEAD_H
@@ -31,10 +26,10 @@
  *
  * For example: authenc(hmac(sha256), cbc(aes))
  *
- * The example code provided for the asynchronous block cipher operation
- * applies here as well. Naturally all *ablkcipher* symbols must be exchanged
+ * The example code provided for the symmetric key cipher operation
+ * applies here as well. Naturally all *skcipher* symbols must be exchanged
  * the *aead* pendants discussed in the following. In addition, for the AEAD
- * operation, the aead_request_set_assoc function must be used to set the
+ * operation, the aead_request_set_ad function must be used to set the
  * pointer to the associated data memory location before performing the
  * encryption or decryption operation. In case of an encryption, the associated
  * data memory is filled during the encryption operation. For decryption, the
@@ -45,16 +40,40 @@
  * a breach in the integrity of the message. In essence, that -EBADMSG error
  * code is the key bonus an AEAD cipher has over "standard" block chaining
  * modes.
+ *
+ * Memory Structure:
+ *
+ * To support the needs of the most prominent user of AEAD ciphers, namely
+ * IPSEC, the AEAD ciphers have a special memory layout the caller must adhere
+ * to.
+ *
+ * The scatter list pointing to the input data must contain:
+ *
+ * * for RFC4106 ciphers, the concatenation of
+ *   associated authentication data || IV || plaintext or ciphertext. Note, the
+ *   same IV (buffer) is also set with the aead_request_set_crypt call. Note,
+ *   the API call of aead_request_set_ad must provide the length of the AAD and
+ *   the IV. The API call of aead_request_set_crypt only points to the size of
+ *   the input plaintext or ciphertext.
+ *
+ * * for "normal" AEAD ciphers, the concatenation of
+ *   associated authentication data || plaintext or ciphertext.
+ *
+ * It is important to note that if multiple scatter gather list entries form
+ * the input data mentioned above, the first entry must not point to a NULL
+ * buffer. If there is any potential where the AAD buffer can be NULL, the
+ * calling code must contain a precaution to ensure that this does not result
+ * in the first scatter gather list entry pointing to a NULL buffer.
  */
+
+struct crypto_aead;
 
 /**
  *	struct aead_request - AEAD request
  *	@base: Common attributes for async crypto requests
- *	@old: Boolean whether the old or new AEAD API is used
  *	@assoclen: Length in bytes of associated data for authentication
  *	@cryptlen: Length of data to be encrypted or decrypted
  *	@iv: Initialisation vector
- *	@assoc: Associated data
  *	@src: Source data
  *	@dst: Destination data
  *	@__ctx: Start of private context data
@@ -62,31 +81,15 @@
 struct aead_request {
 	struct crypto_async_request base;
 
-	bool old;
-
 	unsigned int assoclen;
 	unsigned int cryptlen;
 
 	u8 *iv;
 
-	struct scatterlist *assoc;
 	struct scatterlist *src;
 	struct scatterlist *dst;
 
 	void *__ctx[] CRYPTO_MINALIGN_ATTR;
-};
-
-/**
- *	struct aead_givcrypt_request - AEAD request with IV generation
- *	@seq: Sequence number for IV generation
- *	@giv: Space for generated IV
- *	@areq: The AEAD request itself
- */
-struct aead_givcrypt_request {
-	u64 seq;
-	u8 *giv;
-
-	struct aead_request areq;
 };
 
 /**
@@ -104,11 +107,11 @@ struct aead_givcrypt_request {
  *		 supplied during the decryption operation. This function is also
  *		 responsible for checking the authentication tag size for
  *		 validity.
- * @setkey: see struct ablkcipher_alg
- * @encrypt: see struct ablkcipher_alg
- * @decrypt: see struct ablkcipher_alg
- * @geniv: see struct ablkcipher_alg
- * @ivsize: see struct ablkcipher_alg
+ * @setkey: see struct skcipher_alg
+ * @encrypt: see struct skcipher_alg
+ * @decrypt: see struct skcipher_alg
+ * @ivsize: see struct skcipher_alg
+ * @chunksize: see struct skcipher_alg
  * @init: Initialize the cryptographic transformation object. This function
  *	  is used to initialize the cryptographic transformation object.
  *	  This function is called only once at the instantiation time, right
@@ -120,6 +123,7 @@ struct aead_givcrypt_request {
  * @exit: Deinitialize the cryptographic transformation object. This is a
  *	  counterpart to @init, used to remove various changes set in
  *	  @init.
+ * @base: Definition of a generic crypto cipher algorithm.
  *
  * All fields except @ivsize is mandatory and must be filled.
  */
@@ -132,25 +136,14 @@ struct aead_alg {
 	int (*init)(struct crypto_aead *tfm);
 	void (*exit)(struct crypto_aead *tfm);
 
-	const char *geniv;
-
 	unsigned int ivsize;
 	unsigned int maxauthsize;
+	unsigned int chunksize;
 
 	struct crypto_alg base;
 };
 
 struct crypto_aead {
-	int (*setkey)(struct crypto_aead *tfm, const u8 *key,
-	              unsigned int keylen);
-	int (*setauthsize)(struct crypto_aead *tfm, unsigned int authsize);
-	int (*encrypt)(struct aead_request *req);
-	int (*decrypt)(struct aead_request *req);
-	int (*givencrypt)(struct aead_givcrypt_request *req);
-	int (*givdecrypt)(struct aead_givcrypt_request *req);
-
-	struct crypto_aead *child;
-
 	unsigned int authsize;
 	unsigned int reqsize;
 
@@ -192,16 +185,6 @@ static inline void crypto_free_aead(struct crypto_aead *tfm)
 	crypto_destroy_tfm(tfm, crypto_aead_tfm(tfm));
 }
 
-static inline struct crypto_aead *crypto_aead_crt(struct crypto_aead *tfm)
-{
-	return tfm;
-}
-
-static inline struct old_aead_alg *crypto_old_aead_alg(struct crypto_aead *tfm)
-{
-	return &crypto_aead_tfm(tfm)->__crt_alg->cra_aead;
-}
-
 static inline struct aead_alg *crypto_aead_alg(struct crypto_aead *tfm)
 {
 	return container_of(crypto_aead_tfm(tfm)->__crt_alg,
@@ -210,8 +193,7 @@ static inline struct aead_alg *crypto_aead_alg(struct crypto_aead *tfm)
 
 static inline unsigned int crypto_aead_alg_ivsize(struct aead_alg *alg)
 {
-	return alg->base.cra_aead.encrypt ? alg->base.cra_aead.ivsize :
-					    alg->ivsize;
+	return alg->ivsize;
 }
 
 /**
@@ -337,7 +319,18 @@ static inline struct crypto_aead *crypto_aead_reqtfm(struct aead_request *req)
  */
 static inline int crypto_aead_encrypt(struct aead_request *req)
 {
-	return crypto_aead_reqtfm(req)->encrypt(req);
+	struct crypto_aead *aead = crypto_aead_reqtfm(req);
+	struct crypto_alg *alg = aead->base.__crt_alg;
+	unsigned int cryptlen = req->cryptlen;
+	int ret;
+
+	crypto_stats_get(alg);
+	if (crypto_aead_get_flags(aead) & CRYPTO_TFM_NEED_KEY)
+		ret = -ENOKEY;
+	else
+		ret = crypto_aead_alg(aead)->encrypt(req);
+	crypto_stats_aead_encrypt(cryptlen, alg, ret);
+	return ret;
 }
 
 /**
@@ -364,10 +357,20 @@ static inline int crypto_aead_encrypt(struct aead_request *req)
  */
 static inline int crypto_aead_decrypt(struct aead_request *req)
 {
-	if (req->cryptlen < crypto_aead_authsize(crypto_aead_reqtfm(req)))
-		return -EINVAL;
+	struct crypto_aead *aead = crypto_aead_reqtfm(req);
+	struct crypto_alg *alg = aead->base.__crt_alg;
+	unsigned int cryptlen = req->cryptlen;
+	int ret;
 
-	return crypto_aead_reqtfm(req)->decrypt(req);
+	crypto_stats_get(alg);
+	if (crypto_aead_get_flags(aead) & CRYPTO_TFM_NEED_KEY)
+		ret = -ENOKEY;
+	else if (req->cryptlen < crypto_aead_authsize(aead))
+		ret = -EINVAL;
+	else
+		ret = crypto_aead_alg(aead)->decrypt(req);
+	crypto_stats_aead_decrypt(cryptlen, alg, ret);
+	return ret;
 }
 
 /**
@@ -387,7 +390,10 @@ static inline int crypto_aead_decrypt(struct aead_request *req)
  *
  * Return: number of bytes
  */
-unsigned int crypto_aead_reqsize(struct crypto_aead *tfm);
+static inline unsigned int crypto_aead_reqsize(struct crypto_aead *tfm)
+{
+	return tfm->reqsize;
+}
 
 /**
  * aead_request_set_tfm() - update cipher handle reference in request
@@ -400,7 +406,7 @@ unsigned int crypto_aead_reqsize(struct crypto_aead *tfm);
 static inline void aead_request_set_tfm(struct aead_request *req,
 					struct crypto_aead *tfm)
 {
-	req->base.tfm = crypto_aead_tfm(tfm->child);
+	req->base.tfm = crypto_aead_tfm(tfm);
 }
 
 /**
@@ -412,8 +418,7 @@ static inline void aead_request_set_tfm(struct aead_request *req,
  * encrypt and decrypt API calls. During the allocation, the provided aead
  * handle is registered in the request data structure.
  *
- * Return: allocated request handle in case of success; IS_ERR() is true in case
- *	   of an error, PTR_ERR() returns the error code.
+ * Return: allocated request handle in case of success, or NULL if out of memory
  */
 static inline struct aead_request *aead_request_alloc(struct crypto_aead *tfm,
 						      gfp_t gfp)
@@ -458,7 +463,7 @@ static inline void aead_request_free(struct aead_request *req)
  * completes
  *
  * The callback function is registered with the aead_request handle and
- * must comply with the following template
+ * must comply with the following template::
  *
  *	void callback_function(struct crypto_async_request *req, int error)
  */
@@ -489,30 +494,18 @@ static inline void aead_request_set_callback(struct aead_request *req,
  * destination is the ciphertext. For a decryption operation, the use is
  * reversed - the source is the ciphertext and the destination is the plaintext.
  *
- * For both src/dst the layout is associated data, plain/cipher text,
- * authentication tag.
+ * The memory structure for cipher operation has the following structure:
  *
- * The content of the AD in the destination buffer after processing
- * will either be untouched, or it will contain a copy of the AD
- * from the source buffer.  In order to ensure that it always has
- * a copy of the AD, the user must copy the AD over either before
- * or after processing.  Of course this is not relevant if the user
- * is doing in-place processing where src == dst.
+ * - AEAD encryption input:  assoc data || plaintext
+ * - AEAD encryption output: assoc data || cipherntext || auth tag
+ * - AEAD decryption input:  assoc data || ciphertext || auth tag
+ * - AEAD decryption output: assoc data || plaintext
  *
- * IMPORTANT NOTE AEAD requires an authentication tag (MAC). For decryption,
- *		  the caller must concatenate the ciphertext followed by the
- *		  authentication tag and provide the entire data stream to the
- *		  decryption operation (i.e. the data length used for the
- *		  initialization of the scatterlist and the data length for the
- *		  decryption operation is identical). For encryption, however,
- *		  the authentication tag is created while encrypting the data.
- *		  The destination buffer must hold sufficient space for the
- *		  ciphertext and the authentication tag while the encryption
- *		  invocation must only point to the plaintext data size. The
- *		  following code snippet illustrates the memory usage
- *		  buffer = kmalloc(ptbuflen + (enc ? authsize : 0));
- *		  sg_init_one(&sg, buffer, ptbuflen + (enc ? authsize : 0));
- *		  aead_request_set_crypt(req, &sg, &sg, ptbuflen, iv);
+ * Albeit the kernel requires the presence of the AAD buffer, however,
+ * the kernel does not fill the AAD buffer in the output case. If the
+ * caller wants to have that data buffer filled, the caller must either
+ * use an in-place cipher operation (i.e. same memory location for
+ * input/output memory location).
  */
 static inline void aead_request_set_crypt(struct aead_request *req,
 					  struct scatterlist *src,
@@ -523,23 +516,6 @@ static inline void aead_request_set_crypt(struct aead_request *req,
 	req->dst = dst;
 	req->cryptlen = cryptlen;
 	req->iv = iv;
-}
-
-/**
- * aead_request_set_assoc() - set the associated data scatter / gather list
- * @req: request handle
- * @assoc: associated data scatter / gather list
- * @assoclen: number of bytes to process from @assoc
- *
- * Obsolete, do not use.
- */
-static inline void aead_request_set_assoc(struct aead_request *req,
-					  struct scatterlist *assoc,
-					  unsigned int assoclen)
-{
-	req->assoc = assoc;
-	req->assoclen = assoclen;
-	req->old = true;
 }
 
 /**
@@ -554,77 +530,6 @@ static inline void aead_request_set_ad(struct aead_request *req,
 				       unsigned int assoclen)
 {
 	req->assoclen = assoclen;
-	req->old = false;
-}
-
-static inline struct crypto_aead *aead_givcrypt_reqtfm(
-	struct aead_givcrypt_request *req)
-{
-	return crypto_aead_reqtfm(&req->areq);
-}
-
-static inline int crypto_aead_givencrypt(struct aead_givcrypt_request *req)
-{
-	return aead_givcrypt_reqtfm(req)->givencrypt(req);
-};
-
-static inline int crypto_aead_givdecrypt(struct aead_givcrypt_request *req)
-{
-	return aead_givcrypt_reqtfm(req)->givdecrypt(req);
-};
-
-static inline void aead_givcrypt_set_tfm(struct aead_givcrypt_request *req,
-					 struct crypto_aead *tfm)
-{
-	req->areq.base.tfm = crypto_aead_tfm(tfm);
-}
-
-static inline struct aead_givcrypt_request *aead_givcrypt_alloc(
-	struct crypto_aead *tfm, gfp_t gfp)
-{
-	struct aead_givcrypt_request *req;
-
-	req = kmalloc(sizeof(struct aead_givcrypt_request) +
-		      crypto_aead_reqsize(tfm), gfp);
-
-	if (likely(req))
-		aead_givcrypt_set_tfm(req, tfm);
-
-	return req;
-}
-
-static inline void aead_givcrypt_free(struct aead_givcrypt_request *req)
-{
-	kfree(req);
-}
-
-static inline void aead_givcrypt_set_callback(
-	struct aead_givcrypt_request *req, u32 flags,
-	crypto_completion_t compl, void *data)
-{
-	aead_request_set_callback(&req->areq, flags, compl, data);
-}
-
-static inline void aead_givcrypt_set_crypt(struct aead_givcrypt_request *req,
-					   struct scatterlist *src,
-					   struct scatterlist *dst,
-					   unsigned int nbytes, void *iv)
-{
-	aead_request_set_crypt(&req->areq, src, dst, nbytes, iv);
-}
-
-static inline void aead_givcrypt_set_assoc(struct aead_givcrypt_request *req,
-					   struct scatterlist *assoc,
-					   unsigned int assoclen)
-{
-	aead_request_set_assoc(&req->areq, assoc, assoclen);
-}
-
-static inline void aead_givcrypt_set_giv(struct aead_givcrypt_request *req,
-					 u8 *giv, u64 seq)
-{
-	req->giv = giv;
-	req->seq = seq;
 }
 
 #endif	/* _CRYPTO_AEAD_H */

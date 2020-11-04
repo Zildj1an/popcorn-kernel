@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * poodle.c  --  SoC audio for Poodle
  *
@@ -6,12 +7,6 @@
  *
  * Authors: Liam Girdwood <lrg@slimlogic.co.uk>
  *          Richard Purdie <richard@openedhand.com>
- *
- *  This program is free software; you can redistribute  it and/or modify it
- *  under  the terms of  the GNU General  Public License as published by the
- *  Free Software Foundation;  either version 2 of the  License, or (at your
- *  option) any later version.
- *
  */
 
 #include <linux/module.h>
@@ -129,7 +124,7 @@ static int poodle_hw_params(struct snd_pcm_substream *substream,
 	return 0;
 }
 
-static struct snd_soc_ops poodle_ops = {
+static const struct snd_soc_ops poodle_ops = {
 	.startup = poodle_startup,
 	.hw_params = poodle_hw_params,
 	.shutdown = poodle_shutdown,
@@ -138,7 +133,7 @@ static struct snd_soc_ops poodle_ops = {
 static int poodle_get_jack(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
-	ucontrol->value.integer.value[0] = poodle_jack_func;
+	ucontrol->value.enumerated.item[0] = poodle_jack_func;
 	return 0;
 }
 
@@ -147,10 +142,10 @@ static int poodle_set_jack(struct snd_kcontrol *kcontrol,
 {
 	struct snd_soc_card *card =  snd_kcontrol_chip(kcontrol);
 
-	if (poodle_jack_func == ucontrol->value.integer.value[0])
+	if (poodle_jack_func == ucontrol->value.enumerated.item[0])
 		return 0;
 
-	poodle_jack_func = ucontrol->value.integer.value[0];
+	poodle_jack_func = ucontrol->value.enumerated.item[0];
 	poodle_ext_control(&card->dapm);
 	return 1;
 }
@@ -158,7 +153,7 @@ static int poodle_set_jack(struct snd_kcontrol *kcontrol,
 static int poodle_get_spk(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
-	ucontrol->value.integer.value[0] = poodle_spk_func;
+	ucontrol->value.enumerated.item[0] = poodle_spk_func;
 	return 0;
 }
 
@@ -167,10 +162,10 @@ static int poodle_set_spk(struct snd_kcontrol *kcontrol,
 {
 	struct snd_soc_card *card =  snd_kcontrol_chip(kcontrol);
 
-	if (poodle_spk_func == ucontrol->value.integer.value[0])
+	if (poodle_spk_func == ucontrol->value.enumerated.item[0])
 		return 0;
 
-	poodle_spk_func = ucontrol->value.integer.value[0];
+	poodle_spk_func = ucontrol->value.enumerated.item[0];
 	poodle_ext_control(&card->dapm);
 	return 1;
 }
@@ -209,8 +204,8 @@ static const struct snd_soc_dapm_route poodle_audio_map[] = {
 	{"MICIN", NULL, "Microphone"},
 };
 
-static const char *jack_function[] = {"Off", "Headphone"};
-static const char *spk_function[] = {"Off", "On"};
+static const char * const jack_function[] = {"Off", "Headphone"};
+static const char * const spk_function[] = {"Off", "On"};
 static const struct soc_enum poodle_enum[] = {
 	SOC_ENUM_SINGLE_EXT(2, jack_function),
 	SOC_ENUM_SINGLE_EXT(2, spk_function),
@@ -267,19 +262,11 @@ static int poodle_probe(struct platform_device *pdev)
 
 	card->dev = &pdev->dev;
 
-	ret = snd_soc_register_card(card);
+	ret = devm_snd_soc_register_card(&pdev->dev, card);
 	if (ret)
 		dev_err(&pdev->dev, "snd_soc_register_card() failed: %d\n",
 			ret);
 	return ret;
-}
-
-static int poodle_remove(struct platform_device *pdev)
-{
-	struct snd_soc_card *card = platform_get_drvdata(pdev);
-
-	snd_soc_unregister_card(card);
-	return 0;
 }
 
 static struct platform_driver poodle_driver = {
@@ -288,7 +275,6 @@ static struct platform_driver poodle_driver = {
 		.pm     = &snd_soc_pm_ops,
 	},
 	.probe		= poodle_probe,
-	.remove		= poodle_remove,
 };
 
 module_platform_driver(poodle_driver);

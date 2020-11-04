@@ -1,8 +1,33 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/smp.h>
 #include <linux/timex.h>
 #include <linux/string.h>
 #include <linux/seq_file.h>
 #include <linux/cpufreq.h>
+#include <popcorn/bundle.h>
+
+#include "cpu.h"
+
+extern void send_remote_cpu_info_request(unsigned int nid);
+extern unsigned int get_number_cpus_from_remote_node(unsigned int nid);
+extern int remote_proc_cpu_info(struct seq_file *m, unsigned int nid,
+				unsigned int vpos);
+
+static struct cpu_global_info {
+	unsigned int remote;
+	struct cpuinfo_x86 *c;
+	unsigned int vpos;
+	unsigned int nid;
+} cpu_global_info;
+
+static struct cpuinfo_x86 c;
+
+/*
+ * num_cpus: # of cores of each nodes
+ * num_total_cpus: # of total cpus of all connected nodes
+ */
+static unsigned int num_cpus[MAX_POPCORN_NODES];
+static unsigned int num_total_cpus;
 
 /*
  *	Get CPU information for use by the procfs.
@@ -31,14 +56,13 @@ static void show_cpuinfo_misc(struct seq_file *m, struct cpuinfo_x86 *c)
 		   "fpu\t\t: %s\n"
 		   "fpu_exception\t: %s\n"
 		   "cpuid level\t: %d\n"
-		   "wp\t\t: %s\n",
-		   static_cpu_has_bug(X86_BUG_FDIV) ? "yes" : "no",
-		   static_cpu_has_bug(X86_BUG_F00F) ? "yes" : "no",
-		   static_cpu_has_bug(X86_BUG_COMA) ? "yes" : "no",
-		   static_cpu_has(X86_FEATURE_FPU) ? "yes" : "no",
-		   static_cpu_has(X86_FEATURE_FPU) ? "yes" : "no",
-		   c->cpuid_level,
-		   c->wp_works_ok ? "yes" : "no");
+		   "wp\t\t: yes\n",
+		   boot_cpu_has_bug(X86_BUG_FDIV) ? "yes" : "no",
+		   boot_cpu_has_bug(X86_BUG_F00F) ? "yes" : "no",
+		   boot_cpu_has_bug(X86_BUG_COMA) ? "yes" : "no",
+		   boot_cpu_has(X86_FEATURE_FPU) ? "yes" : "no",
+		   boot_cpu_has(X86_FEATURE_FPU) ? "yes" : "no",
+		   c->cpuid_level);
 }
 #else
 static void show_cpuinfo_misc(struct seq_file *m, struct cpuinfo_x86 *c)
@@ -70,16 +94,18 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 		   c->x86_model,
 		   c->x86_model_id[0] ? c->x86_model_id : "unknown");
 
-	if (c->x86_mask || c->cpuid_level >= 0)
-		seq_printf(m, "stepping\t: %d\n", c->x86_mask);
+	if (c->x86_stepping || c->cpuid_level >= 0)
+		seq_printf(m, "stepping\t: %d\n", c->x86_stepping);
 	else
 		seq_puts(m, "stepping\t: unknown\n");
 	if (c->microcode)
 		seq_printf(m, "microcode\t: 0x%x\n", c->microcode);
 
 	if (cpu_has(c, X86_FEATURE_TSC)) {
-		unsigned int freq = cpufreq_quick_get(cpu);
+		unsigned int freq = aperfmperf_get_khz(cpu);
 
+		if (!freq)
+			freq = cpufreq_quick_get(cpu);
 		if (!freq)
 			freq = cpu_khz;
 		seq_printf(m, "cpu MHz\t\t: %u.%03u\n",
@@ -87,8 +113,8 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 	}
 
 	/* Cache size */
-	if (c->x86_cache_size >= 0)
-		seq_printf(m, "cache size\t: %d KB\n", c->x86_cache_size);
+	if (c->x86_cache_size)
+		seq_printf(m, "cache size\t: %u KB\n", c->x86_cache_size);
 
 	show_cpuinfo_core(m, c, cpu);
 	show_cpuinfo_misc(m, c);
@@ -137,11 +163,102 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 	return 0;
 }
 
+static void calc_nid_vpos(loff_t *pos, unsigned int *pnid, unsigned int *vpos)
+{
+	int i = 0;
+
+	*pnid = 0;
+	*vpos = 0;
+
+	for (i = nr_cpu_ids; i <= num_total_cpus; i++) {
+		if ((*pnid) == my_nid)
+			(*pnid)++;
+
+		if ((*vpos) == num_cpus[*pnid]) {
+			*vpos = 0;
+			(*pnid)++;
+		}
+
+		if (i == (*pos))
+			break;
+
+		(*vpos)++;
+	}
+}
+
 static void *c_start(struct seq_file *m, loff_t *pos)
 {
+	unsigned int vpos = 0;
+	unsigned int nid = 0;
+
+	if (my_nid == -1)
+		goto local;
+
+	if ((*pos) < nr_cpu_ids) {
+		goto local;
+	} else if ((*pos) == nr_cpu_ids) {
+		int i = 0;
+		int j = 0;
+		bool connected = false;
+
+		/* Check the connection with remote nodes */
+		for (i = 0; i < MAX_POPCORN_NODES; i++) {
+			if (get_popcorn_node_online(i)) {
+				connected = true;
+				break;
+			}
+		}
+
+		if (connected == false) {
+			/* No connection */
+			goto local;
+		} else {
+			/* Connection with remote nodes */
+			for (i = 0; i < MAX_POPCORN_NODES; i++) {
+				if (i == my_nid) {
+					num_cpus[i] = nr_cpu_ids;
+					j = j + nr_cpu_ids;
+					continue;
+				}
+				if (get_popcorn_node_online(i)) {
+					send_remote_cpu_info_request(i);
+					num_cpus[i] = get_number_cpus_from_remote_node(i);
+					j = j + num_cpus[i];
+				} else {
+					num_cpus[i] = 0;
+				}
+			}
+
+			num_total_cpus = j;
+			goto remote;
+		}
+	} else if ((*pos) > nr_cpu_ids) {
+		goto remote;
+	}
+
+local:
 	*pos = cpumask_next(*pos - 1, cpu_online_mask);
-	if ((*pos) < nr_cpu_ids)
-		return &cpu_data(*pos);
+	if ((*pos) < nr_cpu_ids) {
+		cpu_global_info.remote = 0;
+		c = cpu_data(*pos);
+		cpu_global_info.c = &c;
+
+		return &cpu_global_info;
+	}
+
+	return NULL;
+
+remote:
+	if ((*pos) < num_total_cpus) {
+		calc_nid_vpos(pos, &nid, &vpos);
+
+		cpu_global_info.remote = 1;
+		cpu_global_info.vpos = vpos;
+		cpu_global_info.nid = nid;
+
+		return &cpu_global_info;
+	}
+
 	return NULL;
 }
 
@@ -155,9 +272,26 @@ static void c_stop(struct seq_file *m, void *v)
 {
 }
 
+static int c_show(struct seq_file *m, void *v)
+{
+	struct cpu_global_info *cpu_global_info = v;
+	struct cpuinfo_x86 *c;
+
+	if (cpu_global_info->remote == 1) {
+		remote_proc_cpu_info(m,
+			cpu_global_info->nid,
+			cpu_global_info->vpos);
+	} else {
+		c = cpu_global_info->c;
+		show_cpuinfo(m, c);
+	}
+
+	return 0;
+}
+
 const struct seq_operations cpuinfo_op = {
 	.start	= c_start,
 	.next	= c_next,
 	.stop	= c_stop,
-	.show	= show_cpuinfo,
+	.show	= c_show,
 };

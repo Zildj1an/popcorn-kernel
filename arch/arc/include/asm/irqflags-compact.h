@@ -1,10 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2014-15 Synopsys, Inc. (www.synopsys.com)
  * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #ifndef __ASM_IRQFLAGS_ARCOMPACT_H
@@ -23,11 +20,13 @@
 #define STATUS_E2_BIT		2	/* Int 2 enable */
 #define STATUS_A1_BIT		3	/* Int 1 active */
 #define STATUS_A2_BIT		4	/* Int 2 active */
+#define STATUS_AE_BIT		5	/* Exception active */
 
 #define STATUS_E1_MASK		(1<<STATUS_E1_BIT)
 #define STATUS_E2_MASK		(1<<STATUS_E2_BIT)
 #define STATUS_A1_MASK		(1<<STATUS_A1_BIT)
 #define STATUS_A2_MASK		(1<<STATUS_A2_BIT)
+#define STATUS_AE_MASK		(1<<STATUS_AE_BIT)
 #define STATUS_IE_MASK		(STATUS_E1_MASK | STATUS_E2_MASK)
 
 /* Other Interrupt Handling related Aux regs */
@@ -66,11 +65,7 @@ static inline long arch_local_irq_save(void)
 	__asm__ __volatile__(
 	"	lr  %1, [status32]	\n"
 	"	bic %0, %1, %2		\n"
-	"	and.f 0, %1, %2		\n"
-	"	.align 16		\n"
-	"	nop			\n"
-	"	flag.nz %0		\n"
-	"	nop			\n"
+	"	and.f 0, %1, %2	\n"
 	"	flag.nz %0		\n"
 	: "=r"(temp), "=r"(flags)
 	: "n"((STATUS_E1_MASK | STATUS_E2_MASK))
@@ -86,10 +81,6 @@ static inline void arch_local_irq_restore(unsigned long flags)
 {
 
 	__asm__ __volatile__(
-	"	.align 16		\n"
-	"	nop			\n"
-	"	flag %0			\n"
-	"	nop			\n"
 	"	flag %0			\n"
 	:
 	: "r"(flags)
@@ -99,7 +90,19 @@ static inline void arch_local_irq_restore(unsigned long flags)
 /*
  * Unconditionally Enable IRQs
  */
-extern void arch_local_irq_enable(void);
+static inline void arch_local_irq_enable(void)
+{
+	unsigned long temp;
+
+	__asm__ __volatile__(
+	"	lr   %0, [status32]	\n"
+	"	or   %0, %0, %1		\n"
+	"	flag %0			\n"
+	: "=&r"(temp)
+	: "n"((STATUS_E1_MASK | STATUS_E2_MASK))
+	: "cc", "memory");
+}
+
 
 /*
  * Unconditionally Disable IRQs
@@ -111,10 +114,6 @@ static inline void arch_local_irq_disable(void)
 	__asm__ __volatile__(
 	"	lr  %0, [status32]	\n"
 	"	and %0, %0, %1		\n"
-	"	.align 16		\n"
-	"	nop			\n"
-	"	flag %0			\n"
-	"	nop			\n"
 	"	flag %0			\n"
 	: "=&r"(temp)
 	: "n"(~(STATUS_E1_MASK | STATUS_E2_MASK))
@@ -179,23 +178,15 @@ static inline int arch_irqs_disabled(void)
 .macro IRQ_DISABLE  scratch
 	lr	\scratch, [status32]
 	bic	\scratch, \scratch, (STATUS_E1_MASK | STATUS_E2_MASK)
-	.align 16
-	nop
-	flag	\scratch
-	nop
 	flag	\scratch
 	TRACE_ASM_IRQ_DISABLE
 .endm
 
 .macro IRQ_ENABLE  scratch
+	TRACE_ASM_IRQ_ENABLE
 	lr	\scratch, [status32]
 	or	\scratch, \scratch, (STATUS_E1_MASK | STATUS_E2_MASK)
-	.align 16
-	nop
 	flag	\scratch
-	nop
-	flag	\scratch
-	TRACE_ASM_IRQ_ENABLE
 .endm
 
 #endif	/* __ASSEMBLY__ */

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  cobalt driver internal defines and structures
  *
@@ -5,19 +6,6 @@
  *
  *  Copyright 2012-2015 Cisco Systems, Inc. and/or its affiliates.
  *  All rights reserved.
- *
- *  This program is free software; you may redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; version 2 of the License.
- *
- *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- *  EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- *  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- *  NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- *  BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- *  ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- *  CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- *  SOFTWARE.
  */
 
 #ifndef COBALT_DRIVER_H
@@ -35,6 +23,7 @@
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-fh.h>
+#include <media/videobuf2-v4l2.h>
 #include <media/videobuf2-dma-sg.h>
 
 #include "m00233_video_measure_memmap_package.h"
@@ -206,11 +195,12 @@ struct sg_dma_desc_info {
 #define COBALT_STREAM_FL_ADV_IRQ		1
 
 struct cobalt_buffer {
-	struct vb2_buffer vb;
+	struct vb2_v4l2_buffer vb;
 	struct list_head list;
 };
 
-static inline struct cobalt_buffer *to_cobalt_buffer(struct vb2_buffer *vb2)
+static inline
+struct cobalt_buffer *to_cobalt_buffer(struct vb2_v4l2_buffer *vb2)
 {
 	return container_of(vb2, struct cobalt_buffer, vb);
 }
@@ -260,7 +250,6 @@ struct cobalt {
 	int instance;
 	struct pci_dev *pci_dev;
 	struct v4l2_device v4l2_dev;
-	void *alloc_ctx;
 
 	void __iomem *bar0, *bar1;
 
@@ -285,8 +274,6 @@ struct cobalt {
 	u32 irq_dma[COBALT_NUM_STREAMS];
 	u32 irq_none;
 	u32 irq_full_fifo;
-
-	bool msi_enabled;
 
 	/* omnitek dma */
 	int dma_channels;

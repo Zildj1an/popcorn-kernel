@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * FriendlyARM's Exynos4412 based TINY4412 board device tree source
  *
@@ -5,14 +6,11 @@
  *
  * Device tree source file for FriendlyARM's TINY4412 board which is based on
  * Samsung's Exynos4412 SoC.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
-*/
+ */
 
 /dts-v1/;
 #include "exynos4412.dtsi"
+#include <dt-bindings/gpio/gpio.h>
 
 / {
 	model = "FriendlyARM TINY4412 board based on Exynos4412";
@@ -22,7 +20,8 @@
 		stdout-path = &serial_0;
 	};
 
-	memory {
+	memory@40000000 {
+		device_type = "memory";
 		reg = <0x40000000 0x40000000>;
 	};
 
@@ -31,26 +30,26 @@
 
 		led1 {
 			label = "led1";
-			gpios = <&gpm4 0 1>;
+			gpios = <&gpm4 0 GPIO_ACTIVE_LOW>;
 			default-state = "off";
 			linux,default-trigger = "heartbeat";
 		};
 
 		led2 {
 			label = "led2";
-			gpios = <&gpm4 1 1>;
+			gpios = <&gpm4 1 GPIO_ACTIVE_LOW>;
 			default-state = "off";
 		};
 
 		led3 {
 			label = "led3";
-			gpios = <&gpm4 2 1>;
+			gpios = <&gpm4 2 GPIO_ACTIVE_LOW>;
 			default-state = "off";
 		};
 
 		led4 {
 			label = "led4";
-			gpios = <&gpm4 3 1>;
+			gpios = <&gpm4 3 GPIO_ACTIVE_LOW>;
 			default-state = "off";
 			linux,default-trigger = "mmc0";
 		};

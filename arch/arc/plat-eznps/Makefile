@@ -1,8 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0-only
 #
 # Makefile for the linux kernel.
 #
 
-obj-y := platform.o irq.o dpl.o ctop.o atomic64.o
-obj-$(CONFIG_SMP) += time.o smp.o
+obj-y := entry.o platform.o ctop.o
+obj-$(CONFIG_SMP) += smp.o
 obj-$(CONFIG_EZNPS_MTM_EXT) += mtm.o
-obj-$(CONFIG_PERF_EVENTS) += perf_event.o

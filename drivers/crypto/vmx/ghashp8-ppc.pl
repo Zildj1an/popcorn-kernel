@@ -1,5 +1,14 @@
 #!/usr/bin/env perl
+# SPDX-License-Identifier: GPL-2.0
+
+# This code is taken from the OpenSSL project but the author (Andy Polyakov)
+# has relicensed it under the GPLv2. Therefore this program is free software;
+# you can redistribute it and/or modify it under the terms of the GNU General
+# Public License version 2 as published by the Free Software Foundation.
 #
+# The original headers, including the original license headers, are
+# included below for completeness.
+
 # ====================================================================
 # Written by Andy Polyakov <appro@openssl.org> for the OpenSSL
 # project. The module is, however, dual licensed under OpenSSL and
@@ -61,6 +70,12 @@ $code=<<___;
 	mtspr		256,r0
 	li		r10,0x30
 	lvx_u		$H,0,r4			# load H
+	le?xor		r7,r7,r7
+	le?addi		r7,r7,0x8		# need a vperm start with 08
+	le?lvsr		5,0,r7
+	le?vspltisb	6,0x0f
+	le?vxor		5,5,6			# set a b-endian mask
+	le?vperm	$H,$H,$H,5
 
 	vspltisb	$xC2,-16		# 0xf0
 	vspltisb	$t0,1			# one
@@ -114,9 +129,9 @@ $code=<<___;
 	 le?vperm	$IN,$IN,$IN,$lemask
 	vxor		$zero,$zero,$zero
 
-	vpmsumd		$Xl,$IN,$Hl		# H.lo稾i.lo
-	vpmsumd		$Xm,$IN,$H		# H.hi稾i.lo+H.lo稾i.hi
-	vpmsumd		$Xh,$IN,$Hh		# H.hi稾i.hi
+	vpmsumd		$Xl,$IN,$Hl		# H.lo路Xi.lo
+	vpmsumd		$Xm,$IN,$H		# H.hi路Xi.lo+H.lo路Xi.hi
+	vpmsumd		$Xh,$IN,$Hh		# H.hi路Xi.hi
 
 	vpmsumd		$t2,$Xl,$xC2		# 1st phase
 
@@ -172,11 +187,11 @@ $code=<<___;
 .align	5
 Loop:
 	 subic		$len,$len,16
-	vpmsumd		$Xl,$IN,$Hl		# H.lo稾i.lo
+	vpmsumd		$Xl,$IN,$Hl		# H.lo路Xi.lo
 	 subfe.		r0,r0,r0		# borrow?-1:0
-	vpmsumd		$Xm,$IN,$H		# H.hi稾i.lo+H.lo稾i.hi
+	vpmsumd		$Xm,$IN,$H		# H.hi路Xi.lo+H.lo路Xi.hi
 	 and		r0,r0,$len
-	vpmsumd		$Xh,$IN,$Hh		# H.hi稾i.hi
+	vpmsumd		$Xh,$IN,$Hh		# H.hi路Xi.hi
 	 add		$inp,$inp,r0
 
 	vpmsumd		$t2,$Xl,$xC2		# 1st phase

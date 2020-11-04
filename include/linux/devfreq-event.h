@@ -1,12 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * devfreq-event: a framework to provide raw data and events of devfreq devices
  *
  * Copyright (C) 2014 Samsung Electronics
  * Author: Chanwoo Choi <cw00.choi@samsung.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #ifndef __LINUX_DEVFREQ_EVENT_H__
@@ -146,11 +143,6 @@ static inline int devfreq_event_get_event(struct devfreq_event_dev *edev,
 static inline int devfreq_event_reset_event(struct devfreq_event_dev *edev)
 {
 	return -EINVAL;
-}
-
-static inline void *devfreq_event_get_drvdata(struct devfreq_event_dev *edev)
-{
-	return ERR_PTR(-EINVAL);
 }
 
 static inline struct devfreq_event_dev *devfreq_event_get_edev_by_phandle(

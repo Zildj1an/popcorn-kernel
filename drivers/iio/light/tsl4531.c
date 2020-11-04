@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * tsl4531.c - Support for TAOS TSL4531 ambient light sensor
  *
  * Copyright 2013 Peter Meerwald <pmeerw@pmeerw.net>
- *
- * This file is subject to the terms and conditions of version 2 of
- * the GNU General Public License.  See the file COPYING in the main
- * directory of this archive for more details.
  *
  * IIO driver for the TSL4531x family
  *   TSL45311/TSL45313: 7-bit I2C slave address 0x39
@@ -144,7 +141,6 @@ static const struct iio_info tsl4531_info = {
 	.read_raw = tsl4531_read_raw,
 	.write_raw = tsl4531_write_raw,
 	.attrs = &tsl4531_attribute_group,
-	.driver_module = THIS_MODULE,
 };
 
 static int tsl4531_check_id(struct i2c_client *client)
@@ -158,9 +154,9 @@ static int tsl4531_check_id(struct i2c_client *client)
 	case TSL45313_ID:
 	case TSL45315_ID:
 	case TSL45317_ID:
-		return 1;
-	default:
 		return 0;
+	default:
+		return -ENODEV;
 	}
 }
 
@@ -180,9 +176,10 @@ static int tsl4531_probe(struct i2c_client *client,
 	data->client = client;
 	mutex_init(&data->lock);
 
-	if (!tsl4531_check_id(client)) {
+	ret = tsl4531_check_id(client);
+	if (ret) {
 		dev_err(&client->dev, "no TSL4531 sensor\n");
-		return -ENODEV;
+		return ret;
 	}
 
 	ret = i2c_smbus_write_byte_data(data->client, TSL4531_CONTROL,
@@ -247,7 +244,6 @@ static struct i2c_driver tsl4531_driver = {
 	.driver = {
 		.name   = TSL4531_DRV_NAME,
 		.pm	= TSL4531_PM_OPS,
-		.owner  = THIS_MODULE,
 	},
 	.probe  = tsl4531_probe,
 	.remove = tsl4531_remove,

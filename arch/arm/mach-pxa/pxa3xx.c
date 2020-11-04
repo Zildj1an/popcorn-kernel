@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/arch/arm/mach-pxa/pxa3xx.c
  *
@@ -7,11 +8,9 @@
  *
  * 2007-09-02: eric miao <eric.miao@marvell.com>
  *             initial version
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
+#include <linux/dmaengine.h>
+#include <linux/dma/pxa-dma.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -19,10 +18,12 @@
 #include <linux/pm.h>
 #include <linux/platform_device.h>
 #include <linux/irq.h>
+#include <linux/irqchip.h>
 #include <linux/io.h>
 #include <linux/of.h>
 #include <linux/syscore_ops.h>
-#include <linux/i2c/pxa-i2c.h>
+#include <linux/platform_data/i2c-pxa.h>
+#include <linux/platform_data/mmp_dma.h>
 
 #include <asm/mach/map.h>
 #include <asm/suspend.h>
@@ -30,7 +31,7 @@
 #include <mach/pxa3xx-regs.h>
 #include <mach/reset.h>
 #include <linux/platform_data/usb-ohci-pxa27x.h>
-#include <mach/pm.h>
+#include "pm.h"
 #include <mach/dma.h>
 #include <mach/smemc.h>
 #include <mach/irqs.h>
@@ -42,6 +43,14 @@
 #define PECR_IS(n)	((1 << ((n) * 2)) << 29)
 
 extern void __init pxa_dt_irq_init(int (*fn)(struct irq_data *, unsigned int));
+
+/*
+ * NAND NFC: DFI bus arbitration subset
+ */
+#define NDCR			(*(volatile u32 __iomem*)(NAND_VIRT + 0))
+#define NDCR_ND_ARB_EN		(1 << 12)
+#define NDCR_ND_ARB_CNTL	(1 << 19)
+
 #ifdef CONFIG_PM
 
 #define ISRAM_START	0x5c000000
@@ -60,7 +69,6 @@ static unsigned long wakeup_src;
  */
 static void pxa3xx_cpu_standby(unsigned int pwrmode)
 {
-	extern const char pm_enter_standby_start[], pm_enter_standby_end[];
 	void (*fn)(unsigned int) = (void __force *)(sram + 0x8000);
 
 	memcpy_toio(sram + 0x8000, pm_enter_standby_start,
@@ -95,10 +103,9 @@ static void pxa3xx_cpu_pm_suspend(void)
 #ifndef CONFIG_IWMMXT
 	u64 acc0;
 
-	asm volatile("mra %Q0, %R0, acc0" : "=r" (acc0));
+	asm volatile(".arch_extension xscale\n\t"
+		     "mra %Q0, %R0, acc0" : "=r" (acc0));
 #endif
-
-	extern int pxa3xx_finish_suspend(unsigned long);
 
 	/* resuming from D2 requires the HSIO2/BOOT/TPM clocks enabled */
 	CKENA |= (1 << CKEN_BOOT) | (1 << CKEN_TPM);
@@ -116,7 +123,7 @@ static void pxa3xx_cpu_pm_suspend(void)
 	PSPR = 0x5c014000;
 
 	/* overwrite with the resume address */
-	*p = virt_to_phys(cpu_resume);
+	*p = __pa_symbol(cpu_resume);
 
 	cpu_suspend(0, pxa3xx_finish_suspend);
 
@@ -125,7 +132,8 @@ static void pxa3xx_cpu_pm_suspend(void)
 	AD3ER = 0;
 
 #ifndef CONFIG_IWMMXT
-	asm volatile("mar acc0, %Q0, %R0" : "=r" (acc0));
+	asm volatile(".arch_extension xscale\n\t"
+		     "mar acc0, %Q0, %R0" : "=r" (acc0));
 #endif
 }
 
@@ -325,7 +333,7 @@ static void __init pxa_init_ext_wakeup_irq(int (*fn)(struct irq_data *,
 	for (irq = IRQ_WAKEUP0; irq <= IRQ_WAKEUP1; irq++) {
 		irq_set_chip_and_handler(irq, &pxa_ext_wakeup_chip,
 					 handle_edge_irq);
-		set_irq_flags(irq, IRQF_VALID);
+		irq_clear_status_flags(irq, IRQ_NOREQUEST);
 	}
 
 	pxa_ext_wakeup_chip.irq_set_wake = fn;
@@ -349,11 +357,16 @@ void __init pxa3xx_init_irq(void)
 }
 
 #ifdef CONFIG_OF
-void __init pxa3xx_dt_init_irq(void)
+static int __init __init
+pxa3xx_dt_init_irq(struct device_node *node, struct device_node *parent)
 {
 	__pxa3xx_init_irq();
 	pxa_dt_irq_init(pxa3xx_set_wake);
+	set_handle_irq(ichp_handle_irq);
+
+	return 0;
 }
+IRQCHIP_DECLARE(pxa3xx_intc, "marvell,pxa-intc", pxa3xx_dt_init_irq);
 #endif	/* CONFIG_OF */
 
 static struct map_desc pxa3xx_io_desc[] __initdata = {
@@ -362,7 +375,12 @@ static struct map_desc pxa3xx_io_desc[] __initdata = {
 		.pfn		= __phys_to_pfn(PXA3XX_SMEMC_BASE),
 		.length		= SMEMC_SIZE,
 		.type		= MT_DEVICE
-	}
+	}, {
+		.virtual	= (unsigned long)NAND_VIRT,
+		.pfn		= __phys_to_pfn(NAND_PHYS),
+		.length		= NAND_SIZE,
+		.type		= MT_DEVICE
+	},
 };
 
 void __init pxa3xx_map_io(void)
@@ -394,7 +412,6 @@ static struct platform_device *devices[] __initdata = {
 	&pxa_device_asoc_ssp3,
 	&pxa_device_asoc_ssp4,
 	&pxa_device_asoc_platform,
-	&sa1100_device_rtc,
 	&pxa_device_rtc,
 	&pxa3xx_device_ssp1,
 	&pxa3xx_device_ssp2,
@@ -402,6 +419,42 @@ static struct platform_device *devices[] __initdata = {
 	&pxa3xx_device_ssp4,
 	&pxa27x_device_pwm0,
 	&pxa27x_device_pwm1,
+};
+
+static const struct dma_slave_map pxa3xx_slave_map[] = {
+	/* PXA25x, PXA27x and PXA3xx common entries */
+	{ "pxa2xx-ac97", "pcm_pcm_mic_mono", PDMA_FILTER_PARAM(LOWEST, 8) },
+	{ "pxa2xx-ac97", "pcm_pcm_aux_mono_in", PDMA_FILTER_PARAM(LOWEST, 9) },
+	{ "pxa2xx-ac97", "pcm_pcm_aux_mono_out",
+	  PDMA_FILTER_PARAM(LOWEST, 10) },
+	{ "pxa2xx-ac97", "pcm_pcm_stereo_in", PDMA_FILTER_PARAM(LOWEST, 11) },
+	{ "pxa2xx-ac97", "pcm_pcm_stereo_out", PDMA_FILTER_PARAM(LOWEST, 12) },
+	{ "pxa-ssp-dai.0", "rx", PDMA_FILTER_PARAM(LOWEST, 13) },
+	{ "pxa-ssp-dai.0", "tx", PDMA_FILTER_PARAM(LOWEST, 14) },
+	{ "pxa-ssp-dai.1", "rx", PDMA_FILTER_PARAM(LOWEST, 15) },
+	{ "pxa-ssp-dai.1", "tx", PDMA_FILTER_PARAM(LOWEST, 16) },
+	{ "pxa2xx-ir", "rx", PDMA_FILTER_PARAM(LOWEST, 17) },
+	{ "pxa2xx-ir", "tx", PDMA_FILTER_PARAM(LOWEST, 18) },
+	{ "pxa2xx-mci.0", "rx", PDMA_FILTER_PARAM(LOWEST, 21) },
+	{ "pxa2xx-mci.0", "tx", PDMA_FILTER_PARAM(LOWEST, 22) },
+	{ "pxa-ssp-dai.2", "rx", PDMA_FILTER_PARAM(LOWEST, 66) },
+	{ "pxa-ssp-dai.2", "tx", PDMA_FILTER_PARAM(LOWEST, 67) },
+
+	/* PXA3xx specific map */
+	{ "pxa-ssp-dai.3", "rx", PDMA_FILTER_PARAM(LOWEST, 2) },
+	{ "pxa-ssp-dai.3", "tx", PDMA_FILTER_PARAM(LOWEST, 3) },
+	{ "pxa2xx-mci.1", "rx", PDMA_FILTER_PARAM(LOWEST, 93) },
+	{ "pxa2xx-mci.1", "tx", PDMA_FILTER_PARAM(LOWEST, 94) },
+	{ "pxa3xx-nand", "data", PDMA_FILTER_PARAM(LOWEST, 97) },
+	{ "pxa2xx-mci.2", "rx", PDMA_FILTER_PARAM(LOWEST, 100) },
+	{ "pxa2xx-mci.2", "tx", PDMA_FILTER_PARAM(LOWEST, 101) },
+};
+
+static struct mmp_dma_platdata pxa3xx_dma_pdata = {
+	.dma_channels	= 32,
+	.nb_requestors	= 100,
+	.slave_map	= pxa3xx_slave_map,
+	.slave_map_cnt	= ARRAY_SIZE(pxa3xx_slave_map),
 };
 
 static int __init pxa3xx_init(void)
@@ -420,10 +473,18 @@ static int __init pxa3xx_init(void)
 		 */
 		ASCR &= ~(ASCR_RDH | ASCR_D1S | ASCR_D2S | ASCR_D3S);
 
-		if ((ret = pxa_init_dma(IRQ_DMA, 32)))
-			return ret;
+		/*
+		 * Disable DFI bus arbitration, to prevent a system bus lock if
+		 * somebody disables the NAND clock (unused clock) while this
+		 * bit remains set.
+		 */
+		NDCR = (NDCR & ~NDCR_ND_ARB_EN) | NDCR_ND_ARB_CNTL;
 
 		pxa3xx_init_pm();
+
+		enable_irq_wake(IRQ_WAKEUP0);
+		if (cpu_is_pxa320())
+			enable_irq_wake(IRQ_WAKEUP1);
 
 		register_syscore_ops(&pxa_irq_syscore_ops);
 		register_syscore_ops(&pxa3xx_mfp_syscore_ops);
@@ -431,6 +492,7 @@ static int __init pxa3xx_init(void)
 		if (of_have_populated_dt())
 			return 0;
 
+		pxa2xx_set_dmac_info(&pxa3xx_dma_pdata);
 		ret = platform_add_devices(devices, ARRAY_SIZE(devices));
 		if (ret)
 			return ret;

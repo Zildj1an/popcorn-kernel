@@ -1,16 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (C) 2010, Lars-Peter Clausen <lars@metafoo.de>
  *  JZ4740 platform time support
- *
- *  This program is free software; you can redistribute it and/or modify it
- *  under  the terms of the GNU General	 Public License as published by the
- *  Free Software Foundation;  either version 2 of the License, or (at your
- *  option) any later version.
- *
- *  You should have received a copy of the GNU General Public License along
- *  with this program; if not, write to the Free Software Foundation, Inc.,
- *  675 Mass Ave, Cambridge, MA 02139, USA.
- *
  */
 
 #include <linux/clk.h>
@@ -34,7 +25,7 @@
 
 static uint16_t jz4740_jiffies_per_tick;
 
-static cycle_t jz4740_clocksource_read(struct clocksource *cs)
+static u64 jz4740_clocksource_read(struct clocksource *cs)
 {
 	return jz4740_timer_get_count(TIMER_CLOCKSOURCE);
 }
@@ -58,7 +49,7 @@ static irqreturn_t jz4740_clockevent_irq(int irq, void *devid)
 
 	jz4740_timer_ack_full(TIMER_CLOCKEVENT);
 
-	if (cd->mode != CLOCK_EVT_MODE_PERIODIC)
+	if (!clockevent_state_periodic(cd))
 		jz4740_timer_disable(TIMER_CLOCKEVENT);
 
 	cd->event_handler(cd);
@@ -66,24 +57,29 @@ static irqreturn_t jz4740_clockevent_irq(int irq, void *devid)
 	return IRQ_HANDLED;
 }
 
-static void jz4740_clockevent_set_mode(enum clock_event_mode mode,
-	struct clock_event_device *cd)
+static int jz4740_clockevent_set_periodic(struct clock_event_device *evt)
 {
-	switch (mode) {
-	case CLOCK_EVT_MODE_PERIODIC:
-		jz4740_timer_set_count(TIMER_CLOCKEVENT, 0);
-		jz4740_timer_set_period(TIMER_CLOCKEVENT, jz4740_jiffies_per_tick);
-	case CLOCK_EVT_MODE_RESUME:
-		jz4740_timer_irq_full_enable(TIMER_CLOCKEVENT);
-		jz4740_timer_enable(TIMER_CLOCKEVENT);
-		break;
-	case CLOCK_EVT_MODE_ONESHOT:
-	case CLOCK_EVT_MODE_SHUTDOWN:
-		jz4740_timer_disable(TIMER_CLOCKEVENT);
-		break;
-	default:
-		break;
-	}
+	jz4740_timer_set_count(TIMER_CLOCKEVENT, 0);
+	jz4740_timer_set_period(TIMER_CLOCKEVENT, jz4740_jiffies_per_tick);
+	jz4740_timer_irq_full_enable(TIMER_CLOCKEVENT);
+	jz4740_timer_enable(TIMER_CLOCKEVENT);
+
+	return 0;
+}
+
+static int jz4740_clockevent_resume(struct clock_event_device *evt)
+{
+	jz4740_timer_irq_full_enable(TIMER_CLOCKEVENT);
+	jz4740_timer_enable(TIMER_CLOCKEVENT);
+
+	return 0;
+}
+
+static int jz4740_clockevent_shutdown(struct clock_event_device *evt)
+{
+	jz4740_timer_disable(TIMER_CLOCKEVENT);
+
+	return 0;
 }
 
 static int jz4740_clockevent_set_next(unsigned long evt,
@@ -100,12 +96,15 @@ static struct clock_event_device jz4740_clockevent = {
 	.name = "jz4740-timer",
 	.features = CLOCK_EVT_FEAT_PERIODIC | CLOCK_EVT_FEAT_ONESHOT,
 	.set_next_event = jz4740_clockevent_set_next,
-	.set_mode = jz4740_clockevent_set_mode,
+	.set_state_shutdown = jz4740_clockevent_shutdown,
+	.set_state_periodic = jz4740_clockevent_set_periodic,
+	.set_state_oneshot = jz4740_clockevent_shutdown,
+	.tick_resume = jz4740_clockevent_resume,
 	.rating = 200,
 #ifdef CONFIG_MACH_JZ4740
 	.irq = JZ4740_IRQ_TCU0,
 #endif
-#ifdef CONFIG_MACH_JZ4780
+#if defined(CONFIG_MACH_JZ4770) || defined(CONFIG_MACH_JZ4780)
 	.irq = JZ4780_IRQ_TCU2,
 #endif
 };
@@ -137,7 +136,9 @@ void __init plat_time_init(void)
 
 	clockevent_set_clock(&jz4740_clockevent, clk_rate);
 	jz4740_clockevent.min_delta_ns = clockevent_delta2ns(100, &jz4740_clockevent);
+	jz4740_clockevent.min_delta_ticks = 100;
 	jz4740_clockevent.max_delta_ns = clockevent_delta2ns(0xffff, &jz4740_clockevent);
+	jz4740_clockevent.max_delta_ticks = 0xffff;
 	jz4740_clockevent.cpumask = cpumask_of(0);
 
 	clockevents_register_device(&jz4740_clockevent);

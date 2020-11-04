@@ -1,9 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2013 Patrick McHardy <kaber@trash.net>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -17,12 +14,14 @@
 #include <linux/netfilter/x_tables.h>
 #include <linux/netfilter/xt_tcpudp.h>
 #include <linux/netfilter/xt_SYNPROXY.h>
+
 #include <net/netfilter/nf_conntrack.h>
 #include <net/netfilter/nf_conntrack_extend.h>
 #include <net/netfilter/nf_conntrack_seqadj.h>
 #include <net/netfilter/nf_conntrack_synproxy.h>
+#include <net/netfilter/nf_conntrack_zones.h>
 
-int synproxy_net_id;
+unsigned int synproxy_net_id;
 EXPORT_SYMBOL_GPL(synproxy_net_id);
 
 bool
@@ -64,8 +63,8 @@ synproxy_parse_options(const struct sk_buff *skb, unsigned int doff,
 			case TCPOPT_WINDOW:
 				if (opsize == TCPOLEN_WINDOW) {
 					opts->wscale = *ptr;
-					if (opts->wscale > 14)
-						opts->wscale = 14;
+					if (opts->wscale > TCP_MAX_WSCALE)
+						opts->wscale = TCP_MAX_WSCALE;
 					opts->options |= XT_SYNPROXY_OPT_WSCALE;
 				}
 				break;
@@ -150,7 +149,7 @@ void synproxy_init_timestamp_cookie(const struct xt_synproxy_info *info,
 				    struct synproxy_options *opts)
 {
 	opts->tsecr = opts->tsval;
-	opts->tsval = tcp_time_stamp & ~0x3f;
+	opts->tsval = tcp_time_stamp_raw() & ~0x3f;
 
 	if (opts->options & XT_SYNPROXY_OPT_WSCALE) {
 		opts->tsval |= opts->wscale;
@@ -186,7 +185,7 @@ unsigned int synproxy_tstamp_adjust(struct sk_buff *skb,
 				    const struct nf_conn_synproxy *synproxy)
 {
 	unsigned int optoff, optend;
-	u32 *ptr, old;
+	__be32 *ptr, old;
 
 	if (synproxy->tsoff == 0)
 		return 1;
@@ -214,18 +213,18 @@ unsigned int synproxy_tstamp_adjust(struct sk_buff *skb,
 			if (op[0] == TCPOPT_TIMESTAMP &&
 			    op[1] == TCPOLEN_TIMESTAMP) {
 				if (CTINFO2DIR(ctinfo) == IP_CT_DIR_REPLY) {
-					ptr = (u32 *)&op[2];
+					ptr = (__be32 *)&op[2];
 					old = *ptr;
 					*ptr = htonl(ntohl(*ptr) -
 						     synproxy->tsoff);
 				} else {
-					ptr = (u32 *)&op[6];
+					ptr = (__be32 *)&op[6];
 					old = *ptr;
 					*ptr = htonl(ntohl(*ptr) +
 						     synproxy->tsoff);
 				}
 				inet_proto_csum_replace4(&th->check, skb,
-							 old, *ptr, 0);
+							 old, *ptr, false);
 				return 1;
 			}
 			optoff += op[1];
@@ -285,9 +284,9 @@ static int synproxy_cpu_seq_show(struct seq_file *seq, void *v)
 	struct synproxy_stats *stats = v;
 
 	if (v == SEQ_START_TOKEN) {
-		seq_printf(seq, "entries\t\tsyn_received\t"
-				"cookie_invalid\tcookie_valid\t"
-				"cookie_retrans\tconn_reopened\n");
+		seq_puts(seq, "entries\t\tsyn_received\t"
+			      "cookie_invalid\tcookie_valid\t"
+			      "cookie_retrans\tconn_reopened\n");
 		return 0;
 	}
 
@@ -308,24 +307,10 @@ static const struct seq_operations synproxy_cpu_seq_ops = {
 	.show		= synproxy_cpu_seq_show,
 };
 
-static int synproxy_cpu_seq_open(struct inode *inode, struct file *file)
-{
-	return seq_open_net(inode, file, &synproxy_cpu_seq_ops,
-			    sizeof(struct seq_net_private));
-}
-
-static const struct file_operations synproxy_cpu_seq_fops = {
-	.owner		= THIS_MODULE,
-	.open		= synproxy_cpu_seq_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= seq_release_net,
-};
-
 static int __net_init synproxy_proc_init(struct net *net)
 {
-	if (!proc_create("synproxy", S_IRUGO, net->proc_net_stat,
-			 &synproxy_cpu_seq_fops))
+	if (!proc_create_net("synproxy", 0444, net->proc_net_stat,
+			&synproxy_cpu_seq_ops, sizeof(struct seq_net_private)))
 		return -ENOMEM;
 	return 0;
 }
@@ -352,7 +337,7 @@ static int __net_init synproxy_net_init(struct net *net)
 	struct nf_conn *ct;
 	int err = -ENOMEM;
 
-	ct = nf_ct_tmpl_alloc(net, 0, GFP_KERNEL);
+	ct = nf_ct_tmpl_alloc(net, &nf_ct_zone_dflt, GFP_KERNEL);
 	if (!ct)
 		goto err1;
 
@@ -378,7 +363,7 @@ static int __net_init synproxy_net_init(struct net *net)
 err3:
 	free_percpu(snet->stats);
 err2:
-	nf_conntrack_free(ct);
+	nf_ct_tmpl_free(ct);
 err1:
 	return err;
 }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * ACPI Ambient Light Sensor Driver
  *
@@ -10,20 +11,6 @@
  * Final cleanup and debugging:
  * Copyright (C) 2013-2014 Marek Vasut <marex@denx.de>
  * Copyright (C) 2015 Gabriele Mazzotta <gabriele.mzt@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2 of the License, or (at your
- * option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write to the Free Software Foundation, Inc.,
- * 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
  */
 
 #include <linux/module.h>
@@ -54,7 +41,9 @@ static const struct iio_chan_spec acpi_als_channels[] = {
 			.realbits	= 32,
 			.storagebits	= 32,
 		},
-		.info_mask_separate	= BIT(IIO_CHAN_INFO_RAW),
+		/* _RAW is here for backward ABI compatibility */
+		.info_mask_separate	= BIT(IIO_CHAN_INFO_RAW) |
+					  BIT(IIO_CHAN_INFO_PROCESSED),
 	},
 };
 
@@ -65,20 +54,20 @@ static const struct iio_chan_spec acpi_als_channels[] = {
  * to acpi_als_channels[], the evt_buffer below will grow
  * automatically.
  */
-#define EVT_NR_SOURCES		ARRAY_SIZE(acpi_als_channels)
-#define EVT_BUFFER_SIZE		\
-	(sizeof(s64) + (EVT_NR_SOURCES * sizeof(s32)))
+#define ACPI_ALS_EVT_NR_SOURCES		ARRAY_SIZE(acpi_als_channels)
+#define ACPI_ALS_EVT_BUFFER_SIZE		\
+	(sizeof(s64) + (ACPI_ALS_EVT_NR_SOURCES * sizeof(s32)))
 
 struct acpi_als {
 	struct acpi_device	*device;
 	struct mutex		lock;
 
-	s32			evt_buffer[EVT_BUFFER_SIZE];
+	s32			evt_buffer[ACPI_ALS_EVT_BUFFER_SIZE];
 };
 
 /*
  * All types of properties the ACPI0008 block can report. The ALI, ALC, ALT
- * and ALP can all be handled by als_read_value() below, while the ALR is
+ * and ALP can all be handled by acpi_als_read_value() below, while the ALR is
  * special.
  *
  * The _ALR property returns tables that can be used to fine-tune the values
@@ -93,7 +82,7 @@ struct acpi_als {
 #define ACPI_ALS_POLLING	"_ALP"
 #define ACPI_ALS_TABLES		"_ALR"
 
-static int als_read_value(struct acpi_als *als, char *prop, s32 *val)
+static int acpi_als_read_value(struct acpi_als *als, char *prop, s32 *val)
 {
 	unsigned long long temp_val;
 	acpi_status status;
@@ -116,17 +105,17 @@ static void acpi_als_notify(struct acpi_device *device, u32 event)
 	struct iio_dev *indio_dev = acpi_driver_data(device);
 	struct acpi_als *als = iio_priv(indio_dev);
 	s32 *buffer = als->evt_buffer;
-	s64 time_ns = iio_get_time_ns();
+	s64 time_ns = iio_get_time_ns(indio_dev);
 	s32 val;
 	int ret;
 
 	mutex_lock(&als->lock);
 
-	memset(buffer, 0, EVT_BUFFER_SIZE);
+	memset(buffer, 0, ACPI_ALS_EVT_BUFFER_SIZE);
 
 	switch (event) {
 	case ACPI_ALS_NOTIFY_ILLUMINANCE:
-		ret = als_read_value(als, ACPI_ALS_ILLUMINANCE, &val);
+		ret = acpi_als_read_value(als, ACPI_ALS_ILLUMINANCE, &val);
 		if (ret < 0)
 			goto out;
 		*buffer++ = val;
@@ -152,14 +141,14 @@ static int acpi_als_read_raw(struct iio_dev *indio_dev,
 	s32 temp_val;
 	int ret;
 
-	if (mask != IIO_CHAN_INFO_RAW)
+	if ((mask != IIO_CHAN_INFO_PROCESSED) && (mask != IIO_CHAN_INFO_RAW))
 		return -EINVAL;
 
 	/* we support only illumination (_ALI) so far. */
 	if (chan->type != IIO_LIGHT)
 		return -EINVAL;
 
-	ret = als_read_value(als, ACPI_ALS_ILLUMINANCE, &temp_val);
+	ret = acpi_als_read_value(als, ACPI_ALS_ILLUMINANCE, &temp_val);
 	if (ret < 0)
 		return ret;
 
@@ -169,7 +158,6 @@ static int acpi_als_read_raw(struct iio_dev *indio_dev,
 }
 
 static const struct iio_info acpi_als_info = {
-	.driver_module		= THIS_MODULE,
 	.read_raw		= acpi_als_read_raw,
 };
 

@@ -25,6 +25,19 @@ Optional properties:
 -maxim,enable-frequency-shift: boolean, enable 9% frequency shift.
 -maxim,enable-bias-control: boolean, enable bias control. By enabling this
 		startup delay can be reduce to 20us from 220us.
+-maxim,enable-etr: boolean, enable Enhanced Transient Response.
+-maxim,enable-high-etr-sensitivity: boolean, Enhanced transient response
+		circuit is enabled and set for high sensitivity. If this
+		property is available then etr will be enable default.
+
+Enhanced transient response (ETR) will affect the configuration of CKADV.
+
+-junction-warn-millicelsius: u32, junction warning temperature threshold
+		in millicelsius. If die temperature crosses this level then
+		device generates the warning interrupts.
+
+Please note that thermal functionality is only supported on MAX77621. The
+supported threshold warning temperature for MAX77621 are 120 degC and 140 degC.
 
 Example:
 

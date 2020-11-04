@@ -1,13 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * SoC audio for HP iPAQ hx4700
  *
  * Copyright (c) 2009 Philipp Zabel
- *
- *  This program is free software; you can redistribute  it and/or modify it
- *  under  the terms of  the GNU General  Public License as published by the
- *  Free Software Foundation;  either version 2 of the  License, or (at your
- *  option) any later version.
- *
  */
 
 #include <linux/module.h>
@@ -26,8 +21,6 @@
 #include <mach/hx4700.h>
 #include <asm/mach-types.h>
 #include "pxa2xx-i2s.h"
-
-#include "../codecs/ak4641.h"
 
 static struct snd_soc_jack hs_jack;
 
@@ -81,7 +74,7 @@ static int hx4700_hw_params(struct snd_pcm_substream *substream,
 	return 0;
 }
 
-static struct snd_soc_ops hx4700_ops = {
+static const struct snd_soc_ops hx4700_ops = {
 	.hw_params = hx4700_hw_params,
 };
 
@@ -140,13 +133,6 @@ static int hx4700_ak4641_init(struct snd_soc_pcm_runtime *rtd)
 	return err;
 }
 
-static int hx4700_card_remove(struct snd_soc_card *card)
-{
-	snd_soc_jack_free_gpios(&hs_jack, 1, &hs_jack_gpio);
-
-	return 0;
-}
-
 /* hx4700 digital audio interface glue - connects codec <--> CPU */
 static struct snd_soc_dai_link hx4700_dai = {
 	.name = "ak4641",
@@ -165,7 +151,6 @@ static struct snd_soc_dai_link hx4700_dai = {
 static struct snd_soc_card snd_soc_card_hx4700 = {
 	.name			= "iPAQ hx4700",
 	.owner			= THIS_MODULE,
-	.remove			= hx4700_card_remove,
 	.dai_link		= &hx4700_dai,
 	.num_links		= 1,
 	.dapm_widgets		= hx4700_dapm_widgets,
@@ -193,7 +178,7 @@ static int hx4700_audio_probe(struct platform_device *pdev)
 		return ret;
 
 	snd_soc_card_hx4700.dev = &pdev->dev;
-	ret = snd_soc_register_card(&snd_soc_card_hx4700);
+	ret = devm_snd_soc_register_card(&pdev->dev, &snd_soc_card_hx4700);
 	if (ret)
 		gpio_free_array(hx4700_audio_gpios,
 				ARRAY_SIZE(hx4700_audio_gpios));
@@ -203,8 +188,6 @@ static int hx4700_audio_probe(struct platform_device *pdev)
 
 static int hx4700_audio_remove(struct platform_device *pdev)
 {
-	snd_soc_unregister_card(&snd_soc_card_hx4700);
-
 	gpio_set_value(GPIO92_HX4700_HP_DRIVER, 0);
 	gpio_set_value(GPIO107_HX4700_SPK_nSD, 0);
 

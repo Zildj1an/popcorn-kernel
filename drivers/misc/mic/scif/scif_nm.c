@@ -1,19 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Intel MIC Platform Software Stack (MPSS)
  *
  * Copyright(c) 2014 Intel Corporation.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License, version 2, as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
- *
  * Intel SCIF driver.
- *
  */
 #include "scif_peer_bus.h"
 
@@ -34,6 +25,7 @@ static void scif_invalidate_ep(int node)
 	list_for_each_safe(pos, tmpq, &scif_info.disconnected) {
 		ep = list_entry(pos, struct scif_endpt, list);
 		if (ep->remote_dev->node == node) {
+			scif_unmap_all_windows(ep);
 			spin_lock(&ep->lock);
 			scif_cleanup_ep_qp(ep);
 			spin_unlock(&ep->lock);
@@ -50,6 +42,7 @@ static void scif_invalidate_ep(int node)
 			wake_up_interruptible(&ep->sendwq);
 			wake_up_interruptible(&ep->recvwq);
 			spin_unlock(&ep->lock);
+			scif_unmap_all_windows(ep);
 		}
 	}
 	mutex_unlock(&scif_info.connlock);
@@ -61,8 +54,8 @@ void scif_free_qp(struct scif_dev *scifdev)
 
 	if (!qp)
 		return;
-	scif_free_coherent((void *)qp->inbound_q.rb_base,
-			   qp->local_buf, scifdev, qp->inbound_q.size);
+	scif_unmap_single(qp->local_buf, scifdev, qp->inbound_q.size);
+	kfree(qp->inbound_q.rb_base);
 	scif_unmap_single(qp->local_qp, scifdev, sizeof(struct scif_qp));
 	kfree(scifdev->qpairs);
 	scifdev->qpairs = NULL;
@@ -125,8 +118,12 @@ void scif_cleanup_scifdev(struct scif_dev *dev)
 		}
 		scif_destroy_intr_wq(dev);
 	}
+	flush_work(&scif_info.misc_work);
 	scif_destroy_p2p(dev);
 	scif_invalidate_ep(dev->node);
+	scif_zap_mmaps(dev->node);
+	scif_cleanup_rma_for_zombies(dev->node);
+	flush_work(&scif_info.misc_work);
 	scif_send_acks(dev);
 	if (!dev->node && scif_info.card_initiated_exit) {
 		/*
@@ -147,14 +144,8 @@ void scif_cleanup_scifdev(struct scif_dev *dev)
 void scif_handle_remove_node(int node)
 {
 	struct scif_dev *scifdev = &scif_dev[node];
-	struct scif_peer_dev *spdev;
 
-	rcu_read_lock();
-	spdev = rcu_dereference(scifdev->spdev);
-	rcu_read_unlock();
-	if (spdev)
-		scif_peer_unregister_device(spdev);
-	else
+	if (scif_peer_unregister_device(scifdev))
 		scif_send_acks(scifdev);
 }
 

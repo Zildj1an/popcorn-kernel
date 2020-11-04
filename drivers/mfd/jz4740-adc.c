@@ -1,15 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2009-2010, Lars-Peter Clausen <lars@metafoo.de>
  * JZ4740 SoC ADC driver
- *
- * This program is free software; you can redistribute it and/or modify it
- * under  the terms of the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the License, or (at your
- * option) any later version.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write to the Free Software Foundation, Inc.,
- * 675 Mass Ave, Cambridge, MA 02139, USA.
  *
  * This driver synchronizes access to the JZ4740 ADC core between the
  * JZ4740 battery and hwmon drivers.
@@ -65,7 +57,7 @@ struct jz4740_adc {
 	spinlock_t lock;
 };
 
-static void jz4740_adc_irq_demux(unsigned int irq, struct irq_desc *desc)
+static void jz4740_adc_irq_demux(struct irq_desc *desc)
 {
 	struct irq_chip_generic *gc = irq_desc_get_handler_data(desc);
 	uint8_t status;
@@ -212,10 +204,8 @@ static int jz4740_adc_probe(struct platform_device *pdev)
 	int irq_base;
 
 	adc = devm_kzalloc(&pdev->dev, sizeof(*adc), GFP_KERNEL);
-	if (!adc) {
-		dev_err(&pdev->dev, "Failed to allocate driver structure\n");
+	if (!adc)
 		return -ENOMEM;
-	}
 
 	adc->irq = platform_get_irq(pdev, 0);
 	if (adc->irq < 0) {
@@ -273,12 +263,12 @@ static int jz4740_adc_probe(struct platform_device *pdev)
 	ct->chip.irq_unmask = irq_gc_mask_clr_bit;
 	ct->chip.irq_ack = irq_gc_ack_set_bit;
 
-	irq_setup_generic_chip(gc, IRQ_MSK(5), 0, 0, IRQ_NOPROBE | IRQ_LEVEL);
+	irq_setup_generic_chip(gc, IRQ_MSK(5), IRQ_GC_INIT_MASK_CACHE, 0,
+				IRQ_NOPROBE | IRQ_LEVEL);
 
 	adc->gc = gc;
 
-	irq_set_handler_data(adc->irq, gc);
-	irq_set_chained_handler(adc->irq, jz4740_adc_irq_demux);
+	irq_set_chained_handler_and_data(adc->irq, jz4740_adc_irq_demux, gc);
 
 	writeb(0x00, adc->base + JZ_REG_ADC_ENABLE);
 	writeb(0xff, adc->base + JZ_REG_ADC_CTRL);
@@ -308,8 +298,7 @@ static int jz4740_adc_remove(struct platform_device *pdev)
 
 	irq_remove_generic_chip(adc->gc, IRQ_MSK(5), IRQ_NOPROBE | IRQ_LEVEL, 0);
 	kfree(adc->gc);
-	irq_set_handler_data(adc->irq, NULL);
-	irq_set_chained_handler(adc->irq, NULL);
+	irq_set_chained_handler_and_data(adc->irq, NULL, NULL);
 
 	iounmap(adc->base);
 	release_mem_region(adc->mem->start, resource_size(adc->mem));

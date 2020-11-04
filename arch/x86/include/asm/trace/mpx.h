@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #undef TRACE_SYSTEM
 #define TRACE_SYSTEM mpx
 
@@ -10,12 +11,12 @@
 
 TRACE_EVENT(mpx_bounds_register_exception,
 
-	TP_PROTO(void *addr_referenced,
-		 const struct bndreg *bndreg),
+	TP_PROTO(void __user *addr_referenced,
+		 const struct mpx_bndreg *bndreg),
 	TP_ARGS(addr_referenced, bndreg),
 
 	TP_STRUCT__entry(
-		__field(void *, addr_referenced)
+		__field(void __user *, addr_referenced)
 		__field(u64, lower_bound)
 		__field(u64, upper_bound)
 	),
@@ -44,7 +45,7 @@ TRACE_EVENT(mpx_bounds_register_exception,
 
 TRACE_EVENT(bounds_exception_mpx,
 
-	TP_PROTO(const struct bndcsr *bndcsr),
+	TP_PROTO(const struct mpx_bndcsr *bndcsr),
 	TP_ARGS(bndcsr),
 
 	TP_STRUCT__entry(
@@ -116,7 +117,8 @@ TRACE_EVENT(mpx_new_bounds_table,
 /*
  * This gets used outside of MPX-specific code, so we need a stub.
  */
-static inline void trace_bounds_exception_mpx(const struct bndcsr *bndcsr)
+static inline
+void trace_bounds_exception_mpx(const struct mpx_bndcsr *bndcsr)
 {
 }
 

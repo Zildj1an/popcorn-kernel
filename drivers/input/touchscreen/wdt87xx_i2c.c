@@ -23,7 +23,6 @@
 #include <asm/unaligned.h>
 
 #define WDT87XX_NAME		"wdt87xx_i2c"
-#define WDT87XX_DRV_VER		"0.9.6"
 #define WDT87XX_FW_NAME		"wdt87xx_fw.bin"
 #define WDT87XX_CFG_NAME	"wdt87xx_cfg.bin"
 
@@ -84,6 +83,11 @@
 #define CTL_PARAM_OFFSET_PHY_W		22
 #define CTL_PARAM_OFFSET_PHY_H		24
 #define CTL_PARAM_OFFSET_FACTOR		32
+
+/* The definition of the device descriptor */
+#define WDT_GD_DEVICE			1
+#define DEV_DESC_OFFSET_VID		8
+#define DEV_DESC_OFFSET_PID		10
 
 /* Communication commands */
 #define PACKET_SIZE			56
@@ -152,6 +156,8 @@
 /* Controller requires minimum 300us between commands */
 #define WDT_COMMAND_DELAY_MS		2
 #define WDT_FLASH_WRITE_DELAY_MS	4
+#define WDT_FLASH_ERASE_DELAY_MS	200
+#define WDT_FW_RESET_TIME		2500
 
 struct wdt87xx_sys_param {
 	u16	fw_id;
@@ -165,6 +171,8 @@ struct wdt87xx_sys_param {
 	u16	scaling_factor;
 	u32	max_x;
 	u32	max_y;
+	u16	vendor_id;
+	u16	product_id;
 };
 
 struct wdt87xx_data {
@@ -204,6 +212,32 @@ static int wdt87xx_i2c_xfer(struct i2c_client *client,
 			__func__, error);
 		return error;
 	}
+
+	return 0;
+}
+
+static int wdt87xx_get_desc(struct i2c_client *client, u8 desc_idx,
+			    u8 *buf, size_t len)
+{
+	u8 tx_buf[] = { 0x22, 0x00, 0x10, 0x0E, 0x23, 0x00 };
+	int error;
+
+	tx_buf[2] |= desc_idx & 0xF;
+
+	error = wdt87xx_i2c_xfer(client, tx_buf, sizeof(tx_buf),
+				 buf, len);
+	if (error) {
+		dev_err(&client->dev, "get desc failed: %d\n", error);
+		return error;
+	}
+
+	if (buf[0] != len) {
+		dev_err(&client->dev, "unexpected response to get desc: %d\n",
+			buf[0]);
+		return -EINVAL;
+	}
+
+	mdelay(WDT_COMMAND_DELAY_MS);
 
 	return 0;
 }
@@ -373,7 +407,7 @@ static int wdt87xx_sw_reset(struct i2c_client *client)
 	}
 
 	/* Wait the device to be ready */
-	msleep(200);
+	msleep(WDT_FW_RESET_TIME);
 
 	return 0;
 }
@@ -402,6 +436,15 @@ static int wdt87xx_get_sysparam(struct i2c_client *client,
 {
 	u8 buf[PKT_READ_SIZE];
 	int error;
+
+	error = wdt87xx_get_desc(client, WDT_GD_DEVICE, buf, 18);
+	if (error) {
+		dev_err(&client->dev, "failed to get device desc\n");
+		return error;
+	}
+
+	param->vendor_id = get_unaligned_le16(buf + DEV_DESC_OFFSET_VID);
+	param->product_id = get_unaligned_le16(buf + DEV_DESC_OFFSET_PID);
 
 	error = wdt87xx_get_string(client, STRIDX_PARAMETERS, buf, 34);
 	if (error) {
@@ -683,7 +726,7 @@ static int wdt87xx_write_firmware(struct i2c_client *client, const void *chunk)
 				break;
 			}
 
-			msleep(50);
+			msleep(WDT_FLASH_ERASE_DELAY_MS);
 
 			error = wdt87xx_write_data(client, data, start_addr,
 						   page_size);
@@ -805,7 +848,7 @@ static int wdt87xx_do_update_firmware(struct i2c_client *client,
 	error = wdt87xx_get_sysparam(client, &wdt->param);
 	if (error)
 		dev_err(&client->dev,
-			"failed to refresh system paramaters: %d\n", error);
+			"failed to refresh system parameters: %d\n", error);
 out:
 	enable_irq(client->irq);
 	mutex_unlock(&wdt->fw_mutex);
@@ -994,6 +1037,8 @@ static int wdt87xx_ts_create_input_device(struct wdt87xx_data *wdt)
 
 	input->name = "WDT87xx Touchscreen";
 	input->id.bustype = BUS_I2C;
+	input->id.vendor = wdt->param.vendor_id;
+	input->id.product = wdt->param.product_id;
 	input->phys = wdt->phys;
 
 	input_set_abs_params(input, ABS_MT_POSITION_X, 0,
@@ -1060,18 +1105,11 @@ static int wdt87xx_ts_probe(struct i2c_client *client,
 		return error;
 	}
 
-	error = sysfs_create_group(&client->dev.kobj, &wdt87xx_attr_group);
+	error = devm_device_add_group(&client->dev, &wdt87xx_attr_group);
 	if (error) {
 		dev_err(&client->dev, "create sysfs failed: %d\n", error);
 		return error;
 	}
-
-	return 0;
-}
-
-static int wdt87xx_ts_remove(struct i2c_client *client)
-{
-	sysfs_remove_group(&client->dev.kobj, &wdt87xx_attr_group);
 
 	return 0;
 }
@@ -1104,7 +1142,7 @@ static int __maybe_unused wdt87xx_resume(struct device *dev)
 	 * The chip may have been reset while system is resuming,
 	 * give it some time to settle.
 	 */
-	mdelay(100);
+	msleep(100);
 
 	error = wdt87xx_send_command(client, VND_CMD_START, 0);
 	if (error)
@@ -1133,7 +1171,6 @@ MODULE_DEVICE_TABLE(acpi, wdt87xx_acpi_id);
 
 static struct i2c_driver wdt87xx_driver = {
 	.probe		= wdt87xx_ts_probe,
-	.remove		= wdt87xx_ts_remove,
 	.id_table	= wdt87xx_dev_id,
 	.driver	= {
 		.name	= WDT87XX_NAME,
@@ -1145,5 +1182,4 @@ module_i2c_driver(wdt87xx_driver);
 
 MODULE_AUTHOR("HN Chen <hn.chen@weidahitech.com>");
 MODULE_DESCRIPTION("WeidaHiTech WDT87XX Touchscreen driver");
-MODULE_VERSION(WDT87XX_DRV_VER);
 MODULE_LICENSE("GPL");

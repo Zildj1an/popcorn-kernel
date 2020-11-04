@@ -1,22 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright 2011-2012 Calxeda, Inc.
  *  Copyright (C) 2012-2013 Altera Corporation <www.altera.com>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  * Based from clk-highbank.c
- *
  */
-#include <linux/clk.h>
-#include <linux/clkdev.h>
+#include <linux/slab.h>
 #include <linux/clk-provider.h>
 #include <linux/io.h>
 #include <linux/mfd/syscon.h>
@@ -106,7 +95,7 @@ static unsigned long socfpga_clk_recalc_rate(struct clk_hw *hwclk,
 		div = socfpgaclk->fixed_div;
 	else if (socfpgaclk->div_reg) {
 		val = readl(socfpgaclk->div_reg) >> socfpgaclk->shift;
-		val &= div_mask(socfpgaclk->width);
+		val &= GENMASK(socfpgaclk->width - 1, 0);
 		/* Check for GPIO_DB_CLK by its offset */
 		if ((int) socfpgaclk->div_reg & SOCFPGA_GPIO_DB_CLK_OFFSET)
 			div = val + 1;
@@ -177,8 +166,7 @@ static struct clk_ops gateclk_ops = {
 	.set_parent = socfpga_clk_set_parent,
 };
 
-static void __init __socfpga_gate_init(struct device_node *node,
-	const struct clk_ops *ops)
+void __init socfpga_gate_init(struct device_node *node)
 {
 	u32 clk_gate[2];
 	u32 div_reg[3];
@@ -189,10 +177,15 @@ static void __init __socfpga_gate_init(struct device_node *node,
 	const char *clk_name = node->name;
 	const char *parent_name[SOCFPGA_MAX_PARENTS];
 	struct clk_init_data init;
+	struct clk_ops *ops;
 	int rc;
 
 	socfpga_clk = kzalloc(sizeof(*socfpga_clk), GFP_KERNEL);
 	if (WARN_ON(!socfpga_clk))
+		return;
+
+	ops = kmemdup(&gateclk_ops, sizeof(gateclk_ops), GFP_KERNEL);
+	if (WARN_ON(!ops))
 		return;
 
 	rc = of_property_read_u32_array(node, "clk-gate", clk_gate, 2);
@@ -203,8 +196,8 @@ static void __init __socfpga_gate_init(struct device_node *node,
 		socfpga_clk->hw.reg = clk_mgr_base_addr + clk_gate[0];
 		socfpga_clk->hw.bit_idx = clk_gate[1];
 
-		gateclk_ops.enable = clk_gate_ops.enable;
-		gateclk_ops.disable = clk_gate_ops.disable;
+		ops->enable = clk_gate_ops.enable;
+		ops->disable = clk_gate_ops.disable;
 	}
 
 	rc = of_property_read_u32(node, "fixed-divider", &fixed_div);
@@ -235,6 +228,11 @@ static void __init __socfpga_gate_init(struct device_node *node,
 	init.flags = 0;
 
 	init.num_parents = of_clk_parent_fill(node, parent_name, SOCFPGA_MAX_PARENTS);
+	if (init.num_parents < 2) {
+		ops->get_parent = NULL;
+		ops->set_parent = NULL;
+	}
+
 	init.parent_names = parent_name;
 	socfpga_clk->hw.hw.init = &init;
 
@@ -246,9 +244,4 @@ static void __init __socfpga_gate_init(struct device_node *node,
 	rc = of_clk_add_provider(node, of_clk_src_simple_get, clk);
 	if (WARN_ON(rc))
 		return;
-}
-
-void __init socfpga_gate_init(struct device_node *node)
-{
-	__socfpga_gate_init(node, &gateclk_ops);
 }

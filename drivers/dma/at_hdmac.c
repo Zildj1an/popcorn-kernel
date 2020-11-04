@@ -1,13 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Driver for the Atmel AHB DMA Controller (aka HDMA or DMAC on AT91 systems)
  *
  * Copyright (C) 2008 Atmel Corporation
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
  *
  * This supports the Atmel AHB DMA Controller found in several Atmel SoCs.
  * The only Atmel DMA Controller that is not covered by this driver is the one
@@ -111,9 +106,8 @@ static struct at_desc *atc_alloc_descriptor(struct dma_chan *chan,
 	struct at_dma	*atdma = to_at_dma(chan->device);
 	dma_addr_t phys;
 
-	desc = dma_pool_alloc(atdma->dma_desc_pool, gfp_flags, &phys);
+	desc = dma_pool_zalloc(atdma->dma_desc_pool, gfp_flags, &phys);
 	if (desc) {
-		memset(desc, 0, sizeof(struct at_desc));
 		INIT_LIST_HEAD(&desc->tx_list);
 		dma_async_tx_descriptor_init(&desc->txd, chan);
 		/* txd.flags will be overwritten in prep functions */
@@ -135,7 +129,6 @@ static struct at_desc *atc_desc_get(struct at_dma_chan *atchan)
 	struct at_desc *ret = NULL;
 	unsigned long flags;
 	unsigned int i = 0;
-	LIST_HEAD(tmp_list);
 
 	spin_lock_irqsave(&atchan->lock, flags);
 	list_for_each_entry_safe(desc, _desc, &atchan->free_list, desc_node) {
@@ -448,6 +441,7 @@ static void
 atc_chain_complete(struct at_dma_chan *atchan, struct at_desc *desc)
 {
 	struct dma_async_tx_descriptor	*txd = &desc->txd;
+	struct at_dma			*atdma = to_at_dma(atchan->chan_common.device);
 
 	dev_vdbg(chan2dev(&atchan->chan_common),
 		"descriptor %u complete\n", txd->cookie);
@@ -455,6 +449,13 @@ atc_chain_complete(struct at_dma_chan *atchan, struct at_desc *desc)
 	/* mark the descriptor as complete for non cyclic cases only */
 	if (!atc_chan_is_cyclic(atchan))
 		dma_cookie_complete(txd);
+
+	/* If the transfer was a memset, free our temporary buffer */
+	if (desc->memset_buffer) {
+		dma_pool_free(atdma->memset_pool, desc->memset_vaddr,
+			      desc->memset_paddr);
+		desc->memset_buffer = false;
+	}
 
 	/* move children to free_list */
 	list_splice_init(&desc->tx_list, &atchan->free_list);
@@ -465,15 +466,11 @@ atc_chain_complete(struct at_dma_chan *atchan, struct at_desc *desc)
 	/* for cyclic transfers,
 	 * no need to replay callback function while stopping */
 	if (!atc_chan_is_cyclic(atchan)) {
-		dma_async_tx_callback	callback = txd->callback;
-		void			*param = txd->callback_param;
-
 		/*
 		 * The API requires that no submissions are done from a
 		 * callback, so we don't need to drop the lock here
 		 */
-		if (callback)
-			callback(param);
+		dmaengine_desc_get_callback_invoke(txd, NULL);
 	}
 
 	dma_run_dependencies(txd);
@@ -590,15 +587,12 @@ static void atc_handle_cyclic(struct at_dma_chan *atchan)
 {
 	struct at_desc			*first = atc_first_active(atchan);
 	struct dma_async_tx_descriptor	*txd = &first->txd;
-	dma_async_tx_callback		callback = txd->callback;
-	void				*param = txd->callback_param;
 
 	dev_vdbg(chan2dev(&atchan->chan_common),
 			"new cyclic period llp 0x%08x\n",
 			channel_readl(atchan, DSCR));
 
-	if (callback)
-		callback(param);
+	dmaengine_desc_get_callback_invoke(txd, NULL);
 }
 
 /*--  IRQ & Tasklet  ---------------------------------------------------*/
@@ -708,7 +702,7 @@ atc_prep_dma_interleaved(struct dma_chan *chan,
 			 unsigned long flags)
 {
 	struct at_dma_chan	*atchan = to_at_dma_chan(chan);
-	struct data_chunk	*first = xt->sgl;
+	struct data_chunk	*first;
 	struct at_desc		*desc = NULL;
 	size_t			xfer_count;
 	unsigned int		dwidth;
@@ -717,13 +711,15 @@ atc_prep_dma_interleaved(struct dma_chan *chan,
 	size_t			len = 0;
 	int			i;
 
-	dev_info(chan2dev(chan),
-		 "%s: src=0x%08x, dest=0x%08x, numf=%d, frame_size=%d, flags=0x%lx\n",
-		__func__, xt->src_start, xt->dst_start, xt->numf,
-		xt->frame_size, flags);
-
 	if (unlikely(!xt || xt->numf != 1 || !xt->frame_size))
 		return NULL;
+
+	first = xt->sgl;
+
+	dev_info(chan2dev(chan),
+		 "%s: src=%pad, dest=%pad, numf=%d, frame_size=%d, flags=0x%lx\n",
+		__func__, &xt->src_start, &xt->dst_start, xt->numf,
+		xt->frame_size, flags);
 
 	/*
 	 * The controller can only "skip" X bytes every Y bytes, so we
@@ -816,8 +812,8 @@ atc_prep_dma_memcpy(struct dma_chan *chan, dma_addr_t dest, dma_addr_t src,
 	u32			ctrla;
 	u32			ctrlb;
 
-	dev_vdbg(chan2dev(chan), "prep_dma_memcpy: d0x%x s0x%x l0x%zx f0x%lx\n",
-			dest, src, len, flags);
+	dev_vdbg(chan2dev(chan), "prep_dma_memcpy: d%pad s%pad l0x%zx f0x%lx\n",
+			&dest, &src, len, flags);
 
 	if (unlikely(!len)) {
 		dev_dbg(chan2dev(chan), "prep_dma_memcpy: length is zero!\n");
@@ -873,6 +869,187 @@ err_desc_get:
 	return NULL;
 }
 
+static struct at_desc *atc_create_memset_desc(struct dma_chan *chan,
+					      dma_addr_t psrc,
+					      dma_addr_t pdst,
+					      size_t len)
+{
+	struct at_dma_chan *atchan = to_at_dma_chan(chan);
+	struct at_desc *desc;
+	size_t xfer_count;
+
+	u32 ctrla = ATC_SRC_WIDTH(2) | ATC_DST_WIDTH(2);
+	u32 ctrlb = ATC_DEFAULT_CTRLB | ATC_IEN |
+		ATC_SRC_ADDR_MODE_FIXED |
+		ATC_DST_ADDR_MODE_INCR |
+		ATC_FC_MEM2MEM;
+
+	xfer_count = len >> 2;
+	if (xfer_count > ATC_BTSIZE_MAX) {
+		dev_err(chan2dev(chan), "%s: buffer is too big\n",
+			__func__);
+		return NULL;
+	}
+
+	desc = atc_desc_get(atchan);
+	if (!desc) {
+		dev_err(chan2dev(chan), "%s: can't get a descriptor\n",
+			__func__);
+		return NULL;
+	}
+
+	desc->lli.saddr = psrc;
+	desc->lli.daddr = pdst;
+	desc->lli.ctrla = ctrla | xfer_count;
+	desc->lli.ctrlb = ctrlb;
+
+	desc->txd.cookie = 0;
+	desc->len = len;
+
+	return desc;
+}
+
+/**
+ * atc_prep_dma_memset - prepare a memcpy operation
+ * @chan: the channel to prepare operation on
+ * @dest: operation virtual destination address
+ * @value: value to set memory buffer to
+ * @len: operation length
+ * @flags: tx descriptor status flags
+ */
+static struct dma_async_tx_descriptor *
+atc_prep_dma_memset(struct dma_chan *chan, dma_addr_t dest, int value,
+		    size_t len, unsigned long flags)
+{
+	struct at_dma		*atdma = to_at_dma(chan->device);
+	struct at_desc		*desc;
+	void __iomem		*vaddr;
+	dma_addr_t		paddr;
+
+	dev_vdbg(chan2dev(chan), "%s: d%pad v0x%x l0x%zx f0x%lx\n", __func__,
+		&dest, value, len, flags);
+
+	if (unlikely(!len)) {
+		dev_dbg(chan2dev(chan), "%s: length is zero!\n", __func__);
+		return NULL;
+	}
+
+	if (!is_dma_fill_aligned(chan->device, dest, 0, len)) {
+		dev_dbg(chan2dev(chan), "%s: buffer is not aligned\n",
+			__func__);
+		return NULL;
+	}
+
+	vaddr = dma_pool_alloc(atdma->memset_pool, GFP_ATOMIC, &paddr);
+	if (!vaddr) {
+		dev_err(chan2dev(chan), "%s: couldn't allocate buffer\n",
+			__func__);
+		return NULL;
+	}
+	*(u32*)vaddr = value;
+
+	desc = atc_create_memset_desc(chan, paddr, dest, len);
+	if (!desc) {
+		dev_err(chan2dev(chan), "%s: couldn't get a descriptor\n",
+			__func__);
+		goto err_free_buffer;
+	}
+
+	desc->memset_paddr = paddr;
+	desc->memset_vaddr = vaddr;
+	desc->memset_buffer = true;
+
+	desc->txd.cookie = -EBUSY;
+	desc->total_len = len;
+
+	/* set end-of-link on the descriptor */
+	set_desc_eol(desc);
+
+	desc->txd.flags = flags;
+
+	return &desc->txd;
+
+err_free_buffer:
+	dma_pool_free(atdma->memset_pool, vaddr, paddr);
+	return NULL;
+}
+
+static struct dma_async_tx_descriptor *
+atc_prep_dma_memset_sg(struct dma_chan *chan,
+		       struct scatterlist *sgl,
+		       unsigned int sg_len, int value,
+		       unsigned long flags)
+{
+	struct at_dma_chan	*atchan = to_at_dma_chan(chan);
+	struct at_dma		*atdma = to_at_dma(chan->device);
+	struct at_desc		*desc = NULL, *first = NULL, *prev = NULL;
+	struct scatterlist	*sg;
+	void __iomem		*vaddr;
+	dma_addr_t		paddr;
+	size_t			total_len = 0;
+	int			i;
+
+	dev_vdbg(chan2dev(chan), "%s: v0x%x l0x%zx f0x%lx\n", __func__,
+		 value, sg_len, flags);
+
+	if (unlikely(!sgl || !sg_len)) {
+		dev_dbg(chan2dev(chan), "%s: scatterlist is empty!\n",
+			__func__);
+		return NULL;
+	}
+
+	vaddr = dma_pool_alloc(atdma->memset_pool, GFP_ATOMIC, &paddr);
+	if (!vaddr) {
+		dev_err(chan2dev(chan), "%s: couldn't allocate buffer\n",
+			__func__);
+		return NULL;
+	}
+	*(u32*)vaddr = value;
+
+	for_each_sg(sgl, sg, sg_len, i) {
+		dma_addr_t dest = sg_dma_address(sg);
+		size_t len = sg_dma_len(sg);
+
+		dev_vdbg(chan2dev(chan), "%s: d%pad, l0x%zx\n",
+			 __func__, &dest, len);
+
+		if (!is_dma_fill_aligned(chan->device, dest, 0, len)) {
+			dev_err(chan2dev(chan), "%s: buffer is not aligned\n",
+				__func__);
+			goto err_put_desc;
+		}
+
+		desc = atc_create_memset_desc(chan, paddr, dest, len);
+		if (!desc)
+			goto err_put_desc;
+
+		atc_desc_chain(&first, &prev, desc);
+
+		total_len += len;
+	}
+
+	/*
+	 * Only set the buffer pointers on the last descriptor to
+	 * avoid free'ing while we have our transfer still going
+	 */
+	desc->memset_paddr = paddr;
+	desc->memset_vaddr = vaddr;
+	desc->memset_buffer = true;
+
+	first->txd.cookie = -EBUSY;
+	first->total_len = total_len;
+
+	/* set end-of-link on the descriptor */
+	set_desc_eol(desc);
+
+	first->txd.flags = flags;
+
+	return &first->txd;
+
+err_put_desc:
+	atc_desc_put(atchan, first);
+	return NULL;
+}
 
 /**
  * atc_prep_slave_sg - prepare descriptors for a DMA_SLAVE transaction
@@ -1022,138 +1199,6 @@ err:
 }
 
 /**
- * atc_prep_dma_sg - prepare memory to memory scather-gather operation
- * @chan: the channel to prepare operation on
- * @dst_sg: destination scatterlist
- * @dst_nents: number of destination scatterlist entries
- * @src_sg: source scatterlist
- * @src_nents: number of source scatterlist entries
- * @flags: tx descriptor status flags
- */
-static struct dma_async_tx_descriptor *
-atc_prep_dma_sg(struct dma_chan *chan,
-		struct scatterlist *dst_sg, unsigned int dst_nents,
-		struct scatterlist *src_sg, unsigned int src_nents,
-		unsigned long flags)
-{
-	struct at_dma_chan	*atchan = to_at_dma_chan(chan);
-	struct at_desc		*desc = NULL;
-	struct at_desc		*first = NULL;
-	struct at_desc		*prev = NULL;
-	unsigned int		src_width;
-	unsigned int		dst_width;
-	size_t			xfer_count;
-	u32			ctrla;
-	u32			ctrlb;
-	size_t			dst_len = 0, src_len = 0;
-	dma_addr_t		dst = 0, src = 0;
-	size_t			len = 0, total_len = 0;
-
-	if (unlikely(dst_nents == 0 || src_nents == 0))
-		return NULL;
-
-	if (unlikely(dst_sg == NULL || src_sg == NULL))
-		return NULL;
-
-	ctrlb =   ATC_DEFAULT_CTRLB | ATC_IEN
-		| ATC_SRC_ADDR_MODE_INCR
-		| ATC_DST_ADDR_MODE_INCR
-		| ATC_FC_MEM2MEM;
-
-	/*
-	 * loop until there is either no more source or no more destination
-	 * scatterlist entry
-	 */
-	while (true) {
-
-		/* prepare the next transfer */
-		if (dst_len == 0) {
-
-			/* no more destination scatterlist entries */
-			if (!dst_sg || !dst_nents)
-				break;
-
-			dst = sg_dma_address(dst_sg);
-			dst_len = sg_dma_len(dst_sg);
-
-			dst_sg = sg_next(dst_sg);
-			dst_nents--;
-		}
-
-		if (src_len == 0) {
-
-			/* no more source scatterlist entries */
-			if (!src_sg || !src_nents)
-				break;
-
-			src = sg_dma_address(src_sg);
-			src_len = sg_dma_len(src_sg);
-
-			src_sg = sg_next(src_sg);
-			src_nents--;
-		}
-
-		len = min_t(size_t, src_len, dst_len);
-		if (len == 0)
-			continue;
-
-		/* take care for the alignment */
-		src_width = dst_width = atc_get_xfer_width(src, dst, len);
-
-		ctrla = ATC_SRC_WIDTH(src_width) |
-			ATC_DST_WIDTH(dst_width);
-
-		/*
-		 * The number of transfers to set up refer to the source width
-		 * that depends on the alignment.
-		 */
-		xfer_count = len >> src_width;
-		if (xfer_count > ATC_BTSIZE_MAX) {
-			xfer_count = ATC_BTSIZE_MAX;
-			len = ATC_BTSIZE_MAX << src_width;
-		}
-
-		/* create the transfer */
-		desc = atc_desc_get(atchan);
-		if (!desc)
-			goto err_desc_get;
-
-		desc->lli.saddr = src;
-		desc->lli.daddr = dst;
-		desc->lli.ctrla = ctrla | xfer_count;
-		desc->lli.ctrlb = ctrlb;
-
-		desc->txd.cookie = 0;
-		desc->len = len;
-
-		atc_desc_chain(&first, &prev, desc);
-
-		/* update the lengths and addresses for the next loop cycle */
-		dst_len -= len;
-		src_len -= len;
-		dst += len;
-		src += len;
-
-		total_len += len;
-	}
-
-	/* First descriptor of the chain embedds additional information */
-	first->txd.cookie = -EBUSY;
-	first->total_len = total_len;
-
-	/* set end-of-link to the last link descriptor of list*/
-	set_desc_eol(desc);
-
-	first->txd.flags = flags; /* client is in control of this ack */
-
-	return &first->txd;
-
-err_desc_get:
-	atc_desc_put(atchan, first);
-	return NULL;
-}
-
-/**
  * atc_dma_cyclic_check_values
  * Check for too big/unaligned periods and unaligned DMA buffer
  */
@@ -1250,9 +1295,9 @@ atc_prep_dma_cyclic(struct dma_chan *chan, dma_addr_t buf_addr, size_t buf_len,
 	unsigned int		periods = buf_len / period_len;
 	unsigned int		i;
 
-	dev_vdbg(chan2dev(chan), "prep_dma_cyclic: %s buf@0x%08x - %d (%d/%d)\n",
+	dev_vdbg(chan2dev(chan), "prep_dma_cyclic: %s buf@%pad - %d (%d/%d)\n",
 			direction == DMA_MEM_TO_DEV ? "TO DEVICE" : "FROM DEVICE",
-			buf_addr,
+			&buf_addr,
 			periods, buf_len, period_len);
 
 	if (unlikely(!atslave || !buf_len || !period_len)) {
@@ -1269,7 +1314,7 @@ atc_prep_dma_cyclic(struct dma_chan *chan, dma_addr_t buf_addr, size_t buf_len,
 	if (unlikely(!is_slave_direction(direction)))
 		goto err_out;
 
-	if (sconfig->direction == DMA_MEM_TO_DEV)
+	if (direction == DMA_MEM_TO_DEV)
 		reg_width = convert_buswidth(sconfig->dst_addr_width);
 	else
 		reg_width = convert_buswidth(sconfig->src_addr_width);
@@ -1336,8 +1381,6 @@ static int atc_pause(struct dma_chan *chan)
 	int			chan_id = atchan->chan_common.chan_id;
 	unsigned long		flags;
 
-	LIST_HEAD(list);
-
 	dev_vdbg(chan2dev(chan), "%s\n", __func__);
 
 	spin_lock_irqsave(&atchan->lock, flags);
@@ -1356,8 +1399,6 @@ static int atc_resume(struct dma_chan *chan)
 	struct at_dma		*atdma = to_at_dma(chan->device);
 	int			chan_id = atchan->chan_common.chan_id;
 	unsigned long		flags;
-
-	LIST_HEAD(list);
 
 	dev_vdbg(chan2dev(chan), "%s\n", __func__);
 
@@ -1590,6 +1631,12 @@ static void atc_free_chan_resources(struct dma_chan *chan)
 	atchan->descs_allocated = 0;
 	atchan->status = 0;
 
+	/*
+	 * Free atslave allocated in at_dma_xlate()
+	 */
+	kfree(chan->private);
+	chan->private = NULL;
+
 	dev_vdbg(chan2dev(chan), "free_chan_resources: done\n");
 }
 
@@ -1624,7 +1671,7 @@ static struct dma_chan *at_dma_xlate(struct of_phandle_args *dma_spec,
 	dma_cap_zero(mask);
 	dma_cap_set(DMA_SLAVE, mask);
 
-	atslave = devm_kzalloc(&dmac_pdev->dev, sizeof(*atslave), GFP_KERNEL);
+	atslave = kzalloc(sizeof(*atslave), GFP_KERNEL);
 	if (!atslave)
 		return NULL;
 
@@ -1752,11 +1799,12 @@ static int __init at_dma_probe(struct platform_device *pdev)
 
 	/* setup platform data for each SoC */
 	dma_cap_set(DMA_MEMCPY, at91sam9rl_config.cap_mask);
-	dma_cap_set(DMA_SG, at91sam9rl_config.cap_mask);
 	dma_cap_set(DMA_INTERLEAVE, at91sam9g45_config.cap_mask);
 	dma_cap_set(DMA_MEMCPY, at91sam9g45_config.cap_mask);
+	dma_cap_set(DMA_MEMSET, at91sam9g45_config.cap_mask);
+	dma_cap_set(DMA_MEMSET_SG, at91sam9g45_config.cap_mask);
+	dma_cap_set(DMA_PRIVATE, at91sam9g45_config.cap_mask);
 	dma_cap_set(DMA_SLAVE, at91sam9g45_config.cap_mask);
-	dma_cap_set(DMA_SG, at91sam9g45_config.cap_mask);
 
 	/* get DMA parameters from controller type */
 	plat_dat = at_dma_get_driver_data(pdev);
@@ -1818,7 +1866,16 @@ static int __init at_dma_probe(struct platform_device *pdev)
 	if (!atdma->dma_desc_pool) {
 		dev_err(&pdev->dev, "No memory for descriptors dma pool\n");
 		err = -ENOMEM;
-		goto err_pool_create;
+		goto err_desc_pool_create;
+	}
+
+	/* create a pool of consistent memory blocks for memset blocks */
+	atdma->memset_pool = dma_pool_create("at_hdmac_memset_pool",
+					     &pdev->dev, sizeof(int), 4, 0);
+	if (!atdma->memset_pool) {
+		dev_err(&pdev->dev, "No memory for memset dma pool\n");
+		err = -ENOMEM;
+		goto err_memset_pool_create;
 	}
 
 	/* clear any pending interrupt */
@@ -1864,6 +1921,12 @@ static int __init at_dma_probe(struct platform_device *pdev)
 	if (dma_has_cap(DMA_MEMCPY, atdma->dma_common.cap_mask))
 		atdma->dma_common.device_prep_dma_memcpy = atc_prep_dma_memcpy;
 
+	if (dma_has_cap(DMA_MEMSET, atdma->dma_common.cap_mask)) {
+		atdma->dma_common.device_prep_dma_memset = atc_prep_dma_memset;
+		atdma->dma_common.device_prep_dma_memset_sg = atc_prep_dma_memset_sg;
+		atdma->dma_common.fill_align = DMAENGINE_ALIGN_4_BYTES;
+	}
+
 	if (dma_has_cap(DMA_SLAVE, atdma->dma_common.cap_mask)) {
 		atdma->dma_common.device_prep_slave_sg = atc_prep_slave_sg;
 		/* controller can do slave DMA: can trigger cyclic transfers */
@@ -1879,15 +1942,12 @@ static int __init at_dma_probe(struct platform_device *pdev)
 		atdma->dma_common.residue_granularity = DMA_RESIDUE_GRANULARITY_BURST;
 	}
 
-	if (dma_has_cap(DMA_SG, atdma->dma_common.cap_mask))
-		atdma->dma_common.device_prep_dma_sg = atc_prep_dma_sg;
-
 	dma_writel(atdma, EN, AT_DMA_ENABLE);
 
 	dev_info(&pdev->dev, "Atmel AHB DMA Controller ( %s%s%s), %d channels\n",
 	  dma_has_cap(DMA_MEMCPY, atdma->dma_common.cap_mask) ? "cpy " : "",
+	  dma_has_cap(DMA_MEMSET, atdma->dma_common.cap_mask) ? "set " : "",
 	  dma_has_cap(DMA_SLAVE, atdma->dma_common.cap_mask)  ? "slave " : "",
-	  dma_has_cap(DMA_SG, atdma->dma_common.cap_mask)  ? "sg-cpy " : "",
 	  plat_dat->nr_channels);
 
 	dma_async_device_register(&atdma->dma_common);
@@ -1910,8 +1970,10 @@ static int __init at_dma_probe(struct platform_device *pdev)
 
 err_of_dma_controller_register:
 	dma_async_device_unregister(&atdma->dma_common);
+	dma_pool_destroy(atdma->memset_pool);
+err_memset_pool_create:
 	dma_pool_destroy(atdma->dma_desc_pool);
-err_pool_create:
+err_desc_pool_create:
 	free_irq(platform_get_irq(pdev, 0), atdma);
 err_irq:
 	clk_disable_unprepare(atdma->clk);
@@ -1934,8 +1996,11 @@ static int at_dma_remove(struct platform_device *pdev)
 	struct resource		*io;
 
 	at_dma_off(atdma);
+	if (pdev->dev.of_node)
+		of_dma_controller_free(pdev->dev.of_node);
 	dma_async_device_unregister(&atdma->dma_common);
 
+	dma_pool_destroy(atdma->memset_pool);
 	dma_pool_destroy(atdma->dma_desc_pool);
 	free_irq(platform_get_irq(pdev, 0), atdma);
 
@@ -1974,8 +2039,7 @@ static void at_dma_shutdown(struct platform_device *pdev)
 
 static int at_dma_prepare(struct device *dev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct at_dma *atdma = platform_get_drvdata(pdev);
+	struct at_dma *atdma = dev_get_drvdata(dev);
 	struct dma_chan *chan, *_chan;
 
 	list_for_each_entry_safe(chan, _chan, &atdma->dma_common.channels,
@@ -2009,8 +2073,7 @@ static void atc_suspend_cyclic(struct at_dma_chan *atchan)
 
 static int at_dma_suspend_noirq(struct device *dev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct at_dma *atdma = platform_get_drvdata(pdev);
+	struct at_dma *atdma = dev_get_drvdata(dev);
 	struct dma_chan *chan, *_chan;
 
 	/* preserve data */
@@ -2051,8 +2114,7 @@ static void atc_resume_cyclic(struct at_dma_chan *atchan)
 
 static int at_dma_resume_noirq(struct device *dev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct at_dma *atdma = platform_get_drvdata(pdev);
+	struct at_dma *atdma = dev_get_drvdata(dev);
 	struct dma_chan *chan, *_chan;
 
 	/* bring back DMA controller */

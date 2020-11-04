@@ -1,6 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0-only
 menuconfig LIBNVDIMM
 	tristate "NVDIMM (Non-Volatile Memory Device) Support"
 	depends on PHYS_ADDR_T_64BIT
+	depends on HAS_IOMEM
 	depends on BLK_DEV
 	help
 	  Generic support for non-volatile memory devices including
@@ -19,15 +21,16 @@ if LIBNVDIMM
 config BLK_DEV_PMEM
 	tristate "PMEM: Persistent memory block device support"
 	default LIBNVDIMM
-	depends on HAS_IOMEM
+	select DAX_DRIVER
 	select ND_BTT if BTT
+	select ND_PFN if NVDIMM_PFN
 	help
 	  Memory ranges for PMEM are described by either an NFIT
 	  (NVDIMM Firmware Interface Table, see CONFIG_NFIT_ACPI), a
 	  non-standard OEM-specific E820 memory type (type-12, see
 	  CONFIG_X86_PMEM_LEGACY), or it is manually specified by the
 	  'memmap=nn[KMG]!ss[KMG]' kernel command line (see
-	  Documentation/kernel-parameters.txt).  This driver converts
+	  Documentation/admin-guide/kernel-parameters.rst).  This driver converts
 	  these persistent memory ranges into block devices that are
 	  capable of DAX (direct-access) file system mappings.  See
 	  Documentation/nvdimm/nvdimm.txt for more details.
@@ -47,12 +50,16 @@ config ND_BLK
 	  (CONFIG_ACPI_NFIT), or otherwise exposes BLK-mode
 	  capabilities.
 
+config ND_CLAIM
+	bool
+
 config ND_BTT
 	tristate
 
 config BTT
 	bool "BTT: Block Translation Table (atomic sector updates)"
 	default y if LIBNVDIMM
+	select ND_CLAIM
 	help
 	  The Block Translation Table (BTT) provides atomic sector
 	  update semantics for persistent memory devices, so that
@@ -64,5 +71,51 @@ config BTT
 	  etc...).
 
 	  Select Y if unsure
+
+config ND_PFN
+	tristate
+
+config NVDIMM_PFN
+	bool "PFN: Map persistent (device) memory"
+	default LIBNVDIMM
+	depends on ZONE_DEVICE
+	select ND_CLAIM
+	help
+	  Map persistent memory, i.e. advertise it to the memory
+	  management sub-system.  By default persistent memory does
+	  not support direct I/O, RDMA, or any other usage that
+	  requires a 'struct page' to mediate an I/O request.  This
+	  driver allocates and initializes the infrastructure needed
+	  to support those use cases.
+
+	  Select Y if unsure
+
+config NVDIMM_DAX
+	bool "NVDIMM DAX: Raw access to persistent memory"
+	default LIBNVDIMM
+	depends on NVDIMM_PFN
+	help
+	  Support raw device dax access to a persistent memory
+	  namespace.  For environments that want to hard partition
+	  persistent memory, this capability provides a mechanism to
+	  sub-divide a namespace into character devices that can only be
+	  accessed via DAX (mmap(2)).
+
+	  Select Y if unsure
+
+config OF_PMEM
+	tristate "Device-tree support for persistent memory regions"
+	depends on OF
+	default LIBNVDIMM
+	help
+	  Allows regions of persistent memory to be described in the
+	  device-tree.
+
+	  Select Y if unsure.
+
+config NVDIMM_KEYS
+	def_bool y
+	depends on ENCRYPTED_KEYS
+	depends on (LIBNVDIMM=ENCRYPTED_KEYS) || LIBNVDIMM=m
 
 endif

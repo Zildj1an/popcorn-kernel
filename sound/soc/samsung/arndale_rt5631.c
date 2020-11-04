@@ -1,15 +1,8 @@
-/*
- *  arndale_rt5631.c
- *
- *  Copyright (c) 2014, Insignal Co., Ltd.
- *
- *  Author: Claude <claude@insginal.co.kr>
- *
- *  This program is free software; you can redistribute  it and/or modify it
- *  under  the terms of  the GNU General  Public License as published by the
- *  Free Software Foundation;  either version 2 of the  License, or (at your
- *  option) any later version.
- */
+// SPDX-License-Identifier: GPL-2.0+
+//
+// Copyright (c) 2014, Insignal Co., Ltd.
+//
+//  Author: Claude <claude@insginal.co.kr>
 
 #include <linux/module.h>
 #include <linux/platform_device.h>
@@ -71,6 +64,7 @@ static struct snd_soc_dai_link arndale_rt5631_dai[] = {
 
 static struct snd_soc_card arndale_rt5631 = {
 	.name = "Arndale RT5631",
+	.owner = THIS_MODULE,
 	.dai_link = arndale_rt5631_dai,
 	.num_links = ARRAY_SIZE(arndale_rt5631_dai),
 };
@@ -116,15 +110,6 @@ static int arndale_audio_probe(struct platform_device *pdev)
 	return ret;
 }
 
-static int arndale_audio_remove(struct platform_device *pdev)
-{
-	struct snd_soc_card *card = platform_get_drvdata(pdev);
-
-	snd_soc_unregister_card(card);
-
-	return 0;
-}
-
 static const struct of_device_id samsung_arndale_rt5631_of_match[] __maybe_unused = {
 	{ .compatible = "samsung,arndale-rt5631", },
 	{ .compatible = "samsung,arndale-alc5631", },
@@ -139,7 +124,6 @@ static struct platform_driver arndale_audio_driver = {
 		.of_match_table = of_match_ptr(samsung_arndale_rt5631_of_match),
 	},
 	.probe = arndale_audio_probe,
-	.remove = arndale_audio_remove,
 };
 
 module_platform_driver(arndale_audio_driver);

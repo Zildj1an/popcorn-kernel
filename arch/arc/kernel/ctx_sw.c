@@ -1,9 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * Vineetg: Aug 2009
  *  -"C" version of lowest level context switch asm macro called by schedular
@@ -16,6 +13,7 @@
 
 #include <asm/asm-offsets.h>
 #include <linux/sched.h>
+#include <linux/sched/debug.h>
 #ifdef CONFIG_ARC_PLAT_EZNPS
 #include <plat/ctop.h>
 #endif
@@ -59,13 +57,6 @@ __switch_to(struct task_struct *prev_task, struct task_struct *next_task)
 		 */
 		"add2    r24, %3, %1     \n\t"
 		"st      sp, [r24]       \n\t"
-#endif
-
-#ifdef CONFIG_EZNPS_MTM_EXT
-		"nop	\n\t"
-		".word %5   \n\t"
-#else
-		"sync   \n\t"
 #endif
 
 		/*
@@ -125,7 +116,7 @@ __switch_to(struct task_struct *prev_task, struct task_struct *next_task)
 		: "=r"(tmp)
 		: "n"(KSP_WORD_OFF), "r"(next), "r"(prev)
 #ifdef CONFIG_ARC_PLAT_EZNPS
-		,"i"(CTOP_AUX_LOGIC_GLOBAL_ID), "i"(CTOP_INST_SCHD_RW)
+		, "i"(CTOP_AUX_LOGIC_GLOBAL_ID)
 #endif
 		: "blink"
 	);

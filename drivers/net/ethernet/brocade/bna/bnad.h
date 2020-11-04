@@ -1,14 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Linux network driver for QLogic BR-series Converged Network Adapter.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License (GPL) Version 2 as
- * published by the Free Software Foundation
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
  */
 /*
  * Copyright (c) 2005-2014 Brocade Communications Systems, Inc.
@@ -175,6 +167,7 @@ struct bnad_drv_stats {
 	u64		tx_skb_headlen_zero;
 	u64		tx_skb_frag_zero;
 	u64		tx_skb_len_mismatch;
+	u64		tx_skb_map_failed;
 
 	u64		hw_stats_updates;
 	u64		netif_rx_dropped;
@@ -189,6 +182,7 @@ struct bnad_drv_stats {
 	u64		rx_unmap_q_alloc_failed;
 
 	u64		rxbuf_alloc_failed;
+	u64		rxbuf_map_failed;
 };
 
 /* Complete driver stats */
@@ -286,7 +280,6 @@ struct bnad_rx_unmap_q {
 struct bnad {
 	struct net_device	*netdev;
 	u32			id;
-	struct list_head	list_entry;
 
 	/* Data path */
 	struct bnad_tx_info tx_info[BNAD_MAX_TX];

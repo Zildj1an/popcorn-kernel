@@ -1,16 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * SuperH Timer Support - MTU2
  *
  *  Copyright (C) 2009 Magnus Damm
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/clk.h>
@@ -276,36 +268,27 @@ static struct sh_mtu2_channel *ced_to_sh_mtu2(struct clock_event_device *ced)
 	return container_of(ced, struct sh_mtu2_channel, ced);
 }
 
-static void sh_mtu2_clock_event_mode(enum clock_event_mode mode,
-				    struct clock_event_device *ced)
+static int sh_mtu2_clock_event_shutdown(struct clock_event_device *ced)
 {
 	struct sh_mtu2_channel *ch = ced_to_sh_mtu2(ced);
-	int disabled = 0;
 
-	/* deal with old setting first */
-	switch (ced->mode) {
-	case CLOCK_EVT_MODE_PERIODIC:
+	if (clockevent_state_periodic(ced))
 		sh_mtu2_disable(ch);
-		disabled = 1;
-		break;
-	default:
-		break;
-	}
 
-	switch (mode) {
-	case CLOCK_EVT_MODE_PERIODIC:
-		dev_info(&ch->mtu->pdev->dev,
-			 "ch%u: used for periodic clock events\n", ch->index);
-		sh_mtu2_enable(ch);
-		break;
-	case CLOCK_EVT_MODE_UNUSED:
-		if (!disabled)
-			sh_mtu2_disable(ch);
-		break;
-	case CLOCK_EVT_MODE_SHUTDOWN:
-	default:
-		break;
-	}
+	return 0;
+}
+
+static int sh_mtu2_clock_event_set_periodic(struct clock_event_device *ced)
+{
+	struct sh_mtu2_channel *ch = ced_to_sh_mtu2(ced);
+
+	if (clockevent_state_periodic(ced))
+		sh_mtu2_disable(ch);
+
+	dev_info(&ch->mtu->pdev->dev, "ch%u: used for periodic clock events\n",
+		 ch->index);
+	sh_mtu2_enable(ch);
+	return 0;
 }
 
 static void sh_mtu2_clock_event_suspend(struct clock_event_device *ced)
@@ -327,7 +310,8 @@ static void sh_mtu2_register_clockevent(struct sh_mtu2_channel *ch,
 	ced->features = CLOCK_EVT_FEAT_PERIODIC;
 	ced->rating = 200;
 	ced->cpumask = cpu_possible_mask;
-	ced->set_mode = sh_mtu2_clock_event_mode;
+	ced->set_state_shutdown = sh_mtu2_clock_event_shutdown;
+	ced->set_state_periodic = sh_mtu2_clock_event_set_periodic;
 	ced->suspend = sh_mtu2_clock_event_suspend;
 	ced->resume = sh_mtu2_clock_event_resume;
 
@@ -426,7 +410,7 @@ static int sh_mtu2_setup(struct sh_mtu2_device *mtu,
 	/* Allocate and setup the channels. */
 	mtu->num_channels = 3;
 
-	mtu->channels = kzalloc(sizeof(*mtu->channels) * mtu->num_channels,
+	mtu->channels = kcalloc(mtu->num_channels, sizeof(*mtu->channels),
 				GFP_KERNEL);
 	if (mtu->channels == NULL) {
 		ret = -ENOMEM;

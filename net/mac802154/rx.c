@@ -1,14 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2007-2012 Siemens AG
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  *
  * Written by:
  * Pavel Smolenskiy <pavel.smolenskiy@gmail.com>
@@ -87,6 +79,10 @@ ieee802154_subif_frame(struct ieee802154_sub_if_data *sdata,
 
 	skb->dev = sdata->dev;
 
+	/* TODO this should be moved after netif_receive_skb call, otherwise
+	 * wireshark will show a mac header with security fields and the
+	 * payload is already decrypted.
+	 */
 	rc = mac802154_llsec_decrypt(&sdata->sec, skb);
 	if (rc) {
 		pr_debug("decryption failed: %i\n", rc);
@@ -97,11 +93,16 @@ ieee802154_subif_frame(struct ieee802154_sub_if_data *sdata,
 	sdata->dev->stats.rx_bytes += skb->len;
 
 	switch (mac_cb(skb)->type) {
+	case IEEE802154_FC_TYPE_BEACON:
+	case IEEE802154_FC_TYPE_ACK:
+	case IEEE802154_FC_TYPE_MAC_CMD:
+		goto fail;
+
 	case IEEE802154_FC_TYPE_DATA:
 		return ieee802154_deliver_skb(skb);
 	default:
-		pr_warn("ieee802154: bad frame received (type = %d)\n",
-			mac_cb(skb)->type);
+		pr_warn_ratelimited("ieee802154: bad frame received "
+				    "(type = %d)\n", mac_cb(skb)->type);
 		goto fail;
 	}
 
@@ -213,8 +214,7 @@ __ieee802154_rx_handle_packet(struct ieee802154_local *local,
 		break;
 	}
 
-	if (skb)
-		kfree_skb(skb);
+	kfree_skb(skb);
 }
 
 static void
@@ -246,12 +246,14 @@ ieee802154_monitors_rx(struct ieee802154_local *local, struct sk_buff *skb)
 	}
 }
 
-void ieee802154_rx(struct ieee802154_hw *hw, struct sk_buff *skb)
+void ieee802154_rx(struct ieee802154_local *local, struct sk_buff *skb)
 {
-	struct ieee802154_local *local = hw_to_local(hw);
 	u16 crc;
 
 	WARN_ON_ONCE(softirq_count() == 0);
+
+	if (local->suspended)
+		goto drop;
 
 	/* TODO: When a transceiver omits the checksum here, we
 	 * add an own calculated one. This is currently an ugly
@@ -273,8 +275,7 @@ void ieee802154_rx(struct ieee802154_hw *hw, struct sk_buff *skb)
 		crc = crc_ccitt(0, skb->data, skb->len);
 		if (crc) {
 			rcu_read_unlock();
-			kfree_skb(skb);
-			return;
+			goto drop;
 		}
 	}
 	/* remove crc */
@@ -283,8 +284,11 @@ void ieee802154_rx(struct ieee802154_hw *hw, struct sk_buff *skb)
 	__ieee802154_rx_handle_packet(local, skb);
 
 	rcu_read_unlock();
+
+	return;
+drop:
+	kfree_skb(skb);
 }
-EXPORT_SYMBOL(ieee802154_rx);
 
 void
 ieee802154_rx_irqsafe(struct ieee802154_hw *hw, struct sk_buff *skb, u8 lqi)

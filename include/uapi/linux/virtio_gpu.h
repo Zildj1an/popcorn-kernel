@@ -40,6 +40,17 @@
 
 #include <linux/types.h>
 
+/*
+ * VIRTIO_GPU_CMD_CTX_*
+ * VIRTIO_GPU_CMD_*_3D
+ */
+#define VIRTIO_GPU_F_VIRGL               0
+
+/*
+ * VIRTIO_GPU_CMD_GET_EDID
+ */
+#define VIRTIO_GPU_F_EDID                1
+
 enum virtio_gpu_ctrl_type {
 	VIRTIO_GPU_UNDEFINED = 0,
 
@@ -52,6 +63,19 @@ enum virtio_gpu_ctrl_type {
 	VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D,
 	VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING,
 	VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING,
+	VIRTIO_GPU_CMD_GET_CAPSET_INFO,
+	VIRTIO_GPU_CMD_GET_CAPSET,
+	VIRTIO_GPU_CMD_GET_EDID,
+
+	/* 3d commands */
+	VIRTIO_GPU_CMD_CTX_CREATE = 0x0200,
+	VIRTIO_GPU_CMD_CTX_DESTROY,
+	VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE,
+	VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE,
+	VIRTIO_GPU_CMD_RESOURCE_CREATE_3D,
+	VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D,
+	VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D,
+	VIRTIO_GPU_CMD_SUBMIT_3D,
 
 	/* cursor commands */
 	VIRTIO_GPU_CMD_UPDATE_CURSOR = 0x0300,
@@ -60,6 +84,9 @@ enum virtio_gpu_ctrl_type {
 	/* success responses */
 	VIRTIO_GPU_RESP_OK_NODATA = 0x1100,
 	VIRTIO_GPU_RESP_OK_DISPLAY_INFO,
+	VIRTIO_GPU_RESP_OK_CAPSET_INFO,
+	VIRTIO_GPU_RESP_OK_CAPSET,
+	VIRTIO_GPU_RESP_OK_EDID,
 
 	/* error responses */
 	VIRTIO_GPU_RESP_ERR_UNSPEC = 0x1200,
@@ -180,13 +207,123 @@ struct virtio_gpu_resp_display_info {
 	} pmodes[VIRTIO_GPU_MAX_SCANOUTS];
 };
 
+/* data passed in the control vq, 3d related */
+
+struct virtio_gpu_box {
+	__le32 x, y, z;
+	__le32 w, h, d;
+};
+
+/* VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D, VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D */
+struct virtio_gpu_transfer_host_3d {
+	struct virtio_gpu_ctrl_hdr hdr;
+	struct virtio_gpu_box box;
+	__le64 offset;
+	__le32 resource_id;
+	__le32 level;
+	__le32 stride;
+	__le32 layer_stride;
+};
+
+/* VIRTIO_GPU_CMD_RESOURCE_CREATE_3D */
+#define VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP (1 << 0)
+struct virtio_gpu_resource_create_3d {
+	struct virtio_gpu_ctrl_hdr hdr;
+	__le32 resource_id;
+	__le32 target;
+	__le32 format;
+	__le32 bind;
+	__le32 width;
+	__le32 height;
+	__le32 depth;
+	__le32 array_size;
+	__le32 last_level;
+	__le32 nr_samples;
+	__le32 flags;
+	__le32 padding;
+};
+
+/* VIRTIO_GPU_CMD_CTX_CREATE */
+struct virtio_gpu_ctx_create {
+	struct virtio_gpu_ctrl_hdr hdr;
+	__le32 nlen;
+	__le32 padding;
+	char debug_name[64];
+};
+
+/* VIRTIO_GPU_CMD_CTX_DESTROY */
+struct virtio_gpu_ctx_destroy {
+	struct virtio_gpu_ctrl_hdr hdr;
+};
+
+/* VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE, VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE */
+struct virtio_gpu_ctx_resource {
+	struct virtio_gpu_ctrl_hdr hdr;
+	__le32 resource_id;
+	__le32 padding;
+};
+
+/* VIRTIO_GPU_CMD_SUBMIT_3D */
+struct virtio_gpu_cmd_submit {
+	struct virtio_gpu_ctrl_hdr hdr;
+	__le32 size;
+	__le32 padding;
+};
+
+#define VIRTIO_GPU_CAPSET_VIRGL 1
+#define VIRTIO_GPU_CAPSET_VIRGL2 2
+
+/* VIRTIO_GPU_CMD_GET_CAPSET_INFO */
+struct virtio_gpu_get_capset_info {
+	struct virtio_gpu_ctrl_hdr hdr;
+	__le32 capset_index;
+	__le32 padding;
+};
+
+/* VIRTIO_GPU_RESP_OK_CAPSET_INFO */
+struct virtio_gpu_resp_capset_info {
+	struct virtio_gpu_ctrl_hdr hdr;
+	__le32 capset_id;
+	__le32 capset_max_version;
+	__le32 capset_max_size;
+	__le32 padding;
+};
+
+/* VIRTIO_GPU_CMD_GET_CAPSET */
+struct virtio_gpu_get_capset {
+	struct virtio_gpu_ctrl_hdr hdr;
+	__le32 capset_id;
+	__le32 capset_version;
+};
+
+/* VIRTIO_GPU_RESP_OK_CAPSET */
+struct virtio_gpu_resp_capset {
+	struct virtio_gpu_ctrl_hdr hdr;
+	__u8 capset_data[];
+};
+
+/* VIRTIO_GPU_CMD_GET_EDID */
+struct virtio_gpu_cmd_get_edid {
+	struct virtio_gpu_ctrl_hdr hdr;
+	__le32 scanout;
+	__le32 padding;
+};
+
+/* VIRTIO_GPU_RESP_OK_EDID */
+struct virtio_gpu_resp_edid {
+	struct virtio_gpu_ctrl_hdr hdr;
+	__le32 size;
+	__le32 padding;
+	__u8 edid[1024];
+};
+
 #define VIRTIO_GPU_EVENT_DISPLAY (1 << 0)
 
 struct virtio_gpu_config {
 	__u32 events_read;
 	__u32 events_clear;
 	__u32 num_scanouts;
-	__u32 reserved;
+	__u32 num_capsets;
 };
 
 /* simple formats for fbcon/X use */

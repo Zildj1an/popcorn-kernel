@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * The Marvell camera core.  This device appears in a number of settings,
  * so it needs platform-specific support outside of the core.
@@ -25,7 +26,7 @@
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-event.h>
-#include <media/ov7670.h>
+#include <media/i2c/ov7670.h>
 #include <media/videobuf2-vmalloc.h>
 #include <media/videobuf2-dma-contig.h>
 #include <media/videobuf2-dma-sg.h>
@@ -49,24 +50,17 @@
 static bool alloc_bufs_at_read;
 module_param(alloc_bufs_at_read, bool, 0444);
 MODULE_PARM_DESC(alloc_bufs_at_read,
-		"Non-zero value causes DMA buffers to be allocated when the "
-		"video capture device is read, rather than at module load "
-		"time.  This saves memory, but decreases the chances of "
-		"successfully getting those buffers.  This parameter is "
-		"only used in the vmalloc buffer mode");
+		"Non-zero value causes DMA buffers to be allocated when the video capture device is read, rather than at module load time.  This saves memory, but decreases the chances of successfully getting those buffers.  This parameter is only used in the vmalloc buffer mode");
 
 static int n_dma_bufs = 3;
 module_param(n_dma_bufs, uint, 0644);
 MODULE_PARM_DESC(n_dma_bufs,
-		"The number of DMA buffers to allocate.  Can be either two "
-		"(saves memory, makes timing tighter) or three.");
+		"The number of DMA buffers to allocate.  Can be either two (saves memory, makes timing tighter) or three.");
 
 static int dma_buf_size = VGA_WIDTH * VGA_HEIGHT * 2;  /* Worst case */
 module_param(dma_buf_size, uint, 0444);
 MODULE_PARM_DESC(dma_buf_size,
-		"The size of the allocated DMA buffers.  If actual operating "
-		"parameters require larger buffers, an attempt to reallocate "
-		"will be made.");
+		"The size of the allocated DMA buffers.  If actual operating parameters require larger buffers, an attempt to reallocate will be made.");
 #else /* MCAM_MODE_VMALLOC */
 static const bool alloc_bufs_at_read;
 static const int n_dma_bufs = 3;  /* Used by S/G_PARM */
@@ -75,15 +69,12 @@ static const int n_dma_bufs = 3;  /* Used by S/G_PARM */
 static bool flip;
 module_param(flip, bool, 0444);
 MODULE_PARM_DESC(flip,
-		"If set, the sensor will be instructed to flip the image "
-		"vertically.");
+		"If set, the sensor will be instructed to flip the image vertically.");
 
 static int buffer_mode = -1;
 module_param(buffer_mode, int, 0444);
 MODULE_PARM_DESC(buffer_mode,
-		"Set the buffer mode to be used; default is to go with what "
-		"the platform driver asks for.  Set to 0 for vmalloc, 1 for "
-		"DMA contiguous.");
+		"Set the buffer mode to be used; default is to go with what the platform driver asks for.  Set to 0 for vmalloc, 1 for DMA contiguous.");
 
 /*
  * Status flags.  Always manipulated with bit operations.
@@ -201,18 +192,17 @@ struct mcam_dma_desc {
 
 /*
  * Our buffer type for working with videobuf2.  Note that the vb2
- * developers have decreed that struct vb2_buffer must be at the
+ * developers have decreed that struct vb2_v4l2_buffer must be at the
  * beginning of this structure.
  */
 struct mcam_vb_buffer {
-	struct vb2_buffer vb_buf;
+	struct vb2_v4l2_buffer vb_buf;
 	struct list_head queue;
 	struct mcam_dma_desc *dma_desc;	/* Descriptor virtual address */
 	dma_addr_t dma_desc_pa;		/* Descriptor physical address */
-	int dma_desc_nent;		/* Number of mapped descriptors */
 };
 
-static inline struct mcam_vb_buffer *vb_to_mvb(struct vb2_buffer *vb)
+static inline struct mcam_vb_buffer *vb_to_mvb(struct vb2_v4l2_buffer *vb)
 {
 	return container_of(vb, struct mcam_vb_buffer, vb_buf);
 }
@@ -221,14 +211,14 @@ static inline struct mcam_vb_buffer *vb_to_mvb(struct vb2_buffer *vb)
  * Hand a completed buffer back to user space.
  */
 static void mcam_buffer_done(struct mcam_camera *cam, int frame,
-		struct vb2_buffer *vbuf)
+		struct vb2_v4l2_buffer *vbuf)
 {
-	vbuf->v4l2_buf.bytesused = cam->pix_format.sizeimage;
-	vbuf->v4l2_buf.sequence = cam->buf_seq[frame];
-	vbuf->v4l2_buf.field = V4L2_FIELD_NONE;
-	v4l2_get_timestamp(&vbuf->v4l2_buf.timestamp);
-	vb2_set_plane_payload(vbuf, 0, cam->pix_format.sizeimage);
-	vb2_buffer_done(vbuf, VB2_BUF_STATE_DONE);
+	vbuf->vb2_buf.planes[0].bytesused = cam->pix_format.sizeimage;
+	vbuf->sequence = cam->buf_seq[frame];
+	vbuf->field = V4L2_FIELD_NONE;
+	vbuf->vb2_buf.timestamp = ktime_get_ns();
+	vb2_set_plane_payload(&vbuf->vb2_buf, 0, cam->pix_format.sizeimage);
+	vb2_buffer_done(&vbuf->vb2_buf, VB2_BUF_STATE_DONE);
 }
 
 
@@ -403,6 +393,7 @@ static int mcam_alloc_dma_bufs(struct mcam_camera *cam, int loadtime)
 		dma_free_coherent(cam->dev, cam->dma_buf_size,
 				cam->dma_bufs[0], cam->dma_handles[0]);
 		cam->nbufs = 0;
+		/* fall-through */
 	case 0:
 		cam_err(cam, "Insufficient DMA buffers, cannot operate\n");
 		return -ENOMEM;
@@ -482,7 +473,8 @@ static void mcam_frame_tasklet(unsigned long data)
 		 * Drop the lock during the big copy.  This *should* be safe...
 		 */
 		spin_unlock_irqrestore(&cam->dev_lock, flags);
-		memcpy(vb2_plane_vaddr(&buf->vb_buf, 0), cam->dma_bufs[bufno],
+		memcpy(vb2_plane_vaddr(&buf->vb_buf.vb2_buf, 0),
+				cam->dma_bufs[bufno],
 				cam->pix_format.sizeimage);
 		mcam_buffer_done(cam, bufno, &buf->vb_buf);
 		spin_lock_irqsave(&cam->dev_lock, flags);
@@ -548,7 +540,7 @@ static void mcam_set_contig_buffer(struct mcam_camera *cam, int frame)
 {
 	struct mcam_vb_buffer *buf;
 	dma_addr_t dma_handle;
-	struct vb2_buffer *vb;
+	struct vb2_v4l2_buffer *vb;
 
 	/*
 	 * If there are no available buffers, go into single mode
@@ -570,7 +562,7 @@ static void mcam_set_contig_buffer(struct mcam_camera *cam, int frame)
 	cam->vb_bufs[frame] = buf;
 	vb = &buf->vb_buf;
 
-	dma_handle = vb2_dma_contig_plane_dma_addr(vb, 0);
+	dma_handle = vb2_dma_contig_plane_dma_addr(&vb->vb2_buf, 0);
 	mcam_write_yuv_bases(cam, frame, dma_handle);
 }
 
@@ -615,9 +607,11 @@ static void mcam_dma_contig_done(struct mcam_camera *cam, int frame)
 static void mcam_sg_next_buffer(struct mcam_camera *cam)
 {
 	struct mcam_vb_buffer *buf;
+	struct sg_table *sg_table;
 
 	buf = list_first_entry(&cam->buffers, struct mcam_vb_buffer, queue);
 	list_del_init(&buf->queue);
+	sg_table = vb2_dma_sg_plane_desc(&buf->vb_buf.vb2_buf, 0);
 	/*
 	 * Very Bad Not Good Things happen if you don't clear
 	 * C1_DESC_ENA before making any descriptor changes.
@@ -625,7 +619,7 @@ static void mcam_sg_next_buffer(struct mcam_camera *cam)
 	mcam_reg_clear_bit(cam, REG_CTRL1, C1_DESC_ENA);
 	mcam_reg_write(cam, REG_DMA_DESC_Y, buf->dma_desc_pa);
 	mcam_reg_write(cam, REG_DESC_LEN_Y,
-			buf->dma_desc_nent*sizeof(struct mcam_dma_desc));
+			sg_table->nents * sizeof(struct mcam_dma_desc));
 	mcam_reg_write(cam, REG_DESC_LEN_U, 0);
 	mcam_reg_write(cam, REG_DESC_LEN_V, 0);
 	mcam_reg_set_bit(cam, REG_CTRL1, C1_DESC_ENA);
@@ -801,7 +795,7 @@ static void mcam_ctlr_image(struct mcam_camera *cam)
 	/*
 	 * This field controls the generation of EOF(DVP only)
 	 */
-	if (cam->bus_type != V4L2_MBUS_CSI2)
+	if (cam->bus_type != V4L2_MBUS_CSI2_DPHY)
 		mcam_reg_set_bit(cam, REG_CTRL0,
 				C0_EOF_VSYNC | C0_VEDGE_CTRL);
 }
@@ -972,7 +966,7 @@ static int mcam_cam_set_flip(struct mcam_camera *cam)
 	memset(&ctrl, 0, sizeof(ctrl));
 	ctrl.id = V4L2_CID_VFLIP;
 	ctrl.value = flip;
-	return sensor_call(cam, core, s_ctrl, &ctrl);
+	return v4l2_s_ctrl(NULL, cam->sensor->ctrl_handler, &ctrl);
 }
 
 
@@ -1030,7 +1024,7 @@ static int mcam_read_setup(struct mcam_camera *cam)
 		cam->calc_dphy(cam);
 	cam_dbg(cam, "camera: DPHY sets: dphy3=0x%x, dphy5=0x%x, dphy6=0x%x\n",
 			cam->dphy[0], cam->dphy[1], cam->dphy[2]);
-	if (cam->bus_type == V4L2_MBUS_CSI2)
+	if (cam->bus_type == V4L2_MBUS_CSI2_DPHY)
 		mcam_enable_mipi(cam);
 	else
 		mcam_disable_mipi(cam);
@@ -1048,30 +1042,29 @@ static int mcam_read_setup(struct mcam_camera *cam)
  */
 
 static int mcam_vb_queue_setup(struct vb2_queue *vq,
-		const struct v4l2_format *fmt, unsigned int *nbufs,
+		unsigned int *nbufs,
 		unsigned int *num_planes, unsigned int sizes[],
-		void *alloc_ctxs[])
+		struct device *alloc_devs[])
 {
 	struct mcam_camera *cam = vb2_get_drv_priv(vq);
 	int minbufs = (cam->buffer_mode == B_DMA_contig) ? 3 : 2;
+	unsigned size = cam->pix_format.sizeimage;
 
-	if (fmt && fmt->fmt.pix.sizeimage < cam->pix_format.sizeimage)
-		return -EINVAL;
-	sizes[0] = fmt ? fmt->fmt.pix.sizeimage : cam->pix_format.sizeimage;
-	*num_planes = 1; /* Someday we have to support planar formats... */
 	if (*nbufs < minbufs)
 		*nbufs = minbufs;
-	if (cam->buffer_mode == B_DMA_contig)
-		alloc_ctxs[0] = cam->vb_alloc_ctx;
-	else if (cam->buffer_mode == B_DMA_sg)
-		alloc_ctxs[0] = cam->vb_alloc_ctx_sg;
+
+	if (*num_planes)
+		return sizes[0] < size ? -EINVAL : 0;
+	sizes[0] = size;
+	*num_planes = 1; /* Someday we have to support planar formats... */
 	return 0;
 }
 
 
 static void mcam_vb_buf_queue(struct vb2_buffer *vb)
 {
-	struct mcam_vb_buffer *mvb = vb_to_mvb(vb);
+	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
+	struct mcam_vb_buffer *mvb = vb_to_mvb(vbuf);
 	struct mcam_camera *cam = vb2_get_drv_priv(vb->vb2_queue);
 	unsigned long flags;
 	int start;
@@ -1096,14 +1089,14 @@ static void mcam_vb_requeue_bufs(struct vb2_queue *vq,
 
 	spin_lock_irqsave(&cam->dev_lock, flags);
 	list_for_each_entry_safe(buf, node, &cam->buffers, queue) {
-		vb2_buffer_done(&buf->vb_buf, state);
+		vb2_buffer_done(&buf->vb_buf.vb2_buf, state);
 		list_del(&buf->queue);
 	}
 	for (i = 0; i < MAX_DMA_BUFS; i++) {
 		buf = cam->vb_bufs[i];
 
 		if (buf) {
-			vb2_buffer_done(&buf->vb_buf, state);
+			vb2_buffer_done(&buf->vb_buf.vb2_buf, state);
 			cam->vb_bufs[i] = NULL;
 		}
 	}
@@ -1198,7 +1191,8 @@ static const struct vb2_ops mcam_vb2_ops = {
  */
 static int mcam_vb_sg_buf_init(struct vb2_buffer *vb)
 {
-	struct mcam_vb_buffer *mvb = vb_to_mvb(vb);
+	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
+	struct mcam_vb_buffer *mvb = vb_to_mvb(vbuf);
 	struct mcam_camera *cam = vb2_get_drv_priv(vb->vb2_queue);
 	int ndesc = cam->pix_format.sizeimage/PAGE_SIZE + 1;
 
@@ -1214,7 +1208,8 @@ static int mcam_vb_sg_buf_init(struct vb2_buffer *vb)
 
 static int mcam_vb_sg_buf_prepare(struct vb2_buffer *vb)
 {
-	struct mcam_vb_buffer *mvb = vb_to_mvb(vb);
+	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
+	struct mcam_vb_buffer *mvb = vb_to_mvb(vbuf);
 	struct sg_table *sg_table = vb2_dma_sg_plane_desc(vb, 0);
 	struct mcam_dma_desc *desc = mvb->dma_desc;
 	struct scatterlist *sg;
@@ -1230,8 +1225,9 @@ static int mcam_vb_sg_buf_prepare(struct vb2_buffer *vb)
 
 static void mcam_vb_sg_buf_cleanup(struct vb2_buffer *vb)
 {
+	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
 	struct mcam_camera *cam = vb2_get_drv_priv(vb->vb2_queue);
-	struct mcam_vb_buffer *mvb = vb_to_mvb(vb);
+	struct mcam_vb_buffer *mvb = vb_to_mvb(vbuf);
 	int ndesc = cam->pix_format.sizeimage/PAGE_SIZE + 1;
 
 	dma_free_coherent(cam->dev, ndesc * sizeof(struct mcam_dma_desc),
@@ -1264,6 +1260,7 @@ static int mcam_setup_vb2(struct mcam_camera *cam)
 	vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
 	vq->io_modes = VB2_MMAP | VB2_USERPTR | VB2_DMABUF | VB2_READ;
 	vq->buf_struct_size = sizeof(struct mcam_vb_buffer);
+	vq->dev = cam->dev;
 	INIT_LIST_HEAD(&cam->buffers);
 	switch (cam->buffer_mode) {
 	case B_DMA_contig:
@@ -1272,9 +1269,6 @@ static int mcam_setup_vb2(struct mcam_camera *cam)
 		vq->mem_ops = &vb2_dma_contig_memops;
 		cam->dma_setup = mcam_ctlr_dma_contig;
 		cam->frame_complete = mcam_dma_contig_done;
-		cam->vb_alloc_ctx = vb2_dma_contig_init_ctx(cam->dev);
-		if (IS_ERR(cam->vb_alloc_ctx))
-			return PTR_ERR(cam->vb_alloc_ctx);
 #endif
 		break;
 	case B_DMA_sg:
@@ -1283,9 +1277,6 @@ static int mcam_setup_vb2(struct mcam_camera *cam)
 		vq->mem_ops = &vb2_dma_sg_memops;
 		cam->dma_setup = mcam_ctlr_dma_sg;
 		cam->frame_complete = mcam_dma_sg_done;
-		cam->vb_alloc_ctx_sg = vb2_dma_sg_init_ctx(cam->dev);
-		if (IS_ERR(cam->vb_alloc_ctx_sg))
-			return PTR_ERR(cam->vb_alloc_ctx_sg);
 #endif
 		break;
 	case B_vmalloc:
@@ -1302,18 +1293,6 @@ static int mcam_setup_vb2(struct mcam_camera *cam)
 	return vb2_queue_init(vq);
 }
 
-static void mcam_cleanup_vb2(struct mcam_camera *cam)
-{
-#ifdef MCAM_MODE_DMA_CONTIG
-	if (cam->buffer_mode == B_DMA_contig)
-		vb2_dma_contig_cleanup_ctx(cam->vb_alloc_ctx);
-#endif
-#ifdef MCAM_MODE_DMA_SG
-	if (cam->buffer_mode == B_DMA_sg)
-		vb2_dma_sg_cleanup_ctx(cam->vb_alloc_ctx_sg);
-#endif
-}
-
 
 /* ---------------------------------------------------------------------- */
 /*
@@ -1325,9 +1304,9 @@ static int mcam_vidioc_querycap(struct file *file, void *priv,
 {
 	struct mcam_camera *cam = video_drvdata(file);
 
-	strcpy(cap->driver, "marvell_ccic");
-	strcpy(cap->card, "marvell_ccic");
-	strlcpy(cap->bus_info, cam->bus_info, sizeof(cap->bus_info));
+	strscpy(cap->driver, "marvell_ccic", sizeof(cap->driver));
+	strscpy(cap->card, "marvell_ccic", sizeof(cap->card));
+	strscpy(cap->bus_info, cam->bus_info, sizeof(cap->bus_info));
 	cap->device_caps = V4L2_CAP_VIDEO_CAPTURE |
 		V4L2_CAP_READWRITE | V4L2_CAP_STREAMING;
 	cap->capabilities = cap->device_caps | V4L2_CAP_DEVICE_CAPS;
@@ -1340,8 +1319,8 @@ static int mcam_vidioc_enum_fmt_vid_cap(struct file *filp,
 {
 	if (fmt->index >= N_MCAM_FMTS)
 		return -EINVAL;
-	strlcpy(fmt->description, mcam_formats[fmt->index].desc,
-			sizeof(fmt->description));
+	strscpy(fmt->description, mcam_formats[fmt->index].desc,
+		sizeof(fmt->description));
 	fmt->pixelformat = mcam_formats[fmt->index].pixelformat;
 	return 0;
 }
@@ -1443,7 +1422,7 @@ static int mcam_vidioc_enum_input(struct file *filp, void *priv,
 		return -EINVAL;
 
 	input->type = V4L2_INPUT_TYPE_CAMERA;
-	strcpy(input->name, "Camera");
+	strscpy(input->name, "Camera", sizeof(input->name));
 	return 0;
 }
 
@@ -1465,24 +1444,24 @@ static int mcam_vidioc_s_input(struct file *filp, void *priv, unsigned int i)
  * the level which controls the number of read buffers.
  */
 static int mcam_vidioc_g_parm(struct file *filp, void *priv,
-		struct v4l2_streamparm *parms)
+		struct v4l2_streamparm *a)
 {
 	struct mcam_camera *cam = video_drvdata(filp);
 	int ret;
 
-	ret = sensor_call(cam, video, g_parm, parms);
-	parms->parm.capture.readbuffers = n_dma_bufs;
+	ret = v4l2_g_parm_cap(video_devdata(filp), cam->sensor, a);
+	a->parm.capture.readbuffers = n_dma_bufs;
 	return ret;
 }
 
 static int mcam_vidioc_s_parm(struct file *filp, void *priv,
-		struct v4l2_streamparm *parms)
+		struct v4l2_streamparm *a)
 {
 	struct mcam_camera *cam = video_drvdata(filp);
 	int ret;
 
-	ret = sensor_call(cam, video, s_parm, parms);
-	parms->parm.capture.readbuffers = n_dma_bufs;
+	ret = v4l2_s_parm_cap(video_devdata(filp), cam->sensor, a);
+	a->parm.capture.readbuffers = n_dma_bufs;
 	return ret;
 }
 
@@ -1662,7 +1641,7 @@ static const struct v4l2_file_operations mcam_v4l_fops = {
  * This template device holds all of those v4l2 methods; we
  * clone it for specific real devices.
  */
-static struct video_device mcam_v4l_template = {
+static const struct video_device mcam_v4l_template = {
 	.name = "mcam",
 	.fops = &mcam_v4l_fops,
 	.ioctl_ops = &mcam_v4l_ioctl_ops,
@@ -1742,6 +1721,7 @@ int mccic_irq(struct mcam_camera *cam, unsigned int irqs)
 	}
 	return handled;
 }
+EXPORT_SYMBOL_GPL(mccic_irq);
 
 /* ---------------------------------------------------------------------- */
 /*
@@ -1773,8 +1753,7 @@ int mccic_register(struct mcam_camera *cam)
 		cam->buffer_mode = buffer_mode;
 	if (cam->buffer_mode == B_DMA_sg &&
 			cam->chip_id == MCAM_CAFE) {
-		printk(KERN_ERR "marvell-cam: Cafe can't do S/G I/O, "
-			"attempting vmalloc mode instead\n");
+		printk(KERN_ERR "marvell-cam: Cafe can't do S/G I/O, attempting vmalloc mode instead\n");
 		cam->buffer_mode = B_vmalloc;
 	}
 	if (!mcam_buffer_mode_supported(cam->buffer_mode)) {
@@ -1842,8 +1821,7 @@ int mccic_register(struct mcam_camera *cam)
 	 */
 	if (cam->buffer_mode == B_vmalloc && !alloc_bufs_at_read) {
 		if (mcam_alloc_dma_bufs(cam, 1))
-			cam_warn(cam, "Unable to alloc DMA buffers at load"
-					" will try again later.");
+			cam_warn(cam, "Unable to alloc DMA buffers at load will try again later.");
 	}
 
 	mutex_unlock(&cam->s_mutex);
@@ -1854,7 +1832,7 @@ out_unregister:
 	v4l2_device_unregister(&cam->v4l2_dev);
 	return ret;
 }
-
+EXPORT_SYMBOL_GPL(mccic_register);
 
 void mccic_shutdown(struct mcam_camera *cam)
 {
@@ -1868,13 +1846,13 @@ void mccic_shutdown(struct mcam_camera *cam)
 		cam_warn(cam, "Removing a device with users!\n");
 		mcam_ctlr_power_down(cam);
 	}
-	mcam_cleanup_vb2(cam);
 	if (cam->buffer_mode == B_vmalloc)
 		mcam_free_dma_bufs(cam);
 	video_unregister_device(&cam->vdev);
 	v4l2_ctrl_handler_free(&cam->ctrl_handler);
 	v4l2_device_unregister(&cam->v4l2_dev);
 }
+EXPORT_SYMBOL_GPL(mccic_shutdown);
 
 /*
  * Power management
@@ -1893,6 +1871,7 @@ void mccic_suspend(struct mcam_camera *cam)
 	}
 	mutex_unlock(&cam->s_mutex);
 }
+EXPORT_SYMBOL_GPL(mccic_suspend);
 
 int mccic_resume(struct mcam_camera *cam)
 {
@@ -1923,4 +1902,8 @@ int mccic_resume(struct mcam_camera *cam)
 	}
 	return ret;
 }
+EXPORT_SYMBOL_GPL(mccic_resume);
 #endif /* CONFIG_PM */
+
+MODULE_LICENSE("GPL v2");
+MODULE_AUTHOR("Jonathan Corbet <corbet@lwn.net>");

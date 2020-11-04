@@ -1,10 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2014 Magnus Damm
  * Copyright (C) 2015 Glider bvba
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 
 #define pr_fmt(fmt)	"board_staging: "  fmt
@@ -135,6 +132,32 @@ int __init board_staging_register_clock(const struct board_staging_clk *bsc)
 	return error;
 }
 
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+static int board_staging_add_dev_domain(struct platform_device *pdev,
+					const char *domain)
+{
+	struct of_phandle_args pd_args;
+	struct device_node *np;
+
+	np = of_find_node_by_path(domain);
+	if (!np) {
+		pr_err("Cannot find domain node %s\n", domain);
+		return -ENOENT;
+	}
+
+	pd_args.np = np;
+	pd_args.args_count = 0;
+
+	return of_genpd_add_device(&pd_args, &pdev->dev);
+}
+#else
+static inline int board_staging_add_dev_domain(struct platform_device *pdev,
+					       const char *domain)
+{
+	return 0;
+}
+#endif
+
 int __init board_staging_register_device(const struct board_staging_dev *dev)
 {
 	struct platform_device *pdev = dev->pdev;
@@ -153,15 +176,15 @@ int __init board_staging_register_device(const struct board_staging_dev *dev)
 	for (i = 0; i < dev->nclocks; i++)
 		board_staging_register_clock(&dev->clocks[i]);
 
+	if (dev->domain)
+		board_staging_add_dev_domain(pdev, dev->domain);
+
 	error = platform_device_register(pdev);
 	if (error) {
 		pr_err("Failed to register device %s (%d)\n", pdev->name,
 		       error);
 		return error;
 	}
-
-	if (dev->domain)
-		__pm_genpd_name_add_device(dev->domain, &pdev->dev, NULL);
 
 	return error;
 }

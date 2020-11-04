@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2014 Samsung Electronics Co., Ltd.
  * Author: Thomas Abraham <thomas.ab@samsung.com>
  *
  * Copyright (c) 2015 Samsung Electronics Co., Ltd.
  * Bartlomiej Zolnierkiewicz <b.zolnierkie@samsung.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * This file contains the utility function to register CPU clock for Samsung
  * Exynos platforms. A CPU clock is defined as a clock supplied to a CPU or a
@@ -33,6 +30,10 @@
 */
 
 #include <linux/errno.h>
+#include <linux/io.h>
+#include <linux/slab.h>
+#include <linux/clk.h>
+#include <linux/clk-provider.h>
 #include "clk-cpu.h"
 
 #define E4210_SRC_CPU		0x0
@@ -41,6 +42,13 @@
 #define E4210_DIV_CPU1		0x304
 #define E4210_DIV_STAT_CPU0	0x400
 #define E4210_DIV_STAT_CPU1	0x404
+
+#define E5433_MUX_SEL2		0x008
+#define E5433_MUX_STAT2		0x208
+#define E5433_DIV_CPU0		0x400
+#define E5433_DIV_CPU1		0x404
+#define E5433_DIV_STAT_CPU0	0x500
+#define E5433_DIV_STAT_CPU1	0x504
 
 #define E4210_DIV0_RATIO0_MASK	0x7
 #define E4210_DIV1_HPM_MASK	(0x7 << 4)
@@ -97,8 +105,8 @@ static void wait_until_mux_stable(void __iomem *mux_reg, u32 mux_pos,
 static long exynos_cpuclk_round_rate(struct clk_hw *hw,
 			unsigned long drate, unsigned long *prate)
 {
-	struct clk *parent = __clk_get_parent(hw->clk);
-	*prate = __clk_round_rate(parent, drate);
+	struct clk_hw *parent = clk_hw_get_parent(hw);
+	*prate = clk_hw_round_rate(parent, drate);
 	return *prate;
 }
 
@@ -142,9 +150,10 @@ static int exynos_cpuclk_pre_rate_change(struct clk_notifier_data *ndata,
 			struct exynos_cpuclk *cpuclk, void __iomem *base)
 {
 	const struct exynos_cpuclk_cfg_data *cfg_data = cpuclk->cfg;
-	unsigned long alt_prate = clk_get_rate(cpuclk->alt_parent);
+	unsigned long alt_prate = clk_hw_get_rate(cpuclk->alt_parent);
 	unsigned long alt_div = 0, alt_div_mask = DIV_MASK;
 	unsigned long div0, div1 = 0, mux_reg;
+	unsigned long flags;
 
 	/* find out the divider values to use for clock data */
 	while ((cfg_data->prate * 1000) != ndata->new_rate) {
@@ -153,7 +162,7 @@ static int exynos_cpuclk_pre_rate_change(struct clk_notifier_data *ndata,
 		cfg_data++;
 	}
 
-	spin_lock(cpuclk->lock);
+	spin_lock_irqsave(cpuclk->lock, flags);
 
 	/*
 	 * For the selected PLL clock frequency, get the pre-defined divider
@@ -161,7 +170,7 @@ static int exynos_cpuclk_pre_rate_change(struct clk_notifier_data *ndata,
 	 * the values for DIV_COPY and DIV_HPM dividers need not be set.
 	 */
 	div0 = cfg_data->div0;
-	if (test_bit(CLK_CPU_HAS_DIV1, &cpuclk->flags)) {
+	if (cpuclk->flags & CLK_CPU_HAS_DIV1) {
 		div1 = cfg_data->div1;
 		if (readl(base + E4210_SRC_CPU) & E4210_MUX_HPM_MASK)
 			div1 = readl(base + E4210_DIV_CPU1) &
@@ -182,7 +191,7 @@ static int exynos_cpuclk_pre_rate_change(struct clk_notifier_data *ndata,
 		alt_div = DIV_ROUND_UP(alt_prate, tmp_rate) - 1;
 		WARN_ON(alt_div >= MAX_DIV);
 
-		if (test_bit(CLK_CPU_NEEDS_DEBUG_ALT_DIV, &cpuclk->flags)) {
+		if (cpuclk->flags & CLK_CPU_NEEDS_DEBUG_ALT_DIV) {
 			/*
 			 * In Exynos4210, ATB clock parent is also mout_core. So
 			 * ATB clock also needs to be mantained at safe speed.
@@ -203,13 +212,13 @@ static int exynos_cpuclk_pre_rate_change(struct clk_notifier_data *ndata,
 	writel(div0, base + E4210_DIV_CPU0);
 	wait_until_divider_stable(base + E4210_DIV_STAT_CPU0, DIV_MASK_ALL);
 
-	if (test_bit(CLK_CPU_HAS_DIV1, &cpuclk->flags)) {
+	if (cpuclk->flags & CLK_CPU_HAS_DIV1) {
 		writel(div1, base + E4210_DIV_CPU1);
 		wait_until_divider_stable(base + E4210_DIV_STAT_CPU1,
 				DIV_MASK_ALL);
 	}
 
-	spin_unlock(cpuclk->lock);
+	spin_unlock_irqrestore(cpuclk->lock, flags);
 	return 0;
 }
 
@@ -220,9 +229,10 @@ static int exynos_cpuclk_post_rate_change(struct clk_notifier_data *ndata,
 	const struct exynos_cpuclk_cfg_data *cfg_data = cpuclk->cfg;
 	unsigned long div = 0, div_mask = DIV_MASK;
 	unsigned long mux_reg;
+	unsigned long flags;
 
 	/* find out the divider values to use for clock data */
-	if (test_bit(CLK_CPU_NEEDS_DEBUG_ALT_DIV, &cpuclk->flags)) {
+	if (cpuclk->flags & CLK_CPU_NEEDS_DEBUG_ALT_DIV) {
 		while ((cfg_data->prate * 1000) != ndata->new_rate) {
 			if (cfg_data->prate == 0)
 				return -EINVAL;
@@ -230,20 +240,116 @@ static int exynos_cpuclk_post_rate_change(struct clk_notifier_data *ndata,
 		}
 	}
 
-	spin_lock(cpuclk->lock);
+	spin_lock_irqsave(cpuclk->lock, flags);
 
 	/* select mout_apll as the alternate parent */
 	mux_reg = readl(base + E4210_SRC_CPU);
 	writel(mux_reg & ~(1 << 16), base + E4210_SRC_CPU);
 	wait_until_mux_stable(base + E4210_STAT_CPU, 16, 1);
 
-	if (test_bit(CLK_CPU_NEEDS_DEBUG_ALT_DIV, &cpuclk->flags)) {
+	if (cpuclk->flags & CLK_CPU_NEEDS_DEBUG_ALT_DIV) {
 		div |= (cfg_data->div0 & E4210_DIV0_ATB_MASK);
 		div_mask |= E4210_DIV0_ATB_MASK;
 	}
 
 	exynos_set_safe_div(base, div, div_mask);
-	spin_unlock(cpuclk->lock);
+	spin_unlock_irqrestore(cpuclk->lock, flags);
+	return 0;
+}
+
+/*
+ * Helper function to set the 'safe' dividers for the CPU clock. The parameters
+ * div and mask contain the divider value and the register bit mask of the
+ * dividers to be programmed.
+ */
+static void exynos5433_set_safe_div(void __iomem *base, unsigned long div,
+					unsigned long mask)
+{
+	unsigned long div0;
+
+	div0 = readl(base + E5433_DIV_CPU0);
+	div0 = (div0 & ~mask) | (div & mask);
+	writel(div0, base + E5433_DIV_CPU0);
+	wait_until_divider_stable(base + E5433_DIV_STAT_CPU0, mask);
+}
+
+/* handler for pre-rate change notification from parent clock */
+static int exynos5433_cpuclk_pre_rate_change(struct clk_notifier_data *ndata,
+			struct exynos_cpuclk *cpuclk, void __iomem *base)
+{
+	const struct exynos_cpuclk_cfg_data *cfg_data = cpuclk->cfg;
+	unsigned long alt_prate = clk_hw_get_rate(cpuclk->alt_parent);
+	unsigned long alt_div = 0, alt_div_mask = DIV_MASK;
+	unsigned long div0, div1 = 0, mux_reg;
+	unsigned long flags;
+
+	/* find out the divider values to use for clock data */
+	while ((cfg_data->prate * 1000) != ndata->new_rate) {
+		if (cfg_data->prate == 0)
+			return -EINVAL;
+		cfg_data++;
+	}
+
+	spin_lock_irqsave(cpuclk->lock, flags);
+
+	/*
+	 * For the selected PLL clock frequency, get the pre-defined divider
+	 * values.
+	 */
+	div0 = cfg_data->div0;
+	div1 = cfg_data->div1;
+
+	/*
+	 * If the old parent clock speed is less than the clock speed of
+	 * the alternate parent, then it should be ensured that at no point
+	 * the armclk speed is more than the old_prate until the dividers are
+	 * set.  Also workaround the issue of the dividers being set to lower
+	 * values before the parent clock speed is set to new lower speed
+	 * (this can result in too high speed of armclk output clocks).
+	 */
+	if (alt_prate > ndata->old_rate || ndata->old_rate > ndata->new_rate) {
+		unsigned long tmp_rate = min(ndata->old_rate, ndata->new_rate);
+
+		alt_div = DIV_ROUND_UP(alt_prate, tmp_rate) - 1;
+		WARN_ON(alt_div >= MAX_DIV);
+
+		exynos5433_set_safe_div(base, alt_div, alt_div_mask);
+		div0 |= alt_div;
+	}
+
+	/* select the alternate parent */
+	mux_reg = readl(base + E5433_MUX_SEL2);
+	writel(mux_reg | 1, base + E5433_MUX_SEL2);
+	wait_until_mux_stable(base + E5433_MUX_STAT2, 0, 2);
+
+	/* alternate parent is active now. set the dividers */
+	writel(div0, base + E5433_DIV_CPU0);
+	wait_until_divider_stable(base + E5433_DIV_STAT_CPU0, DIV_MASK_ALL);
+
+	writel(div1, base + E5433_DIV_CPU1);
+	wait_until_divider_stable(base + E5433_DIV_STAT_CPU1, DIV_MASK_ALL);
+
+	spin_unlock_irqrestore(cpuclk->lock, flags);
+	return 0;
+}
+
+/* handler for post-rate change notification from parent clock */
+static int exynos5433_cpuclk_post_rate_change(struct clk_notifier_data *ndata,
+			struct exynos_cpuclk *cpuclk, void __iomem *base)
+{
+	unsigned long div = 0, div_mask = DIV_MASK;
+	unsigned long mux_reg;
+	unsigned long flags;
+
+	spin_lock_irqsave(cpuclk->lock, flags);
+
+	/* select apll as the alternate parent */
+	mux_reg = readl(base + E5433_MUX_SEL2);
+	writel(mux_reg & ~1, base + E5433_MUX_SEL2);
+	wait_until_mux_stable(base + E5433_MUX_STAT2, 0, 1);
+
+	exynos5433_set_safe_div(base, div, div_mask);
+	spin_unlock_irqrestore(cpuclk->lock, flags);
 	return 0;
 }
 
@@ -270,6 +376,29 @@ static int exynos_cpuclk_notifier_cb(struct notifier_block *nb,
 	return notifier_from_errno(err);
 }
 
+/*
+ * This notifier function is called for the pre-rate and post-rate change
+ * notifications of the parent clock of cpuclk.
+ */
+static int exynos5433_cpuclk_notifier_cb(struct notifier_block *nb,
+				unsigned long event, void *data)
+{
+	struct clk_notifier_data *ndata = data;
+	struct exynos_cpuclk *cpuclk;
+	void __iomem *base;
+	int err = 0;
+
+	cpuclk = container_of(nb, struct exynos_cpuclk, clk_nb);
+	base = cpuclk->ctrl_base;
+
+	if (event == PRE_RATE_CHANGE)
+		err = exynos5433_cpuclk_pre_rate_change(ndata, cpuclk, base);
+	else if (event == POST_RATE_CHANGE)
+		err = exynos5433_cpuclk_post_rate_change(ndata, cpuclk, base);
+
+	return notifier_from_errno(err);
+}
+
 /* helper function to register a CPU clock */
 int __init exynos_register_cpu_clock(struct samsung_clk_provider *ctx,
 		unsigned int lookup_id, const char *name, const char *parent,
@@ -279,7 +408,7 @@ int __init exynos_register_cpu_clock(struct samsung_clk_provider *ctx,
 {
 	struct exynos_cpuclk *cpuclk;
 	struct clk_init_data init;
-	struct clk *clk;
+	struct clk *parent_clk;
 	int ret = 0;
 
 	cpuclk = kzalloc(sizeof(*cpuclk), GFP_KERNEL);
@@ -296,9 +425,12 @@ int __init exynos_register_cpu_clock(struct samsung_clk_provider *ctx,
 	cpuclk->ctrl_base = ctx->reg_base + offset;
 	cpuclk->lock = &ctx->lock;
 	cpuclk->flags = flags;
-	cpuclk->clk_nb.notifier_call = exynos_cpuclk_notifier_cb;
+	if (flags & CLK_CPU_HAS_E5433_REGS_LAYOUT)
+		cpuclk->clk_nb.notifier_call = exynos5433_cpuclk_notifier_cb;
+	else
+		cpuclk->clk_nb.notifier_call = exynos_cpuclk_notifier_cb;
 
-	cpuclk->alt_parent = __clk_lookup(alt_parent);
+	cpuclk->alt_parent = __clk_get_hw(__clk_lookup(alt_parent));
 	if (!cpuclk->alt_parent) {
 		pr_err("%s: could not lookup alternate parent %s\n",
 				__func__, alt_parent);
@@ -306,15 +438,15 @@ int __init exynos_register_cpu_clock(struct samsung_clk_provider *ctx,
 		goto free_cpuclk;
 	}
 
-	clk = __clk_lookup(parent);
-	if (!clk) {
+	parent_clk = __clk_lookup(parent);
+	if (!parent_clk) {
 		pr_err("%s: could not lookup parent clock %s\n",
 				__func__, parent);
 		ret = -EINVAL;
 		goto free_cpuclk;
 	}
 
-	ret = clk_notifier_register(clk, &cpuclk->clk_nb);
+	ret = clk_notifier_register(parent_clk, &cpuclk->clk_nb);
 	if (ret) {
 		pr_err("%s: failed to register clock notifier for %s\n",
 				__func__, name);
@@ -323,26 +455,23 @@ int __init exynos_register_cpu_clock(struct samsung_clk_provider *ctx,
 
 	cpuclk->cfg = kmemdup(cfg, sizeof(*cfg) * num_cfgs, GFP_KERNEL);
 	if (!cpuclk->cfg) {
-		pr_err("%s: could not allocate memory for cpuclk data\n",
-				__func__);
 		ret = -ENOMEM;
 		goto unregister_clk_nb;
 	}
 
-	clk = clk_register(NULL, &cpuclk->hw);
-	if (IS_ERR(clk)) {
+	ret = clk_hw_register(NULL, &cpuclk->hw);
+	if (ret) {
 		pr_err("%s: could not register cpuclk %s\n", __func__,	name);
-		ret = PTR_ERR(clk);
 		goto free_cpuclk_data;
 	}
 
-	samsung_clk_add_lookup(ctx, clk, lookup_id);
+	samsung_clk_add_lookup(ctx, &cpuclk->hw, lookup_id);
 	return 0;
 
 free_cpuclk_data:
 	kfree(cpuclk->cfg);
 unregister_clk_nb:
-	clk_notifier_unregister(__clk_lookup(parent), &cpuclk->clk_nb);
+	clk_notifier_unregister(parent_clk, &cpuclk->clk_nb);
 free_cpuclk:
 	kfree(cpuclk);
 	return ret;

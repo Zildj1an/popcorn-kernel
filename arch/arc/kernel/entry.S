@@ -1,13 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Common Low Level Interrupts/Traps/Exceptions(non-TLB) Handling for ARC
  * (included from entry-<isa>.S
  *
  * Copyright (C) 2014-15 Synopsys, Inc. (www.synopsys.com)
  * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 /*------------------------------------------------------------------
@@ -32,17 +29,17 @@ ENTRY(sys_clone_wrapper)
 	DISCARD_CALLEE_SAVED_USER
 
 	GET_CURR_THR_INFO_FLAGS   r10
-	and.f 0, r10, (_TIF_SYSCALL_TRACE|_TIF_NOHZ)
+	btst r10, TIF_SYSCALL_TRACE
 	bnz  tracesys_exit
 
-	b ret_from_system_call
+	b .Lret_from_system_call
 END(sys_clone_wrapper)
 
 ENTRY(ret_from_fork)
 	; when the forked child comes here from the __switch_to function
 	; r0 has the last task pointer.
 	; put last task in scheduler queue
-	bl   @schedule_tail
+	jl   @schedule_tail
 
 	ld   r9, [sp, PT_status32]
 	brne r9, 0, 1f
@@ -60,18 +57,6 @@ ENTRY(ret_from_fork)
 	;    out whenever kernel_execve (now inline do_fork()) is involved
 	b    ret_from_exception
 END(ret_from_fork)
-
-#ifdef CONFIG_ARC_DW2_UNWIND
-; Workaround for bug 94179 (STAR ):
-; Despite -fasynchronous-unwind-tables, linker is not making dwarf2 unwinder
-; section (.debug_frame) as loadable. So we force it here.
-; This also fixes STAR 9000487933 where the prev-workaround (objcopy --setflag)
-; would not work after a clean build due to kernel build system dependencies.
-.section .debug_frame, "wa",@progbits
-
-; Reset to .text as this file is included in entry-<isa>.S
-.section .text, "ax",@progbits
-#endif
 
 ;################### Non TLB Exception Handling #############################
 
@@ -93,23 +78,6 @@ ENTRY(instr_service)
 END(instr_service)
 
 ; ---------------------------------------------
-; Memory Error Exception Handler
-; ---------------------------------------------
-
-ENTRY(mem_service)
-
-	EXCEPTION_PROLOGUE
-
-	lr  r0, [efa]
-	mov r1, sp
-
-	FAKE_RET_FROM_EXCPN
-
-	bl  do_memory_error
-	b   ret_from_exception
-END(mem_service)
-
-; ---------------------------------------------
 ; Machine Check Exception Handler
 ; ---------------------------------------------
 
@@ -120,6 +88,12 @@ ENTRY(EV_MachineCheck)
 	lr  r2, [ecr]
 	lr  r0, [efa]
 	mov r1, sp
+
+	; hardware auto-disables MMU, re-enable it to allow kernel vaddr
+	; access for say stack unwinding of modules for crash dumps
+	lr	r3, [ARC_REG_PID]
+	or	r3, r3, MMU_ENABLE
+	sr	r3, [ARC_REG_PID]
 
 	lsr  	r3, r2, 8
 	bmsk 	r3, r3, 7
@@ -146,25 +120,13 @@ ENTRY(EV_PrivilegeV)
 
 	EXCEPTION_PROLOGUE
 
-	lr  r2, [ecr]
 	lr  r0, [efa]
 	mov r1, sp
 
 	FAKE_RET_FROM_EXCPN
 
-#ifdef CONFIG_HAVE_HW_BREAKPOINT
-	and r2, r2, ECR_CODE_MASK
-	cmp r2, ECR_C_BIT_PRIVV_AP_HIT
-	bnz 4f
-
-	bl  do_actionpoint_hit
-	b   ret_from_exception
-4:
-#endif /* CONFIG_HAVE_HW_BREAKPOINT */
-
 	bl  do_privilege_fault
 	b   ret_from_exception
-
 END(EV_PrivilegeV)
 
 ; ---------------------------------------------
@@ -267,18 +229,7 @@ trap_with_param:
 
 ENTRY(EV_Trap)
 
-	; Before doing anything, check if this trap was made by
-	; ret_from_exception in order to revert the fake rtie and
-	; switch back to CPU Exception context
-	TRY_COMPLETE_FAKE_REVERT
-
 	EXCEPTION_PROLOGUE
-
-#ifdef CONFIG_CONTEXT_TRACKING
-	SAVE_R0_TO_R12
-	bl context_tracking_user_exit
-	RESTORE_R12_TO_R0
-#endif
 
 	;============ TRAP 1   :breakpoints
 	; Check ECR for trap with arg (PROLOGUE ensures r9 has ECR)
@@ -292,7 +243,7 @@ ENTRY(EV_Trap)
 
 	; If syscall tracing ongoing, invoke pre-post-hooks
 	GET_CURR_THR_INFO_FLAGS   r10
-	and.f 0, r10, (_TIF_SYSCALL_TRACE|_TIF_NOHZ)
+	btst r10, TIF_SYSCALL_TRACE
 	bnz tracesys  ; this never comes back
 
 	;============ Normal syscall case
@@ -300,20 +251,18 @@ ENTRY(EV_Trap)
 	; syscall num shd not exceed the total system calls avail
 	cmp     r8,  NR_syscalls
 	mov.hi  r0, -ENOSYS
-	bhi     ret_from_system_call
+	bhi     .Lret_from_system_call
 
 	; Offset into the syscall_table and call handler
 	ld.as   r9,[sys_call_table, r8]
 	jl      [r9]        ; Entry into Sys Call Handler
 
-	; fall through to ret_from_system_call
-END(EV_Trap)
-
-ENTRY(ret_from_system_call)
+.Lret_from_system_call:
 
 	st  r0, [sp, PT_r0]     ; sys call return value in pt_regs
 
-	; fall through yet again to ret_from_exception
+	; fall through to ret_from_exception
+END(EV_Trap)
 
 ;############# Return from Intr/Excp/Trap (Linux Specifics) ##############
 ;
@@ -335,8 +284,24 @@ resume_user_mode_begin:
 	; interim IRQ).
 	IRQ_DISABLE	r10
 
-	mov  r0, sp
-	GET_CURR_THR_INFO_FLAGS   r1
+	; Fast Path return to user mode if no pending work
+	GET_CURR_THR_INFO_FLAGS   r9
+	and.f  0,  r9, _TIF_WORK_MASK
+	bz     .Lrestore_regs
+
+	; --- (Slow Path #1) task preemption ---
+	bbit0  r9, TIF_NEED_RESCHED, .Lchk_pend_signals
+	mov    blink, resume_user_mode_begin  ; tail-call to U mode ret chks
+	j      @schedule 	; BTST+Bnz causes relo error in link
+
+.Lchk_pend_signals:
+	IRQ_ENABLE	r10
+
+	; --- (Slow Path #2) pending signal  ---
+	mov r0, sp	; pt_regs for arg to do_signal()/do_notify_resume()
+
+	GET_CURR_THR_INFO_FLAGS   r9
+	bbit0  r9, TIF_SIGPENDING, .Lchk_notify_resume
 
 	; Normal Trap/IRQ entry only saves Scratch (caller-saved) regs
 	; in pt_reg since the "C" ABI (kernel code) will automatically
@@ -354,13 +319,20 @@ resume_user_mode_begin:
 	GET_CURR_TASK_FIELD_PTR   TASK_THREAD, r10
 	st  sp, [r10, THREAD_CALLEE_REG]
 
-	bl     @prepare_exit_to_usermode
+	bl  @do_signal
 
 	; Ideally we want to discard the Callee reg above, however if this was
 	; a tracing signal, tracer could have done a POKEUSR(CALLEE reg)
 	RESTORE_CALLEE_SAVED_USER
 
-	b      .Lrestore_regs
+	b      resume_user_mode_begin	; loop back to start of U mode ret
+
+	; --- (Slow Path #3) notify_resume ---
+.Lchk_notify_resume:
+	btst   r9, TIF_NOTIFY_RESUME
+	blnz   @do_notify_resume
+	b      resume_user_mode_begin	; unconditionally back to U mode ret chks
+					; for single exit point from this block
 
 resume_kernel_mode:
 
@@ -381,7 +353,7 @@ resume_kernel_mode:
 	bbit0  r9, TIF_NEED_RESCHED, .Lrestore_regs
 
 	; Invoke PREEMPTION
-	bl      preempt_schedule_irq
+	jl      preempt_schedule_irq
 
 	; preempt_schedule_irq() always returns with IRQ disabled
 #endif

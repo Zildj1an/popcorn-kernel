@@ -1,7 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/clkdev.h>
 #include <linux/err.h>
+#include <linux/io.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <dt-bindings/clock/imx27-clock.h>
@@ -46,6 +48,17 @@ static const char *ssi_sel_clks[] = { "spll_gate", "mpll", };
 
 static struct clk *clk[IMX27_CLK_MAX];
 static struct clk_onecell_data clk_data;
+
+static struct clk ** const uart_clks[] __initconst = {
+	&clk[IMX27_CLK_PER1_GATE],
+	&clk[IMX27_CLK_UART1_IPG_GATE],
+	&clk[IMX27_CLK_UART2_IPG_GATE],
+	&clk[IMX27_CLK_UART3_IPG_GATE],
+	&clk[IMX27_CLK_UART4_IPG_GATE],
+	&clk[IMX27_CLK_UART5_IPG_GATE],
+	&clk[IMX27_CLK_UART6_IPG_GATE],
+	NULL
+};
 
 static void __init _mx27_clocks_init(unsigned long fref)
 {
@@ -163,6 +176,8 @@ static void __init _mx27_clocks_init(unsigned long fref)
 
 	clk_prepare_enable(clk[IMX27_CLK_EMI_AHB_GATE]);
 
+	imx_register_uart_clocks(uart_clks);
+
 	imx_print_silicon_rev("i.MX27", mx27_revision());
 }
 
@@ -248,8 +263,10 @@ static void __init mx27_clocks_init_dt(struct device_node *np)
 		if (!of_device_is_compatible(refnp, "fsl,imx-osc26m"))
 			continue;
 
-		if (!of_property_read_u32(refnp, "clock-frequency", &fref))
+		if (!of_property_read_u32(refnp, "clock-frequency", &fref)) {
+			of_node_put(refnp);
 			break;
+		}
 	}
 
 	ccm = of_iomap(np, 0);

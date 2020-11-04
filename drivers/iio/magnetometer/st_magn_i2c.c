@@ -1,11 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * STMicroelectronics magnetometers driver
  *
  * Copyright 2012-2013 STMicroelectronics Inc.
  *
  * Denis Ciocca <denis.ciocca@st.com>
- *
- * Licensed under the GPL-2.
  */
 
 #include <linux/kernel.h>
@@ -36,6 +35,18 @@ static const struct of_device_id st_magn_of_match[] = {
 		.compatible = "st,lis3mdl-magn",
 		.data = LIS3MDL_MAGN_DEV_NAME,
 	},
+	{
+		.compatible = "st,lsm303agr-magn",
+		.data = LSM303AGR_MAGN_DEV_NAME,
+	},
+	{
+		.compatible = "st,lis2mdl",
+		.data = LIS2MDL_MAGN_DEV_NAME,
+	},
+	{
+		.compatible = "st,lsm9ds1-magn",
+		.data = LSM9DS1_MAGN_DEV_NAME,
+	},
 	{},
 };
 MODULE_DEVICE_TABLE(of, st_magn_of_match);
@@ -55,7 +66,8 @@ static int st_magn_i2c_probe(struct i2c_client *client,
 		return -ENOMEM;
 
 	mdata = iio_priv(indio_dev);
-	st_sensors_of_i2c_probe(client, st_magn_of_match);
+	st_sensors_of_name_probe(&client->dev, st_magn_of_match,
+				 client->name, sizeof(client->name));
 
 	st_sensors_i2c_configure(indio_dev, client, mdata);
 
@@ -79,13 +91,15 @@ static const struct i2c_device_id st_magn_id_table[] = {
 	{ LSM303DLHC_MAGN_DEV_NAME },
 	{ LSM303DLM_MAGN_DEV_NAME },
 	{ LIS3MDL_MAGN_DEV_NAME },
+	{ LSM303AGR_MAGN_DEV_NAME },
+	{ LIS2MDL_MAGN_DEV_NAME },
+	{ LSM9DS1_MAGN_DEV_NAME },
 	{},
 };
 MODULE_DEVICE_TABLE(i2c, st_magn_id_table);
 
 static struct i2c_driver st_magn_driver = {
 	.driver = {
-		.owner = THIS_MODULE,
 		.name = "st-magn-i2c",
 		.of_match_table = of_match_ptr(st_magn_of_match),
 	},

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Copyright (C) 2012 Texas Instruments Inc
  *
@@ -10,10 +11,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  * Contributors:
  *      Manjunath Hadli <manjunath.hadli@ti.com>
  *      Prabhakar Lad <prabhakar.lad@ti.com>
@@ -22,6 +19,7 @@
 #ifndef _DAVINCI_VPFE_VIDEO_H
 #define _DAVINCI_VPFE_VIDEO_H
 
+#include <media/videobuf2-v4l2.h>
 #include <media/videobuf2-dma-contig.h>
 
 struct vpfe_device;
@@ -51,6 +49,7 @@ enum vpfe_video_state {
 struct vpfe_pipeline {
 	/* media pipeline */
 	struct media_pipeline		*pipe;
+	struct media_graph	graph;
 	/* state of the pipeline, continuous,
 	 * single-shot or stopped
 	 */
@@ -72,7 +71,7 @@ struct vpfe_pipeline {
 	container_of(vdev, struct vpfe_video_device, video_dev)
 
 struct vpfe_cap_buffer {
-	struct vb2_buffer vb;
+	struct vb2_v4l2_buffer vb;
 	struct list_head list;
 };
 
@@ -121,14 +120,12 @@ struct vpfe_video_device {
 	/* Used to store pixel format */
 	struct v4l2_format			fmt;
 	struct vb2_queue			buffer_queue;
-	/* allocator-specific contexts for each plane */
-	struct vb2_alloc_ctx *alloc_ctx;
 	/* Queue of filled frames */
 	struct list_head			dma_queue;
 	spinlock_t				irqlock;
 	/* IRQ lock for DMA queue */
 	spinlock_t				dma_queue_lock;
-	/* lock used to access this structure */
+	/* lock used to serialize all video4linux ioctls */
 	struct mutex				lock;
 	/* number of users performing IO */
 	u32					io_usrs;

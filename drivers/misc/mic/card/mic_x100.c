@@ -1,19 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Intel MIC Platform Software Stack (MPSS)
  *
  * Copyright(c) 2013 Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License, version 2, as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
- *
- * The full GNU General Public License is included in this distribution in
- * the file called "COPYING".
  *
  * Disclaimer: The codes contained in these modules may be specific to
  * the Intel Software Development Platform codenamed: Knights Ferry, and
@@ -22,7 +11,6 @@
  * support the codes or instruction set in future products.
  *
  * Intel MIC Card driver.
- *
  */
 #include <linux/module.h>
 #include <linux/pci.h>
@@ -261,7 +249,7 @@ static int __init mic_probe(struct platform_device *pdev)
 	mic_hw_intr_init(mdrv);
 	platform_set_drvdata(pdev, mdrv);
 	mdrv->dma_mbdev = mbus_register_device(mdrv->dev, MBUS_DEV_DMA_MIC,
-					       NULL, &mbus_hw_ops,
+					       NULL, &mbus_hw_ops, 0,
 					       mdrv->mdev.mmio.va);
 	if (IS_ERR(mdrv->dma_mbdev)) {
 		rc = PTR_ERR(mdrv->dma_mbdev);
@@ -326,6 +314,7 @@ static int __init mic_init(void)
 		goto done;
 	}
 
+	request_module("mic_x100_dma");
 	mic_init_card_debugfs();
 	ret = platform_device_register(&mic_platform_dev);
 	if (ret) {

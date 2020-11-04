@@ -1,26 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  acpi_thermal.c - ACPI Thermal Zone Driver ($Revision: 41 $)
  *
  *  Copyright (C) 2001, 2002 Andy Grover <andrew.grover@intel.com>
  *  Copyright (C) 2001, 2002 Paul Diefenbaugh <paul.s.diefenbaugh@intel.com>
- *
- * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or (at
- *  your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful, but
- *  WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License along
- *  with this program; if not, write to the Free Software Foundation, Inc.,
- *  59 Temple Place, Suite 330, Boston, MA 02111-1307 USA.
- *
- * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  *
  *  This driver fully implements the ACPI thermal policy as described in the
  *  ACPI 2.0 Specification.
@@ -28,7 +11,6 @@
  *  TBD: 1. Implement passive cooling hysteresis.
  *       2. Enhance passive cooling (CPU) states/limit interface to support
  *          concepts of 'multiple limiters', upper/lower limits, etc.
- *
  */
 
 #include <linux/kernel.h>
@@ -44,7 +26,7 @@
 #include <linux/thermal.h>
 #include <linux/acpi.h>
 #include <linux/workqueue.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #define PREFIX "ACPI: "
 
@@ -319,7 +301,7 @@ static int acpi_thermal_trips_update(struct acpi_thermal *tz, int flag)
 			if (crt == -1) {
 				tz->trips.critical.flags.valid = 0;
 			} else if (crt > 0) {
-				unsigned long crt_k = CELSIUS_TO_KELVIN(crt);
+				unsigned long crt_k = CELSIUS_TO_DECI_KELVIN(crt);
 				/*
 				 * Allow override critical threshold
 				 */
@@ -355,7 +337,7 @@ static int acpi_thermal_trips_update(struct acpi_thermal *tz, int flag)
 		if (psv == -1) {
 			status = AE_SUPPORT;
 		} else if (psv > 0) {
-			tmp = CELSIUS_TO_KELVIN(psv);
+			tmp = CELSIUS_TO_DECI_KELVIN(psv);
 			status = AE_OK;
 		} else {
 			status = acpi_evaluate_integer(tz->device->handle,
@@ -435,7 +417,7 @@ static int acpi_thermal_trips_update(struct acpi_thermal *tz, int flag)
 					break;
 				if (i == 1)
 					tz->trips.active[0].temperature =
-						CELSIUS_TO_KELVIN(act);
+						CELSIUS_TO_DECI_KELVIN(act);
 				else
 					/*
 					 * Don't allow override higher than
@@ -443,9 +425,9 @@ static int acpi_thermal_trips_update(struct acpi_thermal *tz, int flag)
 					 */
 					tz->trips.active[i - 1].temperature =
 						(tz->trips.active[i - 2].temperature <
-						CELSIUS_TO_KELVIN(act) ?
+						CELSIUS_TO_DECI_KELVIN(act) ?
 						tz->trips.active[i - 2].temperature :
-						CELSIUS_TO_KELVIN(act));
+						CELSIUS_TO_DECI_KELVIN(act));
 				break;
 			} else {
 				tz->trips.active[i].temperature = tmp;
@@ -524,13 +506,13 @@ static void acpi_thermal_check(void *data)
 	if (!tz->tz_enabled)
 		return;
 
-	thermal_zone_device_update(tz->thermal_zone);
+	thermal_zone_device_update(tz->thermal_zone,
+				   THERMAL_EVENT_UNSPECIFIED);
 }
 
 /* sys I/F for generic thermal sysfs support */
 
-static int thermal_get_temp(struct thermal_zone_device *thermal,
-			    unsigned long *temp)
+static int thermal_get_temp(struct thermal_zone_device *thermal, int *temp)
 {
 	struct acpi_thermal *tz = thermal->devdata;
 	int result;
@@ -637,7 +619,7 @@ static int thermal_get_trip_type(struct thermal_zone_device *thermal,
 }
 
 static int thermal_get_trip_temp(struct thermal_zone_device *thermal,
-				 int trip, unsigned long *temp)
+				 int trip, int *temp)
 {
 	struct acpi_thermal *tz = thermal->devdata;
 	int i;
@@ -690,7 +672,8 @@ static int thermal_get_trip_temp(struct thermal_zone_device *thermal,
 }
 
 static int thermal_get_crit_temp(struct thermal_zone_device *thermal,
-				unsigned long *temperature) {
+				int *temperature)
+{
 	struct acpi_thermal *tz = thermal->devdata;
 
 	if (tz->trips.critical.flags.valid) {
@@ -713,8 +696,8 @@ static int thermal_get_trend(struct thermal_zone_device *thermal,
 		return -EINVAL;
 
 	if (type == THERMAL_TRIP_ACTIVE) {
-		unsigned long trip_temp;
-		unsigned long temp = DECI_KELVIN_TO_MILLICELSIUS_WITH_OFFSET(
+		int trip_temp;
+		int temp = DECI_KELVIN_TO_MILLICELSIUS_WITH_OFFSET(
 					tz->temperature, tz->kelvin_offset);
 		if (thermal_get_trip_temp(thermal, trip, &trip_temp))
 			return -EINVAL;
@@ -1109,7 +1092,7 @@ static int acpi_thermal_add(struct acpi_device *device)
 	INIT_WORK(&tz->thermal_check_work, acpi_thermal_check_fn);
 
 	pr_info(PREFIX "%s [%s] (%ld C)\n", acpi_device_name(device),
-		acpi_device_bid(device), KELVIN_TO_CELSIUS(tz->temperature));
+		acpi_device_bid(device), DECI_KELVIN_TO_CELSIUS(tz->temperature));
 	goto end;
 
 free_memory:
@@ -1212,7 +1195,7 @@ static int thermal_psv(const struct dmi_system_id *d) {
 	return 0;
 }
 
-static struct dmi_system_id thermal_dmi_table[] __initdata = {
+static const struct dmi_system_id thermal_dmi_table[] __initconst = {
 	/*
 	 * Award BIOS on this AOpen makes thermal control almost worthless.
 	 * http://bugzilla.kernel.org/show_bug.cgi?id=8842
@@ -1263,7 +1246,8 @@ static int __init acpi_thermal_init(void)
 		return -ENODEV;
 	}
 
-	acpi_thermal_pm_queue = create_workqueue("acpi_thermal_pm");
+	acpi_thermal_pm_queue = alloc_workqueue("acpi_thermal_pm",
+						WQ_HIGHPRI | WQ_MEM_RECLAIM, 0);
 	if (!acpi_thermal_pm_queue)
 		return -ENODEV;
 

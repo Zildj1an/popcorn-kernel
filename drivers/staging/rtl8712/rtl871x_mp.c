@@ -1,19 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0
 /******************************************************************************
  *
  * Copyright(c) 2007 - 2010 Realtek Corporation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110, USA
  *
  * Modifications for inclusion into the Linux staging tree are
  * Copyright(c) 2010 Larry Finger. All rights reserved.
@@ -211,19 +199,18 @@ static u32 bitshift(u32 bitmask)
 	u32 i;
 
 	for (i = 0; i <= 31; i++)
-		if (((bitmask>>i) &  0x1) == 1)
+		if (((bitmask >> i) &  0x1) == 1)
 			break;
 	return i;
 }
 
 static u32 get_bb_reg(struct _adapter *pAdapter, u16 offset, u32 bitmask)
 {
-	u32 org_value, bit_shift, new_value;
+	u32 org_value, bit_shift;
 
 	org_value = r8712_bb_reg_read(pAdapter, offset);
 	bit_shift = bitshift(bitmask);
-	new_value = (org_value & bitmask) >> bit_shift;
-	return new_value;
+	return (org_value & bitmask) >> bit_shift;
 }
 
 static u8 set_bb_reg(struct _adapter *pAdapter,
@@ -236,21 +223,21 @@ static u8 set_bb_reg(struct _adapter *pAdapter,
 	if (bitmask != bMaskDWord) {
 		org_value = r8712_bb_reg_read(pAdapter, offset);
 		bit_shift = bitshift(bitmask);
-		new_value = ((org_value & (~bitmask)) | (value << bit_shift));
-	} else
+		new_value = (org_value & (~bitmask)) | (value << bit_shift);
+	} else {
 		new_value = value;
+	}
 	return r8712_bb_reg_write(pAdapter, offset, new_value);
 }
 
 static u32 get_rf_reg(struct _adapter *pAdapter, u8 path, u8 offset,
 		      u32 bitmask)
 {
-	u32 org_value, bit_shift, new_value;
+	u32 org_value, bit_shift;
 
 	org_value = r8712_rf_reg_read(pAdapter, path, offset);
 	bit_shift = bitshift(bitmask);
-	new_value = (org_value & bitmask) >> bit_shift;
-	return new_value;
+	return (org_value & bitmask) >> bit_shift;
 }
 
 static u8 set_rf_reg(struct _adapter *pAdapter, u8 path, u8 offset, u32 bitmask,
@@ -261,9 +248,10 @@ static u8 set_rf_reg(struct _adapter *pAdapter, u8 path, u8 offset, u32 bitmask,
 	if (bitmask != bMaskDWord) {
 		org_value = r8712_rf_reg_read(pAdapter, path, offset);
 		bit_shift = bitshift(bitmask);
-		new_value = ((org_value & (~bitmask)) | (value << bit_shift));
-	} else
+		new_value = (org_value & (~bitmask)) | (value << bit_shift);
+	} else {
 		new_value = value;
+	}
 	return r8712_rf_reg_write(pAdapter, path, offset, new_value);
 }
 
@@ -281,10 +269,10 @@ void r8712_SetChannel(struct _adapter *pAdapter)
 	u16 code = GEN_CMD_CODE(_SetChannel);
 
 	pcmd = kmalloc(sizeof(*pcmd), GFP_ATOMIC);
-	if (pcmd == NULL)
+	if (!pcmd)
 		return;
 	pparm = kmalloc(sizeof(*pparm), GFP_ATOMIC);
-	if (pparm == NULL) {
+	if (!pparm) {
 		kfree(pcmd);
 		return;
 	}
@@ -305,7 +293,8 @@ static void SetOFDMTxPower(struct _adapter *pAdapter, u8 TxPower)
 {
 	u32 TxAGC = 0;
 
-	TxAGC |= ((TxPower<<24)|(TxPower<<16)|(TxPower<<8)|TxPower);
+	TxAGC |= ((TxPower << 24) | (TxPower << 16) | (TxPower << 8) |
+		  TxPower);
 	set_bb_reg(pAdapter, rTxAGC_Rate18_06, bTxAGCRate18_06, TxAGC);
 	set_bb_reg(pAdapter, rTxAGC_Rate54_24, bTxAGCRate54_24, TxAGC);
 	set_bb_reg(pAdapter, rTxAGC_Mcs03_Mcs00, bTxAGCRateMCS3_MCS0, TxAGC);
@@ -326,12 +315,12 @@ void r8712_SetTxAGCOffset(struct _adapter *pAdapter, u32 ulTxAGCOffset)
 {
 	u32 TxAGCOffset_B, TxAGCOffset_C, TxAGCOffset_D, tmpAGC;
 
-	TxAGCOffset_B = (ulTxAGCOffset&0x000000ff);
-	TxAGCOffset_C = (ulTxAGCOffset & 0x0000ff00)>>8;
-	TxAGCOffset_D = (ulTxAGCOffset & 0x00ff0000)>>16;
-	tmpAGC = (TxAGCOffset_D<<8 | TxAGCOffset_C<<4 | TxAGCOffset_B);
+	TxAGCOffset_B = ulTxAGCOffset & 0x000000ff;
+	TxAGCOffset_C = (ulTxAGCOffset & 0x0000ff00) >> 8;
+	TxAGCOffset_D = (ulTxAGCOffset & 0x00ff0000) >> 16;
+	tmpAGC = TxAGCOffset_D << 8 | TxAGCOffset_C << 4 | TxAGCOffset_B;
 	set_bb_reg(pAdapter, rFPGA0_TxGainStage,
-			(bXBTxAGC|bXCTxAGC|bXDTxAGC), tmpAGC);
+			(bXBTxAGC | bXCTxAGC | bXDTxAGC), tmpAGC);
 }
 
 void r8712_SetDataRate(struct _adapter *pAdapter)
@@ -375,9 +364,10 @@ void r8712_SwitchBandwidth(struct _adapter *pAdapter)
 		/* Use PHY_REG.txt default value. Do not need to change.
 		 * Correct the tx power for CCK rate in 40M.
 		 * Set Control channel to upper or lower. These settings are
-		 * required only for 40MHz */
+		 * required only for 40MHz
+		 */
 		set_bb_reg(pAdapter, rCCK0_System, bCCKSideBand,
-			   (HAL_PRIME_CHNL_OFFSET_DONT_CARE>>1));
+			   (HAL_PRIME_CHNL_OFFSET_DONT_CARE >> 1));
 		set_bb_reg(pAdapter, rOFDM1_LSTF, 0xC00,
 			   HAL_PRIME_CHNL_OFFSET_DONT_CARE);
 		set_bb_reg(pAdapter, rFPGA0_AnalogParameter2, bMaskDWord, 0x18);
@@ -490,12 +480,6 @@ void r8712_SwitchAntenna(struct _adapter *pAdapter)
 	set_bb_reg(pAdapter, rCCK0_AFESetting, bMaskByte3, cck_ant_sel_val);
 }
 
-void r8712_SetCrystalCap(struct _adapter *pAdapter)
-{
-	set_bb_reg(pAdapter, rFPGA0_AnalogParameter1, bXtalCap,
-		   pAdapter->mppriv.curr_crystalcap);
-}
-
 static void TriggerRFThermalMeter(struct _adapter *pAdapter)
 {
 	/* 0x24: RF Reg[6:5] */
@@ -545,7 +529,7 @@ void r8712_SetSingleCarrierTx(struct _adapter *pAdapter, u8 bStart)
 
 void r8712_SetSingleToneTx(struct _adapter *pAdapter, u8 bStart)
 {
-	u8 rfPath = pAdapter->mppriv.curr_rfpath;
+	u8 rfPath;
 
 	switch (pAdapter->mppriv.antenna_tx) {
 	case ANTENNA_B:
@@ -713,15 +697,14 @@ void r8712_ResetPhyRxPktCount(struct _adapter *pAdapter)
 static u32 GetPhyRxPktCounts(struct _adapter *pAdapter, u32 selbit)
 {
 	/*selection*/
-	u32 phyrx_set = 0, count = 0;
+	u32 phyrx_set = 0;
 	u32 SelectBit;
 
 	SelectBit = selbit << 28;
 	phyrx_set |= (SelectBit & 0xF0000000);
 	r8712_write32(pAdapter, RXERR_RPT, phyrx_set);
 	/*Read packet count*/
-	count = r8712_read32(pAdapter, RXERR_RPT) & RPTMaxCount;
-	return count;
+	return r8712_read32(pAdapter, RXERR_RPT) & RPTMaxCount;
 }
 
 u32 r8712_GetPhyRxPktReceived(struct _adapter *pAdapter)

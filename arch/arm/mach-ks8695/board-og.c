@@ -1,9 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * board-og.c -- support for the OpenGear KS8695 based boards.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
@@ -18,7 +15,7 @@
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
-#include <mach/devices.h>
+#include "devices.h"
 #include <mach/regs-gpio.h>
 #include <mach/gpio-ks8695.h>
 #include "generic.h"
@@ -80,7 +77,7 @@ static void __init og_pci_bus_reset(void)
 #define	S8250_VIRT	0xf4000000
 #define	S8250_SIZE	0x00100000
 
-static struct __initdata map_desc og_io_desc[] = {
+static struct map_desc og_io_desc[] __initdata = {
 	{
 		.virtual	= S8250_VIRT,
 		.pfn		= __phys_to_pfn(S8250_PHYS),

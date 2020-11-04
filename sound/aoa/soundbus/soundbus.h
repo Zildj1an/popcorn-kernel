@@ -1,9 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * soundbus generic definitions
  *
  * Copyright 2006 Johannes Berg <johannes@sipsolutions.net>
- *
- * GPL v2, can be found in COPYING.
  */
 #ifndef __SOUNDBUS_H
 #define __SOUNDBUS_H
@@ -188,8 +187,6 @@ struct soundbus_driver {
 	int	(*probe)(struct soundbus_dev* dev);
 	int	(*remove)(struct soundbus_dev* dev);
 
-	int	(*suspend)(struct soundbus_dev* dev, pm_message_t state);
-	int	(*resume)(struct soundbus_dev* dev);
 	int	(*shutdown)(struct soundbus_dev* dev);
 
 	struct device_driver driver;

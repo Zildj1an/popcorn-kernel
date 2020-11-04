@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Driver for the Conexant CX25821 PCIe bridge
  *
@@ -6,22 +7,6 @@
  *  Based on Steven Toth <stoth@linuxtv.org> cx25821 driver
  *  Parts adapted/taken from Eduardo Moscoso Rubino
  *  Copyright (C) 2009 Eduardo Moscoso Rubino <moscoso@TopoLogica.com>
- *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -130,10 +115,10 @@ int cx25821_video_irq(struct cx25821_dev *dev, int chan_num, u32 status)
 			buf = list_entry(dmaq->active.next,
 					 struct cx25821_buffer, queue);
 
-			v4l2_get_timestamp(&buf->vb.v4l2_buf.timestamp);
-			buf->vb.v4l2_buf.sequence = dmaq->count++;
+			buf->vb.vb2_buf.timestamp = ktime_get_ns();
+			buf->vb.sequence = dmaq->count++;
 			list_del(&buf->queue);
-			vb2_buffer_done(&buf->vb, VB2_BUF_STATE_DONE);
+			vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
 		}
 		spin_unlock(&dev->slock);
 		handled++;
@@ -141,28 +126,28 @@ int cx25821_video_irq(struct cx25821_dev *dev, int chan_num, u32 status)
 	return handled;
 }
 
-static int cx25821_queue_setup(struct vb2_queue *q, const struct v4l2_format *fmt,
+static int cx25821_queue_setup(struct vb2_queue *q,
 			   unsigned int *num_buffers, unsigned int *num_planes,
-			   unsigned int sizes[], void *alloc_ctxs[])
+			   unsigned int sizes[], struct device *alloc_devs[])
 {
 	struct cx25821_channel *chan = q->drv_priv;
 	unsigned size = (chan->fmt->depth * chan->width * chan->height) >> 3;
 
-	if (fmt && fmt->fmt.pix.sizeimage < size)
-		return -EINVAL;
+	if (*num_planes)
+		return sizes[0] < size ? -EINVAL : 0;
 
 	*num_planes = 1;
-	sizes[0] = fmt ? fmt->fmt.pix.sizeimage : size;
-	alloc_ctxs[0] = chan->dev->alloc_ctx;
+	sizes[0] = size;
 	return 0;
 }
 
 static int cx25821_buffer_prepare(struct vb2_buffer *vb)
 {
+	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
 	struct cx25821_channel *chan = vb->vb2_queue->drv_priv;
 	struct cx25821_dev *dev = chan->dev;
 	struct cx25821_buffer *buf =
-		container_of(vb, struct cx25821_buffer, vb);
+		container_of(vbuf, struct cx25821_buffer, vb);
 	struct sg_table *sgt = vb2_dma_sg_plane_desc(vb, 0);
 	u32 line0_offset;
 	int bpl_local = LINE_SIZE_D1;
@@ -176,7 +161,7 @@ static int cx25821_buffer_prepare(struct vb2_buffer *vb)
 	if (vb2_plane_size(vb, 0) < chan->height * buf->bpl)
 		return -EINVAL;
 	vb2_set_plane_payload(vb, 0, chan->height * buf->bpl);
-	buf->vb.v4l2_buf.field = chan->field;
+	buf->vb.field = chan->field;
 
 	if (chan->pixel_formats == PIXEL_FRMT_411) {
 		bpl_local = buf->bpl;
@@ -231,7 +216,7 @@ static int cx25821_buffer_prepare(struct vb2_buffer *vb)
 	}
 
 	dprintk(2, "[%p/%d] buffer_prep - %dx%d %dbpp \"%s\" - dma=0x%08lx\n",
-		buf, buf->vb.v4l2_buf.index, chan->width, chan->height,
+		buf, buf->vb.vb2_buf.index, chan->width, chan->height,
 		chan->fmt->depth, chan->fmt->name,
 		(unsigned long)buf->risc.dma);
 
@@ -240,8 +225,9 @@ static int cx25821_buffer_prepare(struct vb2_buffer *vb)
 
 static void cx25821_buffer_finish(struct vb2_buffer *vb)
 {
+	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
 	struct cx25821_buffer *buf =
-		container_of(vb, struct cx25821_buffer, vb);
+		container_of(vbuf, struct cx25821_buffer, vb);
 	struct cx25821_channel *chan = vb->vb2_queue->drv_priv;
 	struct cx25821_dev *dev = chan->dev;
 
@@ -250,8 +236,9 @@ static void cx25821_buffer_finish(struct vb2_buffer *vb)
 
 static void cx25821_buffer_queue(struct vb2_buffer *vb)
 {
+	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
 	struct cx25821_buffer *buf =
-		container_of(vb, struct cx25821_buffer, vb);
+		container_of(vbuf, struct cx25821_buffer, vb);
 	struct cx25821_channel *chan = vb->vb2_queue->drv_priv;
 	struct cx25821_dev *dev = chan->dev;
 	struct cx25821_buffer *prev;
@@ -300,12 +287,12 @@ static void cx25821_stop_streaming(struct vb2_queue *q)
 			struct cx25821_buffer, queue);
 
 		list_del(&buf->queue);
-		vb2_buffer_done(&buf->vb, VB2_BUF_STATE_ERROR);
+		vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
 	}
 	spin_unlock_irqrestore(&dev->slock, flags);
 }
 
-static struct vb2_ops cx25821_video_qops = {
+static const struct vb2_ops cx25821_video_qops = {
 	.queue_setup    = cx25821_queue_setup,
 	.buf_prepare  = cx25821_buffer_prepare,
 	.buf_finish = cx25821_buffer_finish,
@@ -324,7 +311,7 @@ static int cx25821_vidioc_enum_fmt_vid_cap(struct file *file, void *priv,
 	if (unlikely(f->index >= ARRAY_SIZE(formats)))
 		return -EINVAL;
 
-	strlcpy(f->description, formats[f->index].name, sizeof(f->description));
+	strscpy(f->description, formats[f->index].name, sizeof(f->description));
 	f->pixelformat = formats[f->index].fourcc;
 
 	return 0;
@@ -443,8 +430,8 @@ static int cx25821_vidioc_querycap(struct file *file, void *priv,
 			V4L2_CAP_READWRITE | V4L2_CAP_STREAMING;
 	const u32 cap_output = V4L2_CAP_VIDEO_OUTPUT | V4L2_CAP_READWRITE;
 
-	strcpy(cap->driver, "cx25821");
-	strlcpy(cap->card, cx25821_boards[dev->board].name, sizeof(cap->card));
+	strscpy(cap->driver, "cx25821", sizeof(cap->driver));
+	strscpy(cap->card, cx25821_boards[dev->board].name, sizeof(cap->card));
 	sprintf(cap->bus_info, "PCIe:%s", pci_name(dev->pci));
 	if (chan->id >= VID_CHANNEL_NUM)
 		cap->device_caps = cap_output;
@@ -488,7 +475,7 @@ static int cx25821_vidioc_enum_input(struct file *file, void *priv,
 
 	i->type = V4L2_INPUT_TYPE_CAMERA;
 	i->std = CX25821_NORMS;
-	strcpy(i->name, "Composite");
+	strscpy(i->name, "Composite", sizeof(i->name));
 	return 0;
 }
 
@@ -536,7 +523,7 @@ static int cx25821_vidioc_enum_output(struct file *file, void *priv,
 
 	o->type = V4L2_INPUT_TYPE_CAMERA;
 	o->std = CX25821_NORMS;
-	strcpy(o->name, "Composite");
+	strscpy(o->name, "Composite", sizeof(o->name));
 	return 0;
 }
 
@@ -755,6 +742,7 @@ int cx25821_video_register(struct cx25821_dev *dev)
 		q->mem_ops = &vb2_dma_sg_memops;
 		q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
 		q->lock = &dev->lock;
+		q->dev = &dev->pci->dev;
 
 		if (!is_output) {
 			err = vb2_queue_init(q);

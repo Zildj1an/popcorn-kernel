@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/arch/arm/mm/alignment.c
  *
@@ -6,20 +7,17 @@
  *  Thumb alignment fault fixups (c) 2004 MontaVista Software, Inc.
  *  - Adapted from gdb/sim/arm/thumbemu.c -- Thumb instruction emulation.
  *    Copyright (C) 1996, Cygnus Software Technologies Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #include <linux/moduleparam.h>
 #include <linux/compiler.h>
 #include <linux/kernel.h>
+#include <linux/sched/debug.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/init.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/uaccess.h>
 
 #include <asm/cp15.h>
@@ -132,7 +130,7 @@ static const char *usermode_action[] = {
 static int alignment_proc_show(struct seq_file *m, void *v)
 {
 	seq_printf(m, "User:\t\t%lu\n", ai_user);
-	seq_printf(m, "System:\t\t%lu (%pF)\n", ai_sys, ai_sys_last_pc);
+	seq_printf(m, "System:\t\t%lu (%pS)\n", ai_sys, ai_sys_last_pc);
 	seq_printf(m, "Skipped:\t%lu\n", ai_skipped);
 	seq_printf(m, "Half:\t\t%lu\n", ai_half);
 	seq_printf(m, "Word:\t\t%lu\n", ai_word);
@@ -365,15 +363,21 @@ do_alignment_ldrhstrh(unsigned long addr, unsigned long instr, struct pt_regs *r
  user:
 	if (LDST_L_BIT(instr)) {
 		unsigned long val;
+		unsigned int __ua_flags = uaccess_save_and_enable();
+
 		get16t_unaligned_check(val, addr);
+		uaccess_restore(__ua_flags);
 
 		/* signed half-word? */
 		if (instr & 0x40)
 			val = (signed long)((signed short) val);
 
 		regs->uregs[rd] = val;
-	} else
+	} else {
+		unsigned int __ua_flags = uaccess_save_and_enable();
 		put16t_unaligned_check(regs->uregs[rd], addr);
+		uaccess_restore(__ua_flags);
+	}
 
 	return TYPE_LDST;
 
@@ -420,14 +424,21 @@ do_alignment_ldrdstrd(unsigned long addr, unsigned long instr,
 
  user:
 	if (load) {
-		unsigned long val;
+		unsigned long val, val2;
+		unsigned int __ua_flags = uaccess_save_and_enable();
+
 		get32t_unaligned_check(val, addr);
+		get32t_unaligned_check(val2, addr + 4);
+
+		uaccess_restore(__ua_flags);
+
 		regs->uregs[rd] = val;
-		get32t_unaligned_check(val, addr + 4);
-		regs->uregs[rd2] = val;
+		regs->uregs[rd2] = val2;
 	} else {
+		unsigned int __ua_flags = uaccess_save_and_enable();
 		put32t_unaligned_check(regs->uregs[rd], addr);
 		put32t_unaligned_check(regs->uregs[rd2], addr + 4);
+		uaccess_restore(__ua_flags);
 	}
 
 	return TYPE_LDST;
@@ -458,10 +469,15 @@ do_alignment_ldrstr(unsigned long addr, unsigned long instr, struct pt_regs *reg
  trans:
 	if (LDST_L_BIT(instr)) {
 		unsigned int val;
+		unsigned int __ua_flags = uaccess_save_and_enable();
 		get32t_unaligned_check(val, addr);
+		uaccess_restore(__ua_flags);
 		regs->uregs[rd] = val;
-	} else
+	} else {
+		unsigned int __ua_flags = uaccess_save_and_enable();
 		put32t_unaligned_check(regs->uregs[rd], addr);
+		uaccess_restore(__ua_flags);
+	}
 	return TYPE_LDST;
 
  fault:
@@ -531,6 +547,7 @@ do_alignment_ldmstm(unsigned long addr, unsigned long instr, struct pt_regs *reg
 #endif
 
 	if (user_mode(regs)) {
+		unsigned int __ua_flags = uaccess_save_and_enable();
 		for (regbits = REGMASK_BITS(instr), rd = 0; regbits;
 		     regbits >>= 1, rd += 1)
 			if (regbits & 1) {
@@ -542,6 +559,7 @@ do_alignment_ldmstm(unsigned long addr, unsigned long instr, struct pt_regs *reg
 					put32t_unaligned_check(regs->uregs[rd], eaddr);
 				eaddr += 4;
 			}
+		uaccess_restore(__ua_flags);
 	} else {
 		for (regbits = REGMASK_BITS(instr), rd = 0; regbits;
 		     regbits >>= 1, rd += 1)
@@ -783,7 +801,7 @@ do_alignment(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 			}
 		}
 	} else {
-		fault = probe_kernel_address(instrptr, instr);
+		fault = probe_kernel_address((void *)instrptr, instr);
 		instr = __mem_to_opcode_arm(instr);
 	}
 
@@ -927,14 +945,7 @@ do_alignment(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 		goto fixup;
 
 	if (ai_usermode & UM_SIGNAL) {
-		siginfo_t si;
-
-		si.si_signo = SIGBUS;
-		si.si_errno = 0;
-		si.si_code = BUS_ADRALN;
-		si.si_addr = (void __user *)addr;
-
-		force_sig_info(si.si_signo, &si, current);
+		force_sig_fault(SIGBUS, BUS_ADRALN, (void __user *)addr, current);
 	} else {
 		/*
 		 * We're about to disable the alignment trap and return to

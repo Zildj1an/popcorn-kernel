@@ -1,7 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) ST-Ericsson SA 2010
  * Author: Naveen Kumar G <naveen.gaddipati@stericsson.com> for ST-Ericsson
- * License terms:GNU General Public License (GPL) version 2
  */
 
 #include <linux/kernel.h>
@@ -637,8 +637,6 @@ static int bu21013_remove(struct i2c_client *client)
 
 	kfree(bu21013_data);
 
-	device_init_wakeup(&client->dev, false);
-
 	return 0;
 }
 
@@ -716,7 +714,6 @@ MODULE_DEVICE_TABLE(i2c, bu21013_id);
 static struct i2c_driver bu21013_driver = {
 	.driver	= {
 		.name	=	DRIVER_TP,
-		.owner	=	THIS_MODULE,
 #ifdef CONFIG_PM
 		.pm	=	&bu21013_dev_pm_ops,
 #endif

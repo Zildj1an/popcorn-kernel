@@ -1,21 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * pcrypt - Parallel crypto wrapper.
  *
  * Copyright (C) 2009 secunet Security Networks AG
  * Copyright (C) 2009 Steffen Klassert <steffen.klassert@secunet.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
 #include <crypto/algapi.h>
@@ -254,6 +242,14 @@ static void pcrypt_aead_exit_tfm(struct crypto_aead *tfm)
 	crypto_free_aead(ctx->child);
 }
 
+static void pcrypt_free(struct aead_instance *inst)
+{
+	struct pcrypt_instance_ctx *ctx = aead_instance_ctx(inst);
+
+	crypto_drop_aead(&ctx->spawn);
+	kfree(inst);
+}
+
 static int pcrypt_init_instance(struct crypto_instance *inst,
 				struct crypto_alg *alg)
 {
@@ -274,10 +270,15 @@ static int pcrypt_create_aead(struct crypto_template *tmpl, struct rtattr **tb,
 			      u32 type, u32 mask)
 {
 	struct pcrypt_instance_ctx *ctx;
+	struct crypto_attr_type *algt;
 	struct aead_instance *inst;
 	struct aead_alg *alg;
 	const char *name;
 	int err;
+
+	algt = crypto_get_attr_type(tb);
+	if (IS_ERR(algt))
+		return PTR_ERR(algt);
 
 	name = crypto_attr_alg_name(tb[1]);
 	if (IS_ERR(name))
@@ -299,6 +300,8 @@ static int pcrypt_create_aead(struct crypto_template *tmpl, struct rtattr **tb,
 	if (err)
 		goto out_drop_aead;
 
+	inst->alg.base.cra_flags = CRYPTO_ALG_ASYNC;
+
 	inst->alg.ivsize = crypto_aead_alg_ivsize(alg);
 	inst->alg.maxauthsize = crypto_aead_alg_maxauthsize(alg);
 
@@ -311,6 +314,8 @@ static int pcrypt_create_aead(struct crypto_template *tmpl, struct rtattr **tb,
 	inst->alg.setauthsize = pcrypt_aead_setauthsize;
 	inst->alg.encrypt = pcrypt_aead_encrypt;
 	inst->alg.decrypt = pcrypt_aead_decrypt;
+
+	inst->free = pcrypt_free;
 
 	err = aead_register_instance(tmpl, inst);
 	if (err)
@@ -342,14 +347,6 @@ static int pcrypt_create(struct crypto_template *tmpl, struct rtattr **tb)
 	return -EINVAL;
 }
 
-static void pcrypt_free(struct crypto_instance *inst)
-{
-	struct pcrypt_instance_ctx *ctx = crypto_instance_ctx(inst);
-
-	crypto_drop_aead(&ctx->spawn);
-	kfree(inst);
-}
-
 static int pcrypt_cpumask_change_notify(struct notifier_block *self,
 					unsigned long val, void *data)
 {
@@ -373,7 +370,7 @@ static int pcrypt_cpumask_change_notify(struct notifier_block *self,
 
 	cpumask_copy(new_mask->mask, cpumask->cbcpu);
 	rcu_assign_pointer(pcrypt->cb_cpumask, new_mask);
-	synchronize_rcu_bh();
+	synchronize_rcu();
 
 	free_cpumask_var(old_mask->mask);
 	kfree(old_mask);
@@ -385,7 +382,7 @@ static int pcrypt_sysfs_add(struct padata_instance *pinst, const char *name)
 	int ret;
 
 	pinst->kobj.kset = pcrypt_kset;
-	ret = kobject_add(&pinst->kobj, NULL, name);
+	ret = kobject_add(&pinst->kobj, NULL, "%s", name);
 	if (!ret)
 		kobject_uevent(&pinst->kobj, KOBJ_ADD);
 
@@ -462,7 +459,6 @@ static void pcrypt_fini_padata(struct padata_pcrypt *pcrypt)
 static struct crypto_template pcrypt_tmpl = {
 	.name = "pcrypt",
 	.create = pcrypt_create,
-	.free = pcrypt_free,
 	.module = THIS_MODULE,
 };
 
@@ -504,7 +500,7 @@ static void __exit pcrypt_exit(void)
 	crypto_unregister_template(&pcrypt_tmpl);
 }
 
-module_init(pcrypt_init);
+subsys_initcall(pcrypt_init);
 module_exit(pcrypt_exit);
 
 MODULE_LICENSE("GPL");

@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Driver for Motorola PCAP2 as present in EZX phones
  *
  * Copyright (C) 2006 Harald Welte <laforge@openezx.org>
  * Copyright (C) 2009 Daniel Ribeiro <drwyrm@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  */
 
 #include <linux/module.h>
@@ -205,9 +201,9 @@ static void pcap_isr_work(struct work_struct *work)
 	} while (gpio_get_value(pdata->gpio));
 }
 
-static void pcap_irq_handler(unsigned int irq, struct irq_desc *desc)
+static void pcap_irq_handler(struct irq_desc *desc)
 {
-	struct pcap_chip *pcap = irq_get_handler_data(irq);
+	struct pcap_chip *pcap = irq_desc_get_handler_data(desc);
 
 	desc->irq_data.chip->irq_ack(&desc->irq_data);
 	queue_work(pcap->workqueue, &pcap->isr_work);
@@ -463,11 +459,7 @@ static int ezx_pcap_probe(struct spi_device *spi)
 	for (i = pcap->irq_base; i < (pcap->irq_base + PCAP_NIRQS); i++) {
 		irq_set_chip_and_handler(i, &pcap_irq_chip, handle_simple_irq);
 		irq_set_chip_data(i, pcap);
-#ifdef CONFIG_ARM
-		set_irq_flags(i, IRQF_VALID);
-#else
-		irq_set_noprobe(i);
-#endif
+		irq_clear_status_flags(i, IRQ_NOREQUEST | IRQ_NOPROBE);
 	}
 
 	/* mask/ack all PCAP interrupts */
@@ -476,8 +468,7 @@ static int ezx_pcap_probe(struct spi_device *spi)
 	pcap->msr = PCAP_MASK_ALL_INTERRUPT;
 
 	irq_set_irq_type(spi->irq, IRQ_TYPE_EDGE_RISING);
-	irq_set_handler_data(spi->irq, pcap);
-	irq_set_chained_handler(spi->irq, pcap_irq_handler);
+	irq_set_chained_handler_and_data(spi->irq, pcap_irq_handler, pcap);
 	irq_set_irq_wake(spi->irq, 1);
 
 	/* ADC */
@@ -518,7 +509,6 @@ static struct spi_driver ezxpcap_driver = {
 	.remove = ezx_pcap_remove,
 	.driver = {
 		.name	= "ezx-pcap",
-		.owner	= THIS_MODULE,
 	},
 };
 

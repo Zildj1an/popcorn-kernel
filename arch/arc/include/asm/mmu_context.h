@@ -1,9 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * vineetg: May 2011
  *  -Refactored get_new_mmu_context( ) to only handle live-mm.
@@ -20,11 +17,9 @@
 
 #include <asm/arcregs.h>
 #include <asm/tlb.h>
+#include <linux/sched/mm.h>
 
 #include <asm-generic/mm_hooks.h>
-#ifdef CONFIG_EZNPS_MTM_EXT
-#include <plat/smp.h>
-#endif
 
 /*		ARC700 ASID Management
  *
@@ -49,18 +44,6 @@
 
 #define MM_CTXT_FIRST_CYCLE	(MM_CTXT_ASID_MASK + 1)
 #define MM_CTXT_NO_ASID		0UL
-
-#ifdef CONFIG_EZNPS_MTM_EXT
-#define MM_CTXT_NEW_ASID_MASK	0x0000000f
-#define MM_CTXT_CYCLE_INCREASE	0xf0
-#define MM_CTXT_ASID_START	MM_CTXT_FIRST_CYCLE
-#define asid_cpu_first(cpu)	(MM_CTXT_FIRST_CYCLE + (NPS_CPU_TO_THREAD_NUM(cpu) * 16))
-#else
-#define MM_CTXT_NEW_ASID_MASK	MM_CTXT_ASID_MASK
-#define MM_CTXT_CYCLE_INCREASE	0
-#define MM_CTXT_ASID_START	MM_CTXT_NO_ASID
-#define asid_cpu_first(cpu)	MM_CTXT_FIRST_CYCLE
-#endif
 
 #define asid_mm(mm, cpu)	mm->context.asid[cpu]
 #define hw_pid(mm, cpu)		(asid_mm(mm, cpu) & MM_CTXT_ASID_MASK)
@@ -93,19 +76,17 @@ static inline void get_new_mmu_context(struct mm_struct *mm)
 		goto set_hw;
 
 	/* move to new ASID and handle rollover */
-	if (unlikely(!(++asid_cpu(cpu) & MM_CTXT_NEW_ASID_MASK))) {
+	if (unlikely(!(++asid_cpu(cpu) & MM_CTXT_ASID_MASK))) {
 
 		local_flush_tlb_all();
 
-		asid_cpu(cpu) += MM_CTXT_CYCLE_INCREASE;
-
 		/*
-		 * Above checke for rollover of 8 bit ASID in 32 bit container.
+		 * Above check for rollover of 8 bit ASID in 32 bit container.
 		 * If the container itself wrapped around, set it to a non zero
 		 * "generation" to distinguish from no context
 		 */
-		if (asid_cpu(cpu) <= MM_CTXT_ASID_START)
-			asid_cpu(cpu) = asid_cpu_first(cpu);
+		if (!asid_cpu(cpu))
+			asid_cpu(cpu) = MM_CTXT_FIRST_CYCLE;
 	}
 
 	/* Assign new ASID to tsk */

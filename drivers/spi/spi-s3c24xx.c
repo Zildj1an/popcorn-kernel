@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2006 Ben Dooks
  * Copyright 2006-2009 Simtec Electronics
  *	Ben Dooks <ben@simtec.co.uk>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
 */
 
 #include <linux/spinlock.h>
@@ -198,12 +194,12 @@ static int s3c24xx_spi_setup(struct spi_device *spi)
 	if (ret)
 		return ret;
 
-	spin_lock(&hw->bitbang.lock);
+	mutex_lock(&hw->bitbang.lock);
 	if (!hw->bitbang.busy) {
 		hw->bitbang.chipselect(spi, BITBANG_CS_INACTIVE);
 		/* need to ndelay for 0.5 clocktick ? */
 	}
-	spin_unlock(&hw->bitbang.lock);
+	mutex_unlock(&hw->bitbang.lock);
 
 	return 0;
 }
@@ -501,7 +497,6 @@ static int s3c24xx_spi_probe(struct platform_device *pdev)
 	}
 
 	hw = spi_master_get_devdata(master);
-	memset(hw, 0, sizeof(struct s3c24xx_spi));
 
 	hw->master = master;
 	hw->pdata = pdata = dev_get_platdata(&pdev->dev);

@@ -1,20 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * arch/arm/mach-netx/generic.c
  *
  * Copyright (C) 2005 Sascha Hauer <s.hauer@pengutronix.de>, Pengutronix
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <linux/device.h>
@@ -69,8 +57,7 @@ static struct platform_device *devices[] __initdata = {
 #define DEBUG_IRQ(fmt...)	while (0) {}
 #endif
 
-static void
-netx_hif_demux_handler(unsigned int irq_unused, struct irq_desc *desc)
+static void netx_hif_demux_handler(struct irq_desc *desc)
 {
 	unsigned int irq = NETX_IRQ_HIF_CHAINED(0);
 	unsigned int stat;
@@ -174,7 +161,7 @@ void __init netx_init_irq(void)
 	for (irq = NETX_IRQ_HIF_CHAINED(0); irq <= NETX_IRQ_HIF_LAST; irq++) {
 		irq_set_chip_and_handler(irq, &netx_hif_chip,
 					 handle_level_irq);
-		set_irq_flags(irq, IRQF_VALID);
+		irq_clear_status_flags(irq, IRQ_NOREQUEST);
 	}
 
 	writel(NETX_DPMAS_INT_EN_GLB_EN, NETX_DPMAS_INT_EN);

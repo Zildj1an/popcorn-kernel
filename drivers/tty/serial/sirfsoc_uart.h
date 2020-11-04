@@ -1,9 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Drivers for CSR SiRFprimaII onboard UARTs.
  *
  * Copyright (c) 2011 Cambridge Silicon Radio Limited, a CSR plc group company.
- *
- * Licensed under GPLv2 or later.
  */
 #include <linux/bitops.h>
 #include <linux/log2.h>
@@ -106,7 +105,7 @@ struct sirfsoc_uart_register {
 	enum sirfsoc_uart_type uart_type;
 };
 
-u32 uart_usp_ff_full_mask(struct uart_port *port)
+static u32 uart_usp_ff_full_mask(struct uart_port *port)
 {
 	u32 full_bit;
 
@@ -114,7 +113,7 @@ u32 uart_usp_ff_full_mask(struct uart_port *port)
 	return (1 << full_bit);
 }
 
-u32 uart_usp_ff_empty_mask(struct uart_port *port)
+static u32 uart_usp_ff_empty_mask(struct uart_port *port)
 {
 	u32 empty_bit;
 
@@ -296,6 +295,7 @@ struct sirfsoc_uart_register sirfsoc_uart = {
 #define SIRFUART_DMA_MODE			0x0
 #define SIRFUART_RX_DMA_FLUSH			0x4
 
+#define SIRFUART_CLEAR_RX_ADDR_EN		0x2
 /* Baud Rate Calculation */
 #define SIRF_USP_MIN_SAMPLE_DIV			0x1
 #define SIRF_MIN_SAMPLE_DIV			0xf
@@ -325,6 +325,7 @@ struct sirfsoc_uart_register sirfsoc_uart = {
 #define SIRFSOC_USP_ASYNC_DIV2_MASK		0x3f
 #define SIRFSOC_USP_ASYNC_DIV2_OFFSET		16
 #define SIRFSOC_USP_LOOP_BACK_CTRL		BIT(2)
+#define SIRFSOC_USP_FRADDR_CLR_EN		BIT(1)
 /* USP-UART Common */
 #define SIRFSOC_UART_RX_TIMEOUT(br, to)	(((br) * (((to) + 999) / 1000)) / 1000)
 #define SIRFUART_RECV_TIMEOUT_VALUE(x)	\
@@ -421,7 +422,6 @@ struct sirfsoc_uart_port {
 	struct dma_chan			*tx_dma_chan;
 	dma_addr_t			tx_dma_addr;
 	struct dma_async_tx_descriptor	*tx_dma_desc;
-	unsigned int			rx_io_count;
 	unsigned long			transfer_size;
 	enum sirfsoc_tx_state		tx_dma_state;
 	unsigned int			cts_gpio;
@@ -431,6 +431,8 @@ struct sirfsoc_uart_port {
 	struct hrtimer			hrt;
 	bool				is_hrt_enabled;
 	unsigned long			rx_period_time;
+	unsigned long			rx_last_pos;
+	unsigned long			pio_fetch_cnt;
 };
 
 /* Register Access Control */

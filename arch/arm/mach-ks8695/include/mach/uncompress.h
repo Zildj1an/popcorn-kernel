@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * arch/arm/mach-ks8695/include/mach/uncompress.h
  *
@@ -5,10 +6,6 @@
  * Copyright (C) 2006 Simtec Electronics
  *
  * KS8695 - Kernel uncompressor
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #ifndef __ASM_ARCH_UNCOMPRESS_H
@@ -17,7 +14,7 @@
 #include <linux/io.h>
 #include <mach/regs-uart.h>
 
-static void putc(char c)
+static inline void putc(char c)
 {
 	while (!(__raw_readl((void __iomem*)KS8695_UART_PA + KS8695_URLS) & URLS_URTHRE))
 		barrier();

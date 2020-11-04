@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  The NFC Controller Interface is the communication protocol between an
  *  NFC Controller (NFCC) and a Device Host (DH).
@@ -11,19 +12,6 @@
  *  Acknowledgements:
  *  This file is based on hci_core.h, which was written
  *  by Maxim Krasnyansky.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License version 2
- *  as published by the Free Software Foundation
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, see <http://www.gnu.org/licenses/>.
- *
  */
 
 #ifndef __NCI_CORE_H
@@ -67,7 +55,7 @@ enum nci_state {
 
 struct nci_dev;
 
-struct nci_prop_ops {
+struct nci_driver_ops {
 	__u16 opcode;
 	int (*rsp)(struct nci_dev *dev, struct sk_buff *skb);
 	int (*ntf)(struct nci_dev *dev, struct sk_buff *skb);
@@ -79,6 +67,7 @@ struct nci_ops {
 	int   (*close)(struct nci_dev *ndev);
 	int   (*send)(struct nci_dev *ndev, struct sk_buff *skb);
 	int   (*setup)(struct nci_dev *ndev);
+	int   (*post_setup)(struct nci_dev *ndev);
 	int   (*fw_download)(struct nci_dev *ndev, const char *firmware_name);
 	__u32 (*get_rfprotocol)(struct nci_dev *ndev, __u8 rf_protocol);
 	int   (*discover_se)(struct nci_dev *ndev);
@@ -93,8 +82,11 @@ struct nci_ops {
 	void  (*hci_cmd_received)(struct nci_dev *ndev, u8 pipe, u8 cmd,
 				  struct sk_buff *skb);
 
-	struct nci_prop_ops *prop_ops;
+	struct nci_driver_ops *prop_ops;
 	size_t n_prop_ops;
+
+	struct nci_driver_ops *core_ops;
+	size_t n_core_ops;
 };
 
 #define NCI_MAX_SUPPORTED_RF_INTERFACES		4
@@ -105,7 +97,13 @@ struct nci_ops {
 
 struct nci_conn_info {
 	struct list_head list;
-	__u8	id; /* can be an RF Discovery ID or an NFCEE ID */
+	/* NCI specification 4.4.2 Connection Creation
+	 * The combination of destination type and destination specific
+	 * parameters shall uniquely identify a single destination for the
+	 * Logical Connection
+	 */
+	struct dest_spec_params *dest_params;
+	__u8	dest_type;
 	__u8	conn_id;
 	__u8	max_pkt_payload_len;
 
@@ -124,6 +122,8 @@ struct nci_conn_info {
 
 /* Gates */
 #define NCI_HCI_ADMIN_GATE         0x00
+#define NCI_HCI_LOOPBACK_GATE	   0x04
+#define NCI_HCI_IDENTITY_MGMT_GATE 0x05
 #define NCI_HCI_LINK_MGMT_GATE     0x06
 
 /* Pipes */
@@ -154,7 +154,7 @@ struct nci_conn_info {
  * According to specification 102 622 chapter 4.4 Pipes,
  * the pipe identifier is 7 bits long.
  */
-#define NCI_HCI_MAX_PIPES          127
+#define NCI_HCI_MAX_PIPES          128
 
 struct nci_hci_gate {
 	u8 gate;
@@ -254,7 +254,9 @@ struct nci_dev {
 	__u32			manufact_specific_info;
 
 	/* Save RF Discovery ID or NFCEE ID under conn_create */
-	__u8			cur_id;
+	struct dest_spec_params cur_params;
+	/* Save destination type under conn_create */
+	__u8			cur_dest_type;
 
 	/* stored during nci_data_exchange */
 	struct sk_buff		*rx_data_reassembly;
@@ -277,8 +279,12 @@ int nci_request(struct nci_dev *ndev,
 			    unsigned long opt),
 		unsigned long opt, __u32 timeout);
 int nci_prop_cmd(struct nci_dev *ndev, __u8 oid, size_t len, __u8 *payload);
+int nci_core_cmd(struct nci_dev *ndev, __u16 opcode, size_t len, __u8 *payload);
+int nci_core_reset(struct nci_dev *ndev);
+int nci_core_init(struct nci_dev *ndev);
 
 int nci_recv_frame(struct nci_dev *ndev, struct sk_buff *skb);
+int nci_send_frame(struct nci_dev *ndev, struct sk_buff *skb);
 int nci_set_config(struct nci_dev *ndev, __u8 id, size_t len, __u8 *val);
 
 int nci_nfcee_discover(struct nci_dev *ndev, u8 action);
@@ -288,6 +294,8 @@ int nci_core_conn_create(struct nci_dev *ndev, u8 destination_type,
 			 size_t params_len,
 			 struct core_conn_create_dest_spec_params *params);
 int nci_core_conn_close(struct nci_dev *ndev, u8 conn_id);
+int nci_nfcc_loopback(struct nci_dev *ndev, void *data, size_t data_len,
+		      struct sk_buff **resp);
 
 struct nci_hci_dev *nci_hci_allocate(struct nci_dev *ndev);
 int nci_hci_send_event(struct nci_dev *ndev, u8 gate, u8 event,
@@ -302,6 +310,7 @@ int nci_hci_set_param(struct nci_dev *ndev, u8 gate, u8 idx,
 		      const u8 *param, size_t param_len);
 int nci_hci_get_param(struct nci_dev *ndev, u8 gate, u8 idx,
 		      struct sk_buff **skb);
+int nci_hci_clear_all_pipes(struct nci_dev *ndev);
 int nci_hci_dev_session_init(struct nci_dev *ndev);
 
 static inline struct sk_buff *nci_skb_alloc(struct nci_dev *ndev,
@@ -345,9 +354,14 @@ int nci_prop_rsp_packet(struct nci_dev *ndev, __u16 opcode,
 			struct sk_buff *skb);
 int nci_prop_ntf_packet(struct nci_dev *ndev, __u16 opcode,
 			struct sk_buff *skb);
+int nci_core_rsp_packet(struct nci_dev *ndev, __u16 opcode,
+			struct sk_buff *skb);
+int nci_core_ntf_packet(struct nci_dev *ndev, __u16 opcode,
+			struct sk_buff *skb);
 void nci_rx_data_packet(struct nci_dev *ndev, struct sk_buff *skb);
 int nci_send_cmd(struct nci_dev *ndev, __u16 opcode, __u8 plen, void *payload);
 int nci_send_data(struct nci_dev *ndev, __u8 conn_id, struct sk_buff *skb);
+int nci_conn_max_data_pkt_payload_size(struct nci_dev *ndev, __u8 conn_id);
 void nci_data_exchange_complete(struct nci_dev *ndev, struct sk_buff *skb,
 				__u8 conn_id, int err);
 void nci_hci_data_received_cb(void *context, struct sk_buff *skb, int err);
@@ -362,6 +376,8 @@ void nci_clear_target_list(struct nci_dev *ndev);
 void nci_req_complete(struct nci_dev *ndev, int result);
 struct nci_conn_info *nci_get_conn_info_by_conn_id(struct nci_dev *ndev,
 						   int conn_id);
+int nci_get_conn_info_by_dest_type_params(struct nci_dev *ndev, u8 dest_type,
+					  struct dest_spec_params *params);
 
 /* ----- NCI status code ----- */
 int nci_to_errno(__u8 code);
@@ -377,6 +393,12 @@ struct nci_spi {
 
 	unsigned int		xfer_udelay;	/* microseconds delay between
 						  transactions */
+
+	unsigned int		xfer_speed_hz; /*
+						* SPI clock frequency
+						* 0 => default clock
+						*/
+
 	u8			acknowledge_mode;
 
 	struct completion	req_completion;

@@ -1,18 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2013 Red Hat
  * Author: Rob Clark <robdclark@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include "msm_drv.h"
@@ -33,21 +22,19 @@ struct sg_table *msm_gem_prime_get_sg_table(struct drm_gem_object *obj)
 
 void *msm_gem_prime_vmap(struct drm_gem_object *obj)
 {
-	return msm_gem_vaddr(obj);
+	return msm_gem_get_vaddr(obj);
 }
 
 void msm_gem_prime_vunmap(struct drm_gem_object *obj, void *vaddr)
 {
-	/* TODO msm_gem_vunmap() */
+	msm_gem_put_vaddr(obj);
 }
 
 int msm_gem_prime_mmap(struct drm_gem_object *obj, struct vm_area_struct *vma)
 {
 	int ret;
 
-	mutex_lock(&obj->dev->struct_mutex);
 	ret = drm_gem_mmap_obj(obj, obj->size, vma);
-	mutex_unlock(&obj->dev->struct_mutex);
 	if (ret < 0)
 		return ret;
 
@@ -57,7 +44,7 @@ int msm_gem_prime_mmap(struct drm_gem_object *obj, struct vm_area_struct *vma)
 struct drm_gem_object *msm_gem_prime_import_sg_table(struct drm_device *dev,
 		struct dma_buf_attachment *attach, struct sg_table *sg)
 {
-	return msm_gem_import(dev, attach->dmabuf->size, sg);
+	return msm_gem_import(dev, attach->dmabuf, sg);
 }
 
 int msm_gem_prime_pin(struct drm_gem_object *obj)

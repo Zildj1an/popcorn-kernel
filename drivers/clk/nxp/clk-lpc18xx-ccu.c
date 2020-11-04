@@ -10,6 +10,7 @@
 
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
+#include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
@@ -27,8 +28,6 @@
 /* CCU branch feature bits */
 #define CCU_BRANCH_IS_BUS	BIT(0)
 #define CCU_BRANCH_HAVE_DIV2	BIT(1)
-
-#define to_clk_gate(_hw) container_of(_hw, struct clk_gate, hw)
 
 struct lpc18xx_branch_clk_data {
 	const char **name;
@@ -144,7 +143,7 @@ static int lpc18xx_ccu_gate_endisable(struct clk_hw *hw, bool enable)
 	 * Divider field is write only, so divider stat field must
 	 * be read so divider field can be set accordingly.
 	 */
-	val = clk_readl(gate->reg);
+	val = readl(gate->reg);
 	if (val & LPC18XX_CCU_DIVSTAT)
 		val |= LPC18XX_CCU_DIV;
 
@@ -157,12 +156,12 @@ static int lpc18xx_ccu_gate_endisable(struct clk_hw *hw, bool enable)
 		 * and the next write should clear the RUN bit.
 		 */
 		val |= LPC18XX_CCU_AUTO;
-		clk_writel(val, gate->reg);
+		writel(val, gate->reg);
 
 		val &= ~LPC18XX_CCU_RUN;
 	}
 
-	clk_writel(val, gate->reg);
+	writel(val, gate->reg);
 
 	return 0;
 }
@@ -179,9 +178,22 @@ static void lpc18xx_ccu_gate_disable(struct clk_hw *hw)
 
 static int lpc18xx_ccu_gate_is_enabled(struct clk_hw *hw)
 {
-	struct clk_gate *gate = to_clk_gate(hw);
+	const struct clk_hw *parent;
 
-	return clk_readl(gate->reg) & LPC18XX_CCU_RUN;
+	/*
+	 * The branch clock registers are only accessible
+	 * if the base (parent) clock is enabled. Register
+	 * access with a disabled base clock will hang the
+	 * system.
+	 */
+	parent = clk_hw_get_parent(hw);
+	if (!parent)
+		return 0;
+
+	if (!clk_hw_is_enabled(parent))
+		return 0;
+
+	return clk_gate_ops.is_enabled(hw);
 }
 
 static const struct clk_ops lpc18xx_ccu_gate_ops = {
@@ -209,7 +221,7 @@ static void lpc18xx_ccu_register_branch_gate_div(struct lpc18xx_clk_branch *bran
 		div->width = 1;
 
 		div_hw = &div->hw;
-		div_ops = &clk_divider_ops;
+		div_ops = &clk_divider_ro_ops;
 	}
 
 	branch->gate.reg = branch->offset + reg_base;
@@ -266,12 +278,15 @@ static void __init lpc18xx_ccu_init(struct device_node *np)
 	}
 
 	clk_data = kzalloc(sizeof(*clk_data), GFP_KERNEL);
-	if (!clk_data)
+	if (!clk_data) {
+		iounmap(reg_base);
 		return;
+	}
 
 	clk_data->num = of_property_count_strings(np, "clock-names");
 	clk_data->name = kcalloc(clk_data->num, sizeof(char *), GFP_KERNEL);
 	if (!clk_data->name) {
+		iounmap(reg_base);
 		kfree(clk_data);
 		return;
 	}

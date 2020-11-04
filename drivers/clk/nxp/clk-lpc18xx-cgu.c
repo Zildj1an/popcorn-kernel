@@ -8,9 +8,9 @@
  * warranty of any kind, whether express or implied.
  */
 
-#include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/delay.h>
+#include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
@@ -353,9 +353,9 @@ static unsigned long lpc18xx_pll0_recalc_rate(struct clk_hw *hw,
 	struct lpc18xx_pll *pll = to_lpc_pll(hw);
 	u32 ctrl, mdiv, msel, npdiv;
 
-	ctrl = clk_readl(pll->reg + LPC18XX_CGU_PLL0USB_CTRL);
-	mdiv = clk_readl(pll->reg + LPC18XX_CGU_PLL0USB_MDIV);
-	npdiv = clk_readl(pll->reg + LPC18XX_CGU_PLL0USB_NP_DIV);
+	ctrl = readl(pll->reg + LPC18XX_CGU_PLL0USB_CTRL);
+	mdiv = readl(pll->reg + LPC18XX_CGU_PLL0USB_MDIV);
+	npdiv = readl(pll->reg + LPC18XX_CGU_PLL0USB_NP_DIV);
 
 	if (ctrl & LPC18XX_PLL0_CTRL_BYPASS)
 		return parent_rate;
@@ -416,25 +416,25 @@ static int lpc18xx_pll0_set_rate(struct clk_hw *hw, unsigned long rate,
 	m |= lpc18xx_pll0_msel2seli(m) << LPC18XX_PLL0_MDIV_SELI_SHIFT;
 
 	/* Power down PLL, disable clk output and dividers */
-	ctrl = clk_readl(pll->reg + LPC18XX_CGU_PLL0USB_CTRL);
+	ctrl = readl(pll->reg + LPC18XX_CGU_PLL0USB_CTRL);
 	ctrl |= LPC18XX_PLL0_CTRL_PD;
 	ctrl &= ~(LPC18XX_PLL0_CTRL_BYPASS | LPC18XX_PLL0_CTRL_DIRECTI |
 		  LPC18XX_PLL0_CTRL_DIRECTO | LPC18XX_PLL0_CTRL_CLKEN);
-	clk_writel(ctrl, pll->reg + LPC18XX_CGU_PLL0USB_CTRL);
+	writel(ctrl, pll->reg + LPC18XX_CGU_PLL0USB_CTRL);
 
 	/* Configure new PLL settings */
-	clk_writel(m, pll->reg + LPC18XX_CGU_PLL0USB_MDIV);
-	clk_writel(LPC18XX_PLL0_NP_DIVS_1, pll->reg + LPC18XX_CGU_PLL0USB_NP_DIV);
+	writel(m, pll->reg + LPC18XX_CGU_PLL0USB_MDIV);
+	writel(LPC18XX_PLL0_NP_DIVS_1, pll->reg + LPC18XX_CGU_PLL0USB_NP_DIV);
 
 	/* Power up PLL and wait for lock */
 	ctrl &= ~LPC18XX_PLL0_CTRL_PD;
-	clk_writel(ctrl, pll->reg + LPC18XX_CGU_PLL0USB_CTRL);
+	writel(ctrl, pll->reg + LPC18XX_CGU_PLL0USB_CTRL);
 	do {
 		udelay(10);
-		stat = clk_readl(pll->reg + LPC18XX_CGU_PLL0USB_STAT);
+		stat = readl(pll->reg + LPC18XX_CGU_PLL0USB_STAT);
 		if (stat & LPC18XX_PLL0_STAT_LOCK) {
 			ctrl |= LPC18XX_PLL0_CTRL_CLKEN;
-			clk_writel(ctrl, pll->reg + LPC18XX_CGU_PLL0USB_CTRL);
+			writel(ctrl, pll->reg + LPC18XX_CGU_PLL0USB_CTRL);
 
 			return 0;
 		}
@@ -459,8 +459,8 @@ static unsigned long lpc18xx_pll1_recalc_rate(struct clk_hw *hw,
 	bool direct, fbsel;
 	u32 stat, ctrl;
 
-	stat = clk_readl(pll->reg + LPC18XX_CGU_PLL1_STAT);
-	ctrl = clk_readl(pll->reg + LPC18XX_CGU_PLL1_CTRL);
+	stat = readl(pll->reg + LPC18XX_CGU_PLL1_STAT);
+	ctrl = readl(pll->reg + LPC18XX_CGU_PLL1_CTRL);
 
 	direct = (ctrl & LPC18XX_PLL1_CTRL_DIRECT) ? true : false;
 	fbsel = (ctrl & LPC18XX_PLL1_CTRL_FBSEL) ? true : false;
@@ -479,6 +479,42 @@ static unsigned long lpc18xx_pll1_recalc_rate(struct clk_hw *hw,
 
 static const struct clk_ops lpc18xx_pll1_ops = {
 	.recalc_rate = lpc18xx_pll1_recalc_rate,
+};
+
+static int lpc18xx_cgu_gate_enable(struct clk_hw *hw)
+{
+	return clk_gate_ops.enable(hw);
+}
+
+static void lpc18xx_cgu_gate_disable(struct clk_hw *hw)
+{
+	clk_gate_ops.disable(hw);
+}
+
+static int lpc18xx_cgu_gate_is_enabled(struct clk_hw *hw)
+{
+	const struct clk_hw *parent;
+
+	/*
+	 * The consumer of base clocks needs know if the
+	 * base clock is really enabled before it can be
+	 * accessed. It is therefore necessary to verify
+	 * this all the way up.
+	 */
+	parent = clk_hw_get_parent(hw);
+	if (!parent)
+		return 0;
+
+	if (!clk_hw_is_enabled(parent))
+		return 0;
+
+	return clk_gate_ops.is_enabled(hw);
+}
+
+static const struct clk_ops lpc18xx_gate_ops = {
+	.enable = lpc18xx_cgu_gate_enable,
+	.disable = lpc18xx_cgu_gate_disable,
+	.is_enabled = lpc18xx_cgu_gate_is_enabled,
 };
 
 static struct lpc18xx_cgu_pll_clk lpc18xx_cgu_src_clk_plls[] = {
@@ -511,7 +547,7 @@ static struct clk *lpc18xx_cgu_register_div(struct lpc18xx_cgu_src_clk_div *clk,
 	return clk_register_composite(NULL, name, parents, clk->n_parents,
 				      &clk->mux.hw, &clk_mux_ops,
 				      &clk->div.hw, &clk_divider_ops,
-				      &clk->gate.hw, &clk_gate_ops, 0);
+				      &clk->gate.hw, &lpc18xx_gate_ops, 0);
 }
 
 
@@ -539,7 +575,7 @@ static struct clk *lpc18xx_register_base_clk(struct lpc18xx_cgu_base_clk *clk,
 	return clk_register_composite(NULL, name, parents, clk->n_parents,
 				      &clk->mux.hw, &clk_mux_ops,
 				      NULL,  NULL,
-				      &clk->gate.hw, &clk_gate_ops, 0);
+				      &clk->gate.hw, &lpc18xx_gate_ops, 0);
 }
 
 
@@ -558,7 +594,7 @@ static struct clk *lpc18xx_cgu_register_pll(struct lpc18xx_cgu_pll_clk *clk,
 	return clk_register_composite(NULL, name, parents, clk->n_parents,
 				      &clk->mux.hw, &clk_mux_ops,
 				      &clk->pll.hw, clk->pll_ops,
-				      &clk->gate.hw, &clk_gate_ops, 0);
+				      &clk->gate.hw, &lpc18xx_gate_ops, 0);
 }
 
 static void __init lpc18xx_cgu_register_source_clks(struct device_node *np,
@@ -570,7 +606,7 @@ static void __init lpc18xx_cgu_register_source_clks(struct device_node *np,
 
 	/* Register the internal 12 MHz RC oscillator (IRC) */
 	clk = clk_register_fixed_rate(NULL, clk_src_names[CLK_SRC_IRC],
-				      NULL, CLK_IS_ROOT, 12000000);
+				      NULL, 0, 12000000);
 	if (IS_ERR(clk))
 		pr_warn("%s: failed to register irc clk\n", __func__);
 
