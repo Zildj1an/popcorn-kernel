@@ -1,8 +1,15 @@
 Popcorn Linux for Distributed Thread Execution
 ----------------------------------------------
 
-* Allow applications to run on multiple machines in a distributed and transparent way.
+## Cross compilation for ARM64
 
-* Visit http://popcornlinux.org and https://github.com/ssrg-vt/popcorn-kernel/wiki for more information or e-mail Sang-Hoon Kim (sanghoon@vt.edu).
+Change -j to use twice the number of cores.
 
-* Copyright Systems Software Research Group at Virginia Tech, 2017-2018.
+```bash
+$ cat config_blue_popcorn > .config 
+$ make -j16 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- distclean 
+$ make -j16 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- menuconfig # Make sure Popcorn is enabled
+$ make -j16 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-  
+```
+
+* Visit http://popcornlinux.org and https://github.com/ssrg-vt/popcorn-kernel/wiki for more information including copyright.
