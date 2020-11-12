@@ -1,0 +1,10 @@
+./arch/arm64/mm/fault.c.rej
+./arch/riscv/include/asm/tlbflush.h.rej
+./arch/x86/entry/syscalls/syscall_64.tbl.rej
+./fs/exec.c.rej
+./include/linux/mm_types.h.rej
+./include/uapi/asm-generic/unistd.h.rej
+./kernel/sched/core.c.rej
+./mm/mmap.c.rej
+./mm/mprotect.c.rej
+./Makefile.rej
